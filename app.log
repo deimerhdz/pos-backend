@@ -1,0 +1,97 @@
+2026-06-01 18:43:32,781 - INFO - uvicorn.error - Started server process [29092]
+2026-06-01 18:43:32,786 - INFO - uvicorn.error - Waiting for application startup.
+2026-06-01 18:43:32,788 - INFO - uvicorn.error - Application startup complete.
+2026-06-01 18:43:32,809 - INFO - uvicorn.error - Started server process [31160]
+2026-06-01 18:43:32,812 - INFO - uvicorn.error - Waiting for application startup.
+2026-06-01 18:43:32,813 - INFO - uvicorn.error - Application startup complete.
+2026-06-01 18:43:47,248 - INFO - uvicorn.error - Shutting down
+2026-06-01 18:43:47,247 - INFO - uvicorn.error - Shutting down
+2026-06-01 18:43:47,352 - INFO - uvicorn.error - Waiting for application shutdown.
+2026-06-01 18:43:47,354 - INFO - uvicorn.error - Application shutdown complete.
+2026-06-01 18:43:47,356 - INFO - uvicorn.error - Finished server process [29092]
+2026-06-01 18:43:47,356 - INFO - uvicorn.error - Finished server process [31160]
+2026-06-01 18:43:49,197 - INFO - root - Inicializando la base de datos...
+2026-06-01 18:43:49,198 - INFO - root - Inicializando la base de datos...
+2026-06-01 18:43:49,203 - INFO - uvicorn.error - Started server process [18056]
+2026-06-01 18:43:49,207 - INFO - uvicorn.error - Waiting for application startup.
+2026-06-01 18:43:49,207 - INFO - uvicorn.error - Waiting for application startup.
+2026-06-01 18:43:49,208 - INFO - uvicorn.error - Application startup complete.
+2026-06-01 18:43:49,208 - INFO - uvicorn.error - Application startup complete.
+2026-06-01 18:44:05,778 - INFO - uvicorn.error - Shutting down
+2026-06-01 18:44:05,887 - INFO - uvicorn.error - Waiting for application shutdown.
+2026-06-01 18:44:05,890 - INFO - uvicorn.error - Application shutdown complete.
+2026-06-01 18:44:05,892 - INFO - uvicorn.error - Finished server process [18056]
+2026-06-01 18:44:09,121 - INFO - root - Inicializando la base de datos...
+2026-06-01 18:44:09,153 - INFO - uvicorn.error - Will watch for changes in these directories: ['C:\\Users\\PC\\Documents\\pos']
+2026-06-01 18:44:09,155 - INFO - uvicorn.error - Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+2026-06-01 18:44:09,158 - INFO - uvicorn.error - Started reloader process [5544] using WatchFiles
+2026-06-01 18:44:09,587 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:09,950 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:10,083 - INFO - root - Inicializando la base de datos...
+2026-06-01 18:44:10,092 - INFO - uvicorn.error - Started server process [31452]
+2026-06-01 18:44:10,096 - INFO - uvicorn.error - Waiting for application startup.
+2026-06-01 18:44:10,097 - INFO - uvicorn.error - Application startup complete.
+2026-06-01 18:44:10,355 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:10,768 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:11,170 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:11,583 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:11,998 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:12,406 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:12,816 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:13,177 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:13,582 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:13,986 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:14,401 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:14,813 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:15,216 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:15,580 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:15,984 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:16,392 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:16,800 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:17,167 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:17,580 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:17,984 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:18,400 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:18,805 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:19,218 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:19,583 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:44:19,872 - INFO - uvicorn.error - Shutting down
+2026-06-01 18:44:19,983 - INFO - uvicorn.error - Waiting for application shutdown.
+2026-06-01 18:44:19,986 - INFO - uvicorn.error - Application shutdown complete.
+2026-06-01 18:44:19,987 - INFO - uvicorn.error - Finished server process [31452]
+2026-06-01 18:44:20,349 - INFO - uvicorn.error - Stopping reloader process [5544]
+2026-06-01 18:44:58,809 - INFO - uvicorn.error - Shutting down
+2026-06-01 18:44:58,919 - INFO - uvicorn.error - Waiting for application shutdown.
+2026-06-01 18:44:58,922 - INFO - uvicorn.error - Application shutdown complete.
+2026-06-01 18:44:58,924 - INFO - uvicorn.error - Finished server process [22320]
+2026-06-01 18:45:03,546 - INFO - root - Inicializando la base de datos...
+2026-06-01 18:45:03,554 - INFO - uvicorn.error - Started server process [12160]
+2026-06-01 18:45:03,558 - INFO - uvicorn.error - Waiting for application startup.
+2026-06-01 18:45:03,559 - INFO - uvicorn.error - Application startup complete.
+2026-06-01 18:45:05,597 - INFO - root - Inicializando la base de datos...
+2026-06-01 18:45:05,623 - INFO - uvicorn.error - Will watch for changes in these directories: ['C:\\Users\\PC\\Documents\\pos']
+2026-06-01 18:45:05,625 - INFO - uvicorn.error - Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+2026-06-01 18:45:05,626 - INFO - uvicorn.error - Started reloader process [27920] using WatchFiles
+2026-06-01 18:45:06,020 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:45:06,435 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:45:06,574 - INFO - root - Inicializando la base de datos...
+2026-06-01 18:45:06,580 - INFO - uvicorn.error - Started server process [27040]
+2026-06-01 18:45:06,583 - INFO - uvicorn.error - Waiting for application startup.
+2026-06-01 18:45:06,586 - INFO - uvicorn.error - Application startup complete.
+2026-06-01 18:45:06,853 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:45:07,269 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:45:07,685 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:45:08,037 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:45:08,455 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:45:08,867 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:45:09,285 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:45:09,701 - INFO - watchfiles.main - 1 change detected
+2026-06-01 18:45:09,915 - INFO - uvicorn.error - Shutting down
+2026-06-01 18:45:10,019 - INFO - uvicorn.error - Waiting for application shutdown.
+2026-06-01 18:45:10,021 - INFO - uvicorn.error - Application shutdown complete.
+2026-06-01 18:45:10,022 - INFO - uvicorn.error - Finished server process [27040]
+2026-06-01 18:45:10,361 - INFO - uvicorn.error - Stopping reloader process [27920]
+2026-06-01 18:46:47,702 - INFO - uvicorn.error - Shutting down
+2026-06-01 18:46:47,818 - INFO - uvicorn.error - Waiting for application shutdown.
+2026-06-01 18:46:47,820 - INFO - uvicorn.error - Application shutdown complete.
+2026-06-01 18:46:47,822 - INFO - uvicorn.error - Finished server process [12160]
