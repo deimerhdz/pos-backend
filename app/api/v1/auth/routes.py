@@ -7,10 +7,11 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.exc import SQLAlchemyError, OperationalError
 from datetime import datetime
 from sqlalchemy.orm import Session
-from app.core.db import with_db, get_db
+from app.core.db import with_db
 from app.core.models import User, Tenant
 from app.core.utils import verify_password, create_access_token, generate_passwd_hash
-from app.core.dependencies import RefreshTokenBearer,AccessTokenBearer, get_current_user
+from app.core.dependencies import RefreshTokenBearer,AccessTokenBearer, get_authenticated_user
+from app.core.dependencies import get_shared_db
 from app.core.exceptions import InvalidToken
 from app.api.v1.auth.schemas import LoginRequest, ChangePasswordRequest
 from app.core.redis import add_jti_to_blocklist
@@ -90,8 +91,8 @@ async def login(body: LoginRequest, req: Request):
 @auth_router.post("/change-password")
 def change_password(
     body: ChangePasswordRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    user: User = Depends(get_authenticated_user),
+    db: Session = Depends(get_shared_db),
 ):
     if not verify_password(body.current_password, user.password_hash):
         raise HTTPException(

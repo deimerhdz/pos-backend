@@ -1,4 +1,5 @@
 import logging
+import uuid
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -113,6 +114,40 @@ def get_shared_db():
     (super admin), donde viven users/tenants/roles."""
     with with_db(None) as db:
         yield db
+
+
+def get_authenticated_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: Session = Depends(get_shared_db),
+) -> User:
+    """Usuario autenticado por JWT contra el schema shared. Vale para super admin
+    (tenant_id NULL) y usuarios de tenant, sin necesitar x-tenant-host."""
+    token_data = decode_token(credentials.credentials)
+    if not token_data or token_data.get("refresh"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+
+    uid = (token_data.get("user") or {}).get("uid")
+    try:
+        user_id = uuid.UUID(str(uid))
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+        )
+
+    user = db.execute(
+        select(User).where(User.id == user_id, User.active == True)
+    ).scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+        )
+
+    return user
 
 
 def get_current_super_admin(
