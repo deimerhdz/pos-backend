@@ -39,6 +39,14 @@ class UserCreate(BaseModel):
     )
 
 
+class UserRoleUpdate(BaseModel):
+    role: RoleName = Field(
+        ...,
+        description="Nuevo rol del usuario: ADMIN o CASHIER.",
+        examples=["ADMIN"],
+    )
+
+
 class UserResponse(BaseModel):
     id: UUID = Field(..., description="Identificador único del usuario.")
     name: str = Field(..., description="Nombre del usuario.")
