@@ -47,6 +47,14 @@ class UserRoleUpdate(BaseModel):
     )
 
 
+class UserStatusUpdate(BaseModel):
+    active: bool = Field(
+        ...,
+        description="Nuevo estado del usuario: true=activo, false=inactivo.",
+        examples=[False],
+    )
+
+
 class UserResponse(BaseModel):
     id: UUID = Field(..., description="Identificador único del usuario.")
     name: str = Field(..., description="Nombre del usuario.")

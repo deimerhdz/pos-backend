@@ -9,7 +9,7 @@ from app.core.dependencies import require_tenant_admin
 from app.core.pagination import Page, paginate
 from app.core.models import User, Role
 from app.core.utils import generate_passwd_hash
-from app.api.v1.users.schemas import UserCreate, UserResponse, UserRoleUpdate
+from app.api.v1.users.schemas import UserCreate, UserResponse, UserRoleUpdate, UserStatusUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -180,6 +180,51 @@ def update_user_role(
         )
 
     user.role_id = role.id
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.patch(
+    "/{user_id}/status",
+    response_model=UserResponse,
+    summary="Activar o desactivar un usuario del tenant",
+    description=(
+        "Cambia el estado activo/inactivo de un usuario del tenant del admin autenticado. "
+        "El admin no puede desactivar su propia cuenta."
+    ),
+    response_description="El usuario con el estado actualizado.",
+    responses={
+        401: {"description": "No autenticado o token inválido."},
+        403: {"description": "No es admin del tenant, o intenta desactivarse a sí mismo."},
+        404: {"description": "Usuario no encontrado en el tenant."},
+        422: {"description": "Datos de entrada inválidos."},
+    },
+)
+def update_user_status(
+    user_id: UUID,
+    body: UserStatusUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_tenant_admin),
+):
+    if user_id == admin.id and not body.active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot deactivate your own account",
+        )
+
+    user = db.execute(
+        select(User)
+        .options(selectinload(User.role), selectinload(User.tenant))
+        .where(User.id == user_id, User.tenant_id == admin.tenant_id)
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    user.active = body.active
     db.commit()
     db.refresh(user)
     return user
