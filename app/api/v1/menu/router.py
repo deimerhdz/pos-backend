@@ -23,6 +23,7 @@ from app.models.modifier_group import ModifierGroup
 from app.models.product_modifier_group import ProductModifierGroup
 from app.models.order import Order
 from app.api.v1.menu.dependencies import get_menu_session
+from app.api.v1.menu.availability import product_is_available, variant_is_available
 from app.api.v1.menu.schemas import (
     MenuSessionCreate,
     MenuSessionResponse,
@@ -161,7 +162,15 @@ def list_menu_products(
     )
     if category_id is not None:
         stmt = stmt.where(Product.category_id == category_id)
-    return paginate(db, stmt, page, size)
+    page_data = paginate(db, stmt, page, size)
+    # Fase 3: solo se muestran productos con disponibilidad real (stock vigente − reservas).
+    kept = []
+    for p in page_data["items"]:
+        p.is_available = product_is_available(db, p)
+        if p.is_available:
+            kept.append(p)
+    page_data["items"] = kept
+    return page_data
 
 
 @router.get(
@@ -192,6 +201,8 @@ def menu_product_variants(
         .where(Variant.product_id == product_id, Variant.active == True)  # noqa: E712
         .order_by(Variant.sku)
     ).scalars().all()
+    # Fase 3: solo variantes con disponibilidad real.
+    variants = [v for v in variants if variant_is_available(db, v)]
 
     groups = db.execute(
         select(ModifierGroup)

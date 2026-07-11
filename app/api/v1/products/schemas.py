@@ -47,8 +47,6 @@ class ProductUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = Field(None, max_length=255)
     type: ProductKind | None = None
-    price: Decimal | None = Field(None, ge=0, max_digits=10, decimal_places=2)
-    cost: Decimal | None = Field(None, ge=0, max_digits=10, decimal_places=2)
     is_menu: bool | None = None
     image_url: str | None = Field(None, max_length=500)
     category_id: UUID | None = None
@@ -61,8 +59,6 @@ class ProductResponse(BaseModel):
     name: str = Field(..., description="Nombre del producto.", examples=["Helado en copa"])
     description: str | None = Field(None, description="Descripción del producto.")
     type: ProductKind = Field(..., description="SIMPLE o CONFIGURABLE.", examples=["CONFIGURABLE"])
-    price: Decimal = Field(..., description="Precio base.", examples=["8000.00"])
-    cost: Decimal = Field(..., description="Costo de referencia.", examples=["3000.00"])
     is_menu: bool = Field(..., description="Se muestra en el menú.", examples=[True])
     image_url: str | None = Field(None, description="URL de la imagen.")
     category_id: UUID = Field(..., description="Categoría del producto.")

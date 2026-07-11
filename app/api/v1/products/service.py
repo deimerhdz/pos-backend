@@ -47,8 +47,6 @@ class ProductService:
                 name=data.name,
                 description=data.description,
                 type=data.type.value,
-                price=data.price,
-                cost=data.cost,
                 is_menu=data.is_menu,
                 image_url=data.image_url,
                 category_id=data.category_id,
@@ -56,9 +54,10 @@ class ProductService:
             )
             db.add(product)
             db.flush()
-            # Todo vendible es una variante; SIMPLE recibe su variante default.
+            # Todo vendible es una variante; SIMPLE recibe su variante default con
+            # el precio/costo de entrada (Fase 5: price/cost viven en la variante).
             if product.type == "SIMPLE":
-                ensure_default_variant(db, product)
+                ensure_default_variant(db, product, price=data.price, cost=data.cost)
             db.commit()
         except HTTPException:
             db.rollback()
@@ -79,10 +78,6 @@ class ProductService:
             product.description = data.description
         if data.type is not None:
             product.type = data.type.value
-        if data.price is not None:
-            product.price = data.price
-        if data.cost is not None:
-            product.cost = data.cost
         if data.is_menu is not None:
             product.is_menu = data.is_menu
         if data.image_url is not None:

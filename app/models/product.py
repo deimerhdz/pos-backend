@@ -22,9 +22,7 @@ class Product(UUIDPrimaryKeyMixin,TimestampMixin,Base):
     # Catálogo: SIMPLE (se vende tal cual) o CONFIGURABLE (por variantes).
     type: Mapped[str] = mapped_column(String(50), nullable=False, server_default="SIMPLE")
 
-    price: Mapped[Decimal] = mapped_column(Numeric(10, 2),nullable=False)
-
-    cost: Mapped[Decimal] = mapped_column(Numeric(10, 2),nullable=False)
+    # Fase 5: price/cost viven en la variante (fuente de verdad única).
 
     is_menu: Mapped[bool] = mapped_column(Boolean, default=False)
 

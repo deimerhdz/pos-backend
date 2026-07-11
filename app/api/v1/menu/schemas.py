@@ -37,9 +37,9 @@ class MenuProductResponse(BaseModel):
     id: UUID = Field(..., description="Identificador único del producto.")
     name: str = Field(..., description="Nombre del producto.", examples=["Helado en copa"])
     description: str | None = Field(None, description="Descripción del producto.")
-    price: Decimal = Field(..., description="Precio base (referencial; el precio real es por variante).", examples=["8000.00"])
     type: str = Field(..., description="SIMPLE o CONFIGURABLE.", examples=["CONFIGURABLE"])
     category_id: UUID = Field(..., description="Categoría a la que pertenece el producto.")
+    is_available: bool = Field(True, description="Disponibilidad real calculada (stock vigente − reservas).")
 
     model_config = ConfigDict(from_attributes=True)
 

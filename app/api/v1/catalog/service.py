@@ -28,9 +28,10 @@ def _unique_sku(db: Session, base: str) -> str:
     return sku
 
 
-def ensure_default_variant(db: Session, product: Product) -> Variant | None:
+def ensure_default_variant(db: Session, product: Product, *, price=0, cost=0) -> Variant | None:
     """Garantiza que un producto tenga una variante default (para poder venderse).
-    Usada por productos SIMPLE, que no pasan por la generación cartesiana."""
+    Usada por productos SIMPLE, que no pasan por la generación cartesiana. El precio/costo
+    viven en la variante (Fase 5)."""
     existing = db.execute(
         select(Variant).where(Variant.product_id == product.id).limit(1)
     ).scalar_one_or_none()
@@ -39,7 +40,8 @@ def ensure_default_variant(db: Session, product: Product) -> Variant | None:
     variant = Variant(
         product_id=product.id,
         sku=_unique_sku(db, f"{_slug(product.name)}-DEF"),
-        price=product.price if product.price is not None else 0,
+        price=price,
+        cost=cost,
         is_default=True,
         active=False,  # Fase 1: no vendible hasta tener receta (reventa 1:1 para SIMPLE).
     )
@@ -84,7 +86,7 @@ def generate_variants(db: Session, product: Product) -> list[Variant]:
     existing_keys = {frozenset(vv.attribute_value_id for vv in v.values) for v in existing}
 
     prod_slug = _slug(product.name)
-    initial_price = product.price if product.price is not None else 0
+    # Fase 5: las variantes generadas nacen con precio 0; el admin lo ajusta por variante.
     created: list[Variant] = []
 
     for combo in itertools.product(*value_lists):
@@ -95,7 +97,8 @@ def generate_variants(db: Session, product: Product) -> list[Variant]:
         variant = Variant(
             product_id=product.id,
             sku=_unique_sku(db, base_sku),
-            price=initial_price,
+            price=0,
+            cost=0,
             active=False,  # Fase 1: nace inactiva; se activa al tener receta.
         )
         db.add(variant)

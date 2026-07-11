@@ -23,6 +23,10 @@ class Variant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Numeric(10, 2), nullable=False, default=0, server_default="0"
     )
 
+    cost: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=0, server_default="0"
+    )
+
     is_default: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False
     )
