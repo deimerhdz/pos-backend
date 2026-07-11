@@ -1,6 +1,6 @@
-"""Service de órdenes: convierte el carrito en orden, descuenta inventario y
-gestiona el estado. Es dueño de la transacción (commit/rollback), igual que
-ProductService.
+"""Service de órdenes: convierte el carrito (variante + modificadores) en orden,
+calcula impuestos y consume insumos por receta (motor FEFO, Fase 2). Es dueño de
+la transacción (commit/rollback).
 """
 import logging
 from decimal import Decimal
@@ -12,11 +12,14 @@ from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql import Select
 
 from app.models.cart_item import CartItem
+from app.models.cart_item_modifier import CartItemModifier
 from app.models.order import Order, OrderItem
+from app.models.order_item_modifier import OrderItemModifier
 from app.models.product import Product
-from app.models.inventory import Inventory
-from app.models.inventory_movement import InventoryMovement
 from app.models.table_session import TableSession
+from app.api.v1.supplies.consumption import consume_sale
+from app.api.v1.supplies.schemas import ConsumeLine
+from app.api.v1.orders.taxes import compute_line_tax
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +35,14 @@ class OrderService:
         else:  # table
             cart_stmt = select(CartItem).where(CartItem.table_id == table_id)
 
-        cart_items = (
-            db.execute(cart_stmt.options(selectinload(CartItem.product))).scalars().all()
-        )
-        if not cart_items:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="El carrito está vacío",
+        cart_items = db.execute(
+            cart_stmt.options(
+                selectinload(CartItem.variant),
+                selectinload(CartItem.modifiers).selectinload(CartItemModifier.modifier),
             )
+        ).scalars().all()
+        if not cart_items:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "El carrito está vacío")
 
         try:
             order = Order(
@@ -48,38 +51,67 @@ class OrderService:
                 scope=scope,
                 customer_name=session.customer_name if scope == "individual" else None,
                 status="pending",
+                subtotal=Decimal("0.00"),
+                tax_total=Decimal("0.00"),
                 total=Decimal("0.00"),
             )
             db.add(order)
-            db.flush()  # asigna order.id
+            db.flush()
 
-            total = Decimal("0.00")
+            subtotal_sum = Decimal("0.00")
+            tax_sum = Decimal("0.00")
+            added_sum = Decimal("0.00")
+            consume_lines: list[ConsumeLine] = []
+
             for ci in cart_items:
-                product = ci.product or db.get(Product, ci.product_id)
-                if product is None:
+                variant = ci.variant
+                if variant is None:
                     raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Producto del carrito no encontrado",
+                        status.HTTP_400_BAD_REQUEST,
+                        "Item de carrito sin variante (carrito inválido).",
                     )
-                unit_price = product.price
-                subtotal = unit_price * ci.quantity
-                total += subtotal
+                product = db.get(Product, variant.product_id)
+                modifiers = [m.modifier for m in ci.modifiers if m.modifier is not None]
 
-                db.add(
-                    OrderItem(
-                        order_id=order.id,
-                        product_id=ci.product_id,
-                        table_session_id=ci.table_session_id,
-                        product_name=product.name,
-                        quantity=ci.quantity,
-                        unit_price=unit_price,
-                        subtotal=subtotal,
-                    )
+                unit_price = variant.price + sum((m.price for m in modifiers), Decimal("0.00"))
+                line_subtotal = unit_price * ci.quantity
+                subtotal_sum += line_subtotal
+
+                tax_amount, added = compute_line_tax(
+                    db, product_id=variant.product_id, variant_id=variant.id, base=line_subtotal
                 )
+                tax_sum += tax_amount
+                added_sum += added
 
-                self._deduct_stock(db, ci.product_id, ci.quantity, order.id)
+                order_item = OrderItem(
+                    order_id=order.id,
+                    variant_id=variant.id,
+                    product_id=variant.product_id,
+                    table_session_id=ci.table_session_id,
+                    product_name=product.name if product else variant.sku,
+                    quantity=ci.quantity,
+                    unit_price=unit_price,
+                    subtotal=line_subtotal,
+                    tax_amount=tax_amount,
+                )
+                db.add(order_item)
+                db.flush()
 
-            order.total = total
+                for m in modifiers:
+                    db.add(OrderItemModifier(
+                        order_item_id=order_item.id, modifier_id=m.id, name=m.name, price=m.price,
+                    ))
+
+                consume_lines.append(ConsumeLine(variant_id=variant.id, quantity=ci.quantity))
+                for m in modifiers:
+                    consume_lines.append(ConsumeLine(modifier_id=m.id, quantity=ci.quantity))
+
+            order.subtotal = subtotal_sum
+            order.tax_total = tax_sum
+            order.total = subtotal_sum + added_sum
+
+            # Descuento de insumos por receta (FEFO + vencimiento). Bloquea 400 si falta stock.
+            consume_sale(db, consume_lines, reference_id=order.id)
 
             for ci in cart_items:
                 db.delete(ci)
@@ -95,48 +127,12 @@ class OrderService:
 
         return self.get_or_404(db, order.id)
 
-    def _deduct_stock(
-        self, db: Session, product_id: UUID, quantity: int, order_id: UUID
-    ) -> None:
-        """Descuenta stock (movimiento 'expense') si el producto gestiona inventario.
-
-        Productos sin fila de inventario (p. ej. RECIPE o PRODUCT sin control_stock) no
-        descuentan. Lanza 400 si el stock es insuficiente.
-        """
-        inventory = db.execute(
-            select(Inventory).where(Inventory.product_id == product_id)
-        ).scalar_one_or_none()
-        if inventory is None:
-            return
-
-        if quantity > inventory.stock:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Stock insuficiente para el producto {product_id}",
-            )
-
-        stock_before = inventory.stock
-        stock_after = stock_before - quantity
-        inventory.stock = stock_after
-
-        db.add(
-            InventoryMovement(
-                quantity=quantity,
-                stock_before=stock_before,
-                stock_after=stock_after,
-                type_movement="expense",
-                reference_id=order_id,
-                reason="Orden",
-                product_id=product_id,
-            )
-        )
-
     # --- lectura / gestión (staff) ---
 
     def list_query(self, table_id: UUID | None = None, status_filter: str | None = None) -> Select:
         stmt = (
             select(Order)
-            .options(selectinload(Order.items))
+            .options(selectinload(Order.items).selectinload(OrderItem.modifiers))
             .order_by(Order.created_at.desc())
         )
         if table_id is not None:
@@ -147,12 +143,12 @@ class OrderService:
 
     def get_or_404(self, db: Session, id: UUID) -> Order:
         order = db.execute(
-            select(Order).options(selectinload(Order.items)).where(Order.id == id)
+            select(Order)
+            .options(selectinload(Order.items).selectinload(OrderItem.modifiers))
+            .where(Order.id == id)
         ).scalar_one_or_none()
         if order is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
         return order
 
     def update_status(self, db: Session, id: UUID, new_status: str) -> Order:

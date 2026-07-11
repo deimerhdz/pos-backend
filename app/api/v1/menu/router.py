@@ -16,6 +16,11 @@ from app.models.table_session import TableSession
 from app.models.product import Product
 from app.models.category import Category
 from app.models.cart_item import CartItem
+from app.models.cart_item_modifier import CartItemModifier
+from app.models.variant import Variant
+from app.models.variant_value import VariantValue
+from app.models.modifier_group import ModifierGroup
+from app.models.product_modifier_group import ProductModifierGroup
 from app.models.order import Order
 from app.api.v1.menu.dependencies import get_menu_session
 from app.api.v1.menu.schemas import (
@@ -23,6 +28,7 @@ from app.api.v1.menu.schemas import (
     MenuSessionResponse,
     MenuCategoryResponse,
     MenuProductResponse,
+    MenuProductVariantsResponse,
     CartItemCreate,
     CartItemUpdate,
     CartResponse,
@@ -158,15 +164,111 @@ def list_menu_products(
     return paginate(db, stmt, page, size)
 
 
+@router.get(
+    "/products/{product_id}/variants",
+    response_model=MenuProductVariantsResponse,
+    summary="Variantes y modificadores de un producto (para armar la selección)",
+    responses={
+        401: {"description": "Sesión de menú inválida o cerrada."},
+        404: {"description": "El producto no está disponible en el menú."},
+    },
+)
+def menu_product_variants(
+    product_id: UUID,
+    db: Session = Depends(get_db),
+    _: TableSession = Depends(get_menu_session),
+):
+    product = db.execute(
+        select(Product).where(
+            Product.id == product_id, Product.is_menu == True, Product.active == True  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if product is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "El producto no está disponible en el menú")
+
+    variants = db.execute(
+        select(Variant)
+        .options(selectinload(Variant.values).selectinload(VariantValue.attribute_value))
+        .where(Variant.product_id == product_id, Variant.active == True)  # noqa: E712
+        .order_by(Variant.sku)
+    ).scalars().all()
+
+    groups = db.execute(
+        select(ModifierGroup)
+        .join(ProductModifierGroup, ProductModifierGroup.group_id == ModifierGroup.id)
+        .where(ProductModifierGroup.product_id == product_id, ModifierGroup.active == True)  # noqa: E712
+        .options(selectinload(ModifierGroup.modifiers))
+    ).scalars().all()
+
+    return {
+        "product_id": product_id,
+        "type": product.type,
+        "variants": [
+            {"id": v.id, "sku": v.sku, "price": v.price, "values": [vv.value for vv in v.values]}
+            for v in variants
+        ],
+        "modifier_groups": [
+            {
+                "id": g.id, "name": g.name, "required": g.required,
+                "min_select": g.min_select, "max_select": g.max_select,
+                "modifiers": [
+                    {"id": m.id, "name": m.name, "price": m.price} for m in g.modifiers if m.active
+                ],
+            }
+            for g in groups
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Carrito de la mesa
 # ---------------------------------------------------------------------------
+
+def _validate_modifiers(db: Session, product_id: UUID, modifier_ids: list[UUID]) -> None:
+    """Valida que los modificadores pertenezcan a grupos del producto y respeten
+    las reglas de selección (required/min/max)."""
+    groups = db.execute(
+        select(ModifierGroup)
+        .join(ProductModifierGroup, ProductModifierGroup.group_id == ModifierGroup.id)
+        .where(ProductModifierGroup.product_id == product_id)
+        .options(selectinload(ModifierGroup.modifiers))
+    ).scalars().all()
+
+    group_by_modifier = {m.id: g for g in groups for m in g.modifiers if m.active}
+    counts: dict[UUID, int] = {}
+    for mid in modifier_ids:
+        g = group_by_modifier.get(mid)
+        if g is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Modificador {mid} no válido para este producto.",
+            )
+        counts[g.id] = counts.get(g.id, 0) + 1
+
+    for g in groups:
+        c = counts.get(g.id, 0)
+        if g.required and c < g.min_select:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"El grupo '{g.name}' requiere al menos {g.min_select} selección(es).",
+            )
+        if g.max_select is not None and c > g.max_select:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"El grupo '{g.name}' permite máximo {g.max_select} selección(es).",
+            )
+
 
 def _build_cart_response(db: Session, session: TableSession) -> CartResponse:
     """Arma el carrito completo de la mesa (items de todos los comensales) + total."""
     items = db.execute(
         select(CartItem)
-        .options(selectinload(CartItem.product), selectinload(CartItem.table_session))
+        .options(
+            selectinload(CartItem.variant),
+            selectinload(CartItem.product),
+            selectinload(CartItem.table_session),
+            selectinload(CartItem.modifiers).selectinload(CartItemModifier.modifier),
+        )
         .where(CartItem.table_id == session.table_id)
         .order_by(CartItem.created_at)
     ).scalars().all()
@@ -174,16 +276,25 @@ def _build_cart_response(db: Session, session: TableSession) -> CartResponse:
     resp_items = []
     total = Decimal("0.00")
     for ci in items:
-        unit_price = ci.product.price if ci.product else Decimal("0.00")
+        variant = ci.variant
+        mods = [m.modifier for m in ci.modifiers if m.modifier is not None]
+        unit_price = (variant.price if variant else Decimal("0.00")) + sum(
+            (m.price for m in mods), Decimal("0.00")
+        )
         subtotal = unit_price * ci.quantity
         total += subtotal
         resp_items.append({
             "id": ci.id,
+            "variant_id": ci.variant_id,
             "product_id": ci.product_id,
-            "product_name": ci.product.name if ci.product else "",
+            "product_name": ci.product.name if ci.product else (variant.sku if variant else ""),
+            "variant_sku": variant.sku if variant else None,
             "quantity": ci.quantity,
             "unit_price": unit_price,
             "subtotal": subtotal,
+            "modifiers": [
+                {"modifier_id": m.id, "name": m.name, "price": m.price} for m in mods
+            ],
             "table_session_id": ci.table_session_id,
             "customer_name": ci.table_session.customer_name if ci.table_session else "",
             "is_mine": ci.table_session_id == session.id,
@@ -211,37 +322,36 @@ def add_cart_item(
     db: Session = Depends(get_db),
     session: TableSession = Depends(get_menu_session),
 ):
-    product = db.execute(
-        select(Product).where(
-            Product.id == body.product_id,
+    variant = db.execute(
+        select(Variant)
+        .join(Product, Product.id == Variant.product_id)
+        .where(
+            Variant.id == body.variant_id,
+            Variant.active == True,  # noqa: E712
             Product.is_menu == True,  # noqa: E712
             Product.active == True,  # noqa: E712
         )
     ).scalar_one_or_none()
-    if product is None:
+    if variant is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="El producto no está disponible en el menú",
+            detail="La variante no está disponible en el menú",
         )
 
-    item = db.execute(
-        select(CartItem).where(
-            CartItem.table_session_id == session.id,
-            CartItem.product_id == body.product_id,
-        )
-    ).scalar_one_or_none()
+    _validate_modifiers(db, variant.product_id, body.modifier_ids)
 
-    if item is not None:
-        item.quantity += body.quantity
-    else:
-        db.add(
-            CartItem(
-                table_id=session.table_id,
-                table_session_id=session.id,
-                product_id=body.product_id,
-                quantity=body.quantity,
-            )
-        )
+    item = CartItem(
+        table_id=session.table_id,
+        table_session_id=session.id,
+        variant_id=variant.id,
+        product_id=variant.product_id,
+        quantity=body.quantity,
+    )
+    db.add(item)
+    db.flush()
+
+    for mid in body.modifier_ids:
+        db.add(CartItemModifier(cart_item_id=item.id, modifier_id=mid))
 
     db.commit()
     return _build_cart_response(db, session)
@@ -439,6 +549,8 @@ def close_table(
     ).rowcount
 
     # Limpia los items de carrito no convertidos en orden (las órdenes ya creadas se conservan).
+    cart_ids = select(CartItem.id).where(CartItem.table_id == table.id)
+    db.execute(delete(CartItemModifier).where(CartItemModifier.cart_item_id.in_(cart_ids)))
     db.execute(delete(CartItem).where(CartItem.table_id == table.id))
 
     table.status = "available"

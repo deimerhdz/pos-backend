@@ -35,18 +35,51 @@ class MenuCategoryResponse(BaseModel):
 
 class MenuProductResponse(BaseModel):
     id: UUID = Field(..., description="Identificador único del producto.")
-    name: str = Field(..., description="Nombre del producto.", examples=["Coca-Cola 350ml"])
+    name: str = Field(..., description="Nombre del producto.", examples=["Helado en copa"])
     description: str | None = Field(None, description="Descripción del producto.")
-    price: Decimal = Field(..., description="Precio de venta del producto.", examples=["2500.00"])
+    price: Decimal = Field(..., description="Precio base (referencial; el precio real es por variante).", examples=["8000.00"])
+    type: str = Field(..., description="SIMPLE o CONFIGURABLE.", examples=["CONFIGURABLE"])
     category_id: UUID = Field(..., description="Categoría a la que pertenece el producto.")
 
     model_config = ConfigDict(from_attributes=True)
 
 
+# --- variantes y modificadores del producto (para armar la selección en el menú) ---
+class MenuVariantResponse(BaseModel):
+    id: UUID
+    sku: str
+    price: Decimal
+    values: list[str] = Field(default_factory=list, description="Valores de la combinación.")
+
+
+class MenuModifierResponse(BaseModel):
+    id: UUID
+    name: str
+    price: Decimal
+
+
+class MenuModifierGroupResponse(BaseModel):
+    id: UUID
+    name: str
+    required: bool
+    min_select: int
+    max_select: int | None = None
+    modifiers: list[MenuModifierResponse] = Field(default_factory=list)
+
+
+class MenuProductVariantsResponse(BaseModel):
+    product_id: UUID
+    type: str
+    variants: list[MenuVariantResponse] = Field(default_factory=list)
+    modifier_groups: list[MenuModifierGroupResponse] = Field(default_factory=list)
+
+
+# --- carrito ---
 class CartItemCreate(BaseModel):
-    product_id: UUID = Field(..., description="Producto a agregar al carrito.")
-    quantity: int = Field(
-        1, ge=1, description="Cantidad a agregar. Si el producto ya está, se suma.", examples=[1]
+    variant_id: UUID = Field(..., description="Variante a agregar al carrito.")
+    quantity: int = Field(1, ge=1, description="Cantidad.", examples=[1])
+    modifier_ids: list[UUID] = Field(
+        default_factory=list, description="Modificadores elegidos (toppings/salsas)."
     )
 
 
@@ -54,13 +87,22 @@ class CartItemUpdate(BaseModel):
     quantity: int = Field(..., ge=1, description="Nueva cantidad del item.", examples=[2])
 
 
+class CartModifierLine(BaseModel):
+    modifier_id: UUID | None = None
+    name: str
+    price: Decimal
+
+
 class CartItemResponse(BaseModel):
     id: UUID = Field(..., description="Identificador único del item del carrito.")
-    product_id: UUID = Field(..., description="Producto agregado.")
+    variant_id: UUID | None = Field(None, description="Variante agregada.")
+    product_id: UUID | None = Field(None, description="Producto de la variante.")
     product_name: str = Field(..., description="Nombre del producto.")
+    variant_sku: str | None = Field(None, description="SKU de la variante.")
     quantity: int = Field(..., description="Cantidad.", examples=[2])
-    unit_price: Decimal = Field(..., description="Precio unitario actual del producto.", examples=["2500.00"])
-    subtotal: Decimal = Field(..., description="Subtotal (unit_price * quantity).", examples=["5000.00"])
+    unit_price: Decimal = Field(..., description="Precio unitario (variante + modificadores).", examples=["10500.00"])
+    subtotal: Decimal = Field(..., description="Subtotal (unit_price * quantity).", examples=["21000.00"])
+    modifiers: list[CartModifierLine] = Field(default_factory=list)
     table_session_id: UUID = Field(..., description="Sesión del comensal que agregó el item.")
     customer_name: str = Field(..., description="Nombre del comensal que agregó el item.")
     is_mine: bool = Field(..., description="Indica si el item lo agregó la sesión actual.")
@@ -69,4 +111,4 @@ class CartItemResponse(BaseModel):
 class CartResponse(BaseModel):
     table_id: UUID = Field(..., description="Mesa a la que pertenece el carrito.")
     items: list[CartItemResponse] = Field(default_factory=list, description="Items del carrito de la mesa.")
-    total: Decimal = Field(..., description="Total del carrito de la mesa.", examples=["15000.00"])
+    total: Decimal = Field(..., description="Total del carrito de la mesa.", examples=["21000.00"])

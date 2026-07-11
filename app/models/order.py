@@ -8,6 +8,8 @@ from decimal import Decimal
 
 if TYPE_CHECKING:
     from .product import Product
+    from .variant import Variant
+    from .order_item_modifier import OrderItemModifier
 
 
 class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -28,6 +30,15 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="pending", server_default="pending"
+    )
+
+    # subtotal = pre-impuesto; total = gran total (subtotal + impuestos exclusivos)
+    subtotal: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=0, server_default="0"
+    )
+
+    tax_total: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=0, server_default="0"
     )
 
     total: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
@@ -55,7 +66,13 @@ class OrderItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("orders.id"), nullable=False, index=True
     )
 
-    product_id: Mapped[UUID] = mapped_column(ForeignKey("products.id"), nullable=False)
+    variant_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("variants.id"), nullable=True
+    )
+
+    product_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("products.id"), nullable=True
+    )
 
     # quién pidió el item (útil en órdenes de mesa)
     table_session_id: Mapped[Optional[UUID]] = mapped_column(
@@ -70,8 +87,18 @@ class OrderItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     subtotal: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
 
+    tax_amount: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=0, server_default="0"
+    )
+
     order: Mapped["Order"] = relationship("Order", back_populates="items")
 
+    variant: Mapped[Optional["Variant"]] = relationship("Variant")
+
     product: Mapped[Optional["Product"]] = relationship("Product")
+
+    modifiers: Mapped[List["OrderItemModifier"]] = relationship(
+        "OrderItemModifier", cascade="all, delete-orphan"
+    )
 
     __table_args__ = ({"schema": "tenant"},)
