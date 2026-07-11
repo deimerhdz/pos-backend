@@ -24,6 +24,11 @@ class Recipe(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Reventa directa: receta 1:1 (quantity=1, unidad = unidad base del insumo).
+    is_resale: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+
     items: Mapped[List["RecipeItem"]] = relationship(
         back_populates="recipe", cascade="all, delete-orphan"
     )

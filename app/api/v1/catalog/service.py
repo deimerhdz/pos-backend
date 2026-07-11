@@ -41,6 +41,7 @@ def ensure_default_variant(db: Session, product: Product) -> Variant | None:
         sku=_unique_sku(db, f"{_slug(product.name)}-DEF"),
         price=product.price if product.price is not None else 0,
         is_default=True,
+        active=False,  # Fase 1: no vendible hasta tener receta (reventa 1:1 para SIMPLE).
     )
     db.add(variant)
     db.flush()
@@ -95,6 +96,7 @@ def generate_variants(db: Session, product: Product) -> list[Variant]:
             product_id=product.id,
             sku=_unique_sku(db, base_sku),
             price=initial_price,
+            active=False,  # Fase 1: nace inactiva; se activa al tener receta.
         )
         db.add(variant)
         db.flush()

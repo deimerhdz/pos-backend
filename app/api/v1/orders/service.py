@@ -17,8 +17,7 @@ from app.models.order import Order, OrderItem
 from app.models.order_item_modifier import OrderItemModifier
 from app.models.product import Product
 from app.models.table_session import TableSession
-from app.api.v1.supplies.consumption import consume_sale
-from app.api.v1.supplies.schemas import ConsumeLine
+from app.api.v1.orders.reservations import reserve_for_sale, pay_order, release_reservations
 from app.api.v1.orders.taxes import compute_line_tax
 
 logger = logging.getLogger(__name__)
@@ -61,7 +60,7 @@ class OrderService:
             subtotal_sum = Decimal("0.00")
             tax_sum = Decimal("0.00")
             added_sum = Decimal("0.00")
-            consume_lines: list[ConsumeLine] = []
+            reservation_lines: list[dict] = []
 
             for ci in cart_items:
                 variant = ci.variant
@@ -102,16 +101,20 @@ class OrderService:
                         order_item_id=order_item.id, modifier_id=m.id, name=m.name, price=m.price,
                     ))
 
-                consume_lines.append(ConsumeLine(variant_id=variant.id, quantity=ci.quantity))
+                reservation_lines.append(
+                    {"order_item_id": order_item.id, "variant_id": variant.id, "quantity": ci.quantity}
+                )
                 for m in modifiers:
-                    consume_lines.append(ConsumeLine(modifier_id=m.id, quantity=ci.quantity))
+                    reservation_lines.append(
+                        {"order_item_id": order_item.id, "modifier_id": m.id, "quantity": ci.quantity}
+                    )
 
             order.subtotal = subtotal_sum
             order.tax_total = tax_sum
             order.total = subtotal_sum + added_sum
 
-            # Descuento de insumos por receta (FEFO + vencimiento). Bloquea 400 si falta stock.
-            consume_sale(db, consume_lines, reference_id=order.id)
+            # Fase 2: el pedido RESERVA insumos (no consume). Bloquea 400 si no hay disponibilidad.
+            reserve_for_sale(db, order, reservation_lines)
 
             for ci in cart_items:
                 db.delete(ci)
@@ -153,6 +156,30 @@ class OrderService:
 
     def update_status(self, db: Session, id: UUID, new_status: str) -> Order:
         order = self.get_or_404(db, id)
+        # Cancelar libera las reservas activas (sin mover inventario).
+        if new_status == "cancelled":
+            release_reservations(db, order)
         order.status = new_status
         db.commit()
+        return self.get_or_404(db, id)
+
+    def pay(self, db: Session, id: UUID) -> Order:
+        """Cobro en caja: consume (FEFO) las reservas de la orden y la completa."""
+        order = self.get_or_404(db, id)
+        if order.status != "pending":
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"La orden no está pendiente de cobro (estado: {order.status}).",
+            )
+        try:
+            pay_order(db, order)
+            order.status = "completed"
+            db.commit()
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception:
+            db.rollback()
+            logger.exception("Error cobrando la orden")
+            raise
         return self.get_or_404(db, id)

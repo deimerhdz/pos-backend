@@ -1,4 +1,5 @@
 from uuid import UUID
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -44,8 +45,25 @@ def _upsert_recipe(db: Session, body: RecipeUpsert, *, variant_id=None, modifier
             db.delete(item)
         db.flush()
 
+    recipe.is_resale = body.is_resale
+
+    if body.is_resale and len(body.items) != 1:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Una receta de reventa (1:1) debe tener exactamente un insumo.",
+        )
+
     for it in body.items:
         supply = get_or_404(db, Supply, it.supply_id, f"Supply {it.supply_id} not found")
+        if body.is_resale:
+            # Reventa 1:1: cantidad 1, unidad = unidad base del insumo (sin conversión).
+            db.add(RecipeItem(
+                recipe_id=recipe.id,
+                supply_id=it.supply_id,
+                quantity=Decimal(1),
+                unit_measure_id=supply.unit_measure_id,
+            ))
+            continue
         unit = get_or_404(db, UnitMeasure, it.unit_measure_id, f"Unit measure {it.unit_measure_id} not found")
         base_unit = supply.unit_measure
         if base_unit is not None and unit.dimension != base_unit.dimension:

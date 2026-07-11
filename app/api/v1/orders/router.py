@@ -75,3 +75,25 @@ def update_order_status(
     _: User = Depends(get_current_user),
 ):
     return service.update_status(db, id, body.status.value)
+
+
+@router.post(
+    "/{id}/pay",
+    response_model=OrderResponse,
+    summary="Cobrar una orden (caja)",
+    description=(
+        "Confirma el cobro: consume los insumos reservados (FEFO) y marca la orden como "
+        "completada. Falla 400 si la orden no está pendiente o si un insumo quedó sin stock/vencido."
+    ),
+    responses={
+        400: {"description": "Orden no pendiente, o stock insuficiente/vencido al consumir."},
+        401: {"description": "No autenticado o token inválido."},
+        404: {"description": "La orden no existe."},
+    },
+)
+def pay_order_endpoint(
+    id: UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return service.pay(db, id)

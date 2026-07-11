@@ -25,6 +25,7 @@ from .supply_batch import SupplyBatch
 from .recipe import Recipe
 from .recipe_item import RecipeItem
 from .supply_movement import SupplyMovement
+from .stock_reservation import StockReservation
 
 # Fase 3 — cutover POS (variante + modificadores en carrito/orden)
 from .cart_item_modifier import CartItemModifier

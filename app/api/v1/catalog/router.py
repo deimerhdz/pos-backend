@@ -16,6 +16,7 @@ from app.models.variant_value import VariantValue
 from app.models.modifier_group import ModifierGroup
 from app.models.product_modifier_group import ProductModifierGroup
 from app.api.v1.catalog.service import generate_variants
+from app.api.v1.supplies.consumption import resolve_recipe
 from app.api.v1.catalog.schemas import (
     ProductAttributeAssign,
     ProductAttributeResponse,
@@ -115,6 +116,15 @@ def update_variant(
     _: User = Depends(require_tenant_admin),
 ):
     variant = get_or_404(db, Variant, variant_id, "Variant not found")
+
+    # Regla (Fase 1): no se puede activar una variante sin receta activa con items.
+    if body.active is True and not variant.active:
+        recipe = resolve_recipe(db, variant_id=variant_id)
+        if recipe is None or not recipe.items:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "No se puede activar una variante sin receta activa. Define su receta primero.",
+            )
 
     # Regla: un producto configurable no puede quedar sin ninguna variante activa.
     if body.active is False and variant.active:

@@ -152,6 +152,13 @@ class RecipeItemIn(BaseModel):
 
 class RecipeUpsert(BaseModel):
     items: list[RecipeItemIn] = Field(..., min_length=1, description="Insumos de la receta.")
+    is_resale: bool = Field(
+        False,
+        description=(
+            "Reventa directa: receta 1:1 contra un único insumo. Fuerza quantity=1 y la "
+            "unidad base del insumo (ignora quantity/unit enviados)."
+        ),
+    )
 
 
 class RecipeItemOut(BaseModel):
@@ -170,6 +177,7 @@ class RecipeResponse(BaseModel):
     variant_id: UUID | None = None
     modifier_id: UUID | None = None
     active: bool
+    is_resale: bool = False
     items: list[RecipeItemOut] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

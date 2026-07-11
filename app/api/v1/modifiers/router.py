@@ -10,6 +10,7 @@ from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User
 from app.models.modifier_group import ModifierGroup
 from app.models.modifier import Modifier
+from app.api.v1.supplies.consumption import resolve_recipe
 from app.api.v1.modifiers.schemas import (
     ModifierGroupCreate,
     ModifierGroupUpdate,
@@ -72,7 +73,7 @@ def create_group(
     db.flush()
 
     for m in body.modifiers or []:
-        db.add(Modifier(group_id=group.id, name=m.name, price=m.price))
+        db.add(Modifier(group_id=group.id, name=m.name, price=m.price, active=False))
 
     db.commit()
     return db.execute(
@@ -115,7 +116,7 @@ def add_modifier(
     _: User = Depends(require_tenant_admin),
 ):
     get_or_404(db, ModifierGroup, id, "Modifier group not found")
-    modifier = Modifier(group_id=id, name=body.name, price=body.price)
+    modifier = Modifier(group_id=id, name=body.name, price=body.price, active=False)
     db.add(modifier)
     db.commit()
     db.refresh(modifier)
@@ -135,6 +136,15 @@ def update_modifier(
     ).scalar_one_or_none()
     if modifier is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Modifier not found")
+
+    # Regla (Fase 1): no se puede activar un modificador sin receta activa con items.
+    if body.active is True and not modifier.active:
+        recipe = resolve_recipe(db, modifier_id=modifier_id)
+        if recipe is None or not recipe.items:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "No se puede activar un modificador sin receta activa. Define su receta primero.",
+            )
 
     if body.name is not None:
         modifier.name = body.name
