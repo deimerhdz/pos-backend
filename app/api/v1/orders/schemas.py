@@ -6,76 +6,105 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class OrderScope(str, Enum):
-    INDIVIDUAL = "individual"
-    TABLE = "table"
+class OrderChannel(str, Enum):
+    QR = "qr"
+    COUNTER = "counter"
+    WAITER = "waiter"
 
 
 class OrderStatus(str, Enum):
     PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
+    PREPARING = "preparing"
+    SERVED = "served"
     CANCELLED = "cancelled"
 
 
+# ---------- Mesas ----------
+class TableCreate(BaseModel):
+    number: int = Field(..., ge=1)
+    name: str | None = Field(None, max_length=255)
+
+
+class TableUpdate(BaseModel):
+    name: str | None = Field(None, max_length=255)
+    active: bool | None = None
+
+
+class TableResponse(BaseModel):
+    id: UUID
+    number: int
+    name: str | None = None
+    qr_token: UUID
+    active: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Sesiones ----------
+class SessionOpen(BaseModel):
+    qr_token: UUID = Field(..., description="Token QR de la mesa escaneada.")
+    customer_name: str = Field(..., min_length=1, max_length=255, examples=["Ana Pérez"])
+
+
+class SessionResponse(BaseModel):
+    id: UUID
+    dining_table_id: UUID
+    customer_name: str
+    status: str
+    opened_at: datetime
+    closed_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Comandas ----------
+class OrderItemIn(BaseModel):
+    product_variant_id: UUID
+    quantity: int = Field(1, ge=1)
+    option_ids: list[UUID] = Field(default_factory=list)
+    notes: str | None = Field(None, max_length=500)
+
+
 class OrderCreate(BaseModel):
-    scope: OrderScope = Field(
-        ...,
-        description=(
-            "Alcance de la orden: 'individual' usa solo los productos del comensal actual; "
-            "'table' genera una única orden con los productos de toda la mesa."
-        ),
-        examples=["individual"],
-    )
+    channel: OrderChannel = OrderChannel.QR
+    dining_session_id: UUID | None = None
+    dining_table_id: UUID | None = None
+    customer_name: str | None = Field(None, max_length=255)
+    notes: str | None = Field(None, max_length=500)
+    items: list[OrderItemIn] = Field(..., min_length=1)
 
 
 class OrderStatusUpdate(BaseModel):
-    status: OrderStatus = Field(
-        ...,
-        description="Nuevo estado de la orden.",
-        examples=["in_progress"],
-    )
+    status: OrderStatus
 
 
-class OrderItemModifierResponse(BaseModel):
-    id: UUID = Field(..., description="Identificador del modificador en la línea.")
-    modifier_id: UUID | None = Field(None, description="Modificador de origen.")
-    name: str = Field(..., description="Nombre del modificador al momento de la orden.")
-    price: Decimal = Field(..., description="Precio del modificador.", examples=["1000.00"])
+class OrderItemOptionResponse(BaseModel):
+    id: UUID
+    option_id: UUID
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class OrderItemResponse(BaseModel):
-    id: UUID = Field(..., description="Identificador único del item de la orden.")
-    variant_id: UUID | None = Field(None, description="Variante pedida.")
-    product_id: UUID | None = Field(None, description="Producto pedido.")
-    product_name: str = Field(..., description="Nombre del producto al momento de la orden.")
-    table_session_id: UUID | None = Field(
-        None, description="Sesión del comensal que pidió el item."
-    )
-    quantity: int = Field(..., description="Cantidad pedida.", examples=[2])
-    unit_price: Decimal = Field(..., description="Precio unitario (variante + modificadores).", examples=["2500.00"])
-    subtotal: Decimal = Field(..., description="Subtotal del item (unit_price * quantity).", examples=["5000.00"])
-    tax_amount: Decimal = Field(..., description="Impuesto de la línea.", examples=["400.00"])
-    modifiers: list[OrderItemModifierResponse] = Field(default_factory=list)
+    id: UUID
+    product_variant_id: UUID
+    quantity: int
+    unit_price: Decimal
+    notes: str | None = None
+    options: list[OrderItemOptionResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class OrderResponse(BaseModel):
-    id: UUID = Field(..., description="Identificador único de la orden.")
-    table_id: UUID = Field(..., description="Mesa a la que pertenece la orden.")
-    table_session_id: UUID | None = Field(
-        None, description="Sesión del comensal (null si es orden de toda la mesa)."
-    )
-    scope: OrderScope = Field(..., description="Alcance de la orden.")
-    customer_name: str | None = Field(None, description="Nombre del comensal (órdenes individuales).")
-    status: OrderStatus = Field(..., description="Estado actual de la orden.")
-    subtotal: Decimal = Field(..., description="Subtotal pre-impuesto.", examples=["12000.00"])
-    tax_total: Decimal = Field(..., description="Impuesto total de la orden.", examples=["960.00"])
-    total: Decimal = Field(..., description="Gran total (subtotal + impuestos exclusivos).", examples=["12960.00"])
-    items: list[OrderItemResponse] = Field(default_factory=list, description="Items de la orden.")
-    created_at: datetime = Field(..., description="Fecha de creación de la orden.")
+    id: UUID
+    channel: str
+    status: str
+    dining_session_id: UUID | None = None
+    dining_table_id: UUID | None = None
+    customer_name: str | None = None
+    notes: str | None = None
+    created_at: datetime
+    items: list[OrderItemResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

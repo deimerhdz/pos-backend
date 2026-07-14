@@ -79,8 +79,6 @@ def create_unit_measure(
     unit_measure = UnitMeasure(
         name=body.name,
         abbreviation=body.abbreviation,
-        dimension=body.dimension.value,
-        factor_to_base=body.factor_to_base,
     )
     db.add(unit_measure)
     db.commit()
@@ -115,12 +113,6 @@ def update_unit_measure(
 
     if body.name is not None:
         unit_measure.name = body.name
-
-    if body.dimension is not None:
-        unit_measure.dimension = body.dimension.value
-
-    if body.factor_to_base is not None:
-        unit_measure.factor_to_base = body.factor_to_base
 
     if body.active is not None:
         unit_measure.active = body.active

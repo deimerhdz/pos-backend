@@ -1,66 +1,102 @@
 from uuid import UUID
-from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class ProductAttributeAssign(BaseModel):
-    attribute_ids: list[UUID] = Field(
-        ..., min_length=1,
-        description="Atributos que combina el producto configurable.",
-    )
+# ---------- Variantes ----------
+class VariantCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, examples=["1 bola", "2 bolas"])
+    price: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
+    sku: str | None = Field(None, max_length=100)
 
 
-class VariantValueOut(BaseModel):
-    id: UUID
-    attribute_value_id: UUID
-    value: str | None = None
-
-    model_config = ConfigDict(from_attributes=True)
+class VariantUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=255)
+    price: Decimal | None = Field(None, ge=0, max_digits=12, decimal_places=2)
+    sku: str | None = Field(None, max_length=100)
+    active: bool | None = None
 
 
 class VariantResponse(BaseModel):
     id: UUID
     product_id: UUID
-    sku: str
+    name: str
+    sku: str | None = None
     price: Decimal
-    is_default: bool
     active: bool
-    values: list[VariantValueOut] = Field(default_factory=list)
-    created_at: datetime
-    updated_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
-class VariantUpdate(BaseModel):
-    sku: str | None = Field(None, min_length=1, max_length=100)
-    price: Decimal | None = Field(None, ge=0, max_digits=10, decimal_places=2)
-    active: bool | None = None
+# ---------- Receta (BOM) ----------
+class RecipeItemIn(BaseModel):
+    inventory_item_id: UUID
+    quantity: Decimal = Field(..., gt=0, max_digits=12, decimal_places=3)
 
 
-class VariantGenerateResponse(BaseModel):
-    created: int = Field(..., description="Combinaciones nuevas creadas.")
-    total: int = Field(..., description="Total de variantes del producto.")
-    variants: list[VariantResponse] = Field(default_factory=list)
+class RecipeSet(BaseModel):
+    items: list[RecipeItemIn] = Field(default_factory=list)
 
 
-class ProductModifierGroupAssign(BaseModel):
-    group_id: UUID = Field(..., description="Grupo de modificadores a asociar.")
-
-
-class ProductModifierGroupResponse(BaseModel):
+class RecipeItemResponse(BaseModel):
     id: UUID
-    product_id: UUID
-    group_id: UUID
+    inventory_item_id: UUID
+    quantity: Decimal
 
     model_config = ConfigDict(from_attributes=True)
 
 
-class ProductAttributeResponse(BaseModel):
+# ---------- Grupos de opciones ----------
+class OptionCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, examples=["Fresa", "Chocolate"])
+    extra_price: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
+    inventory_item_id: UUID | None = Field(
+        None, description="Insumo que descuenta al elegir esta opción."
+    )
+    item_quantity: Decimal = Field(0, ge=0, max_digits=12, decimal_places=3)
+
+
+class OptionResponse(BaseModel):
+    id: UUID
+    option_group_id: UUID
+    name: str
+    extra_price: Decimal
+    inventory_item_id: UUID | None = None
+    item_quantity: Decimal
+    active: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OptionGroupCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, examples=["Sabores de helado"])
+    min_select: int = Field(0, ge=0)
+    max_select: int = Field(1, ge=1)
+
+
+class OptionGroupResponse(BaseModel):
+    id: UUID
+    name: str
+    min_select: int
+    max_select: int
+    options: list[OptionResponse] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Asignación grupo<->producto ----------
+class ProductOptionGroupCreate(BaseModel):
+    option_group_id: UUID
+    min_select: int = Field(0, ge=0)
+    max_select: int = Field(1, ge=1)
+
+
+class ProductOptionGroupResponse(BaseModel):
     id: UUID
     product_id: UUID
-    attribute_id: UUID
+    option_group_id: UUID
+    min_select: int
+    max_select: int
 
     model_config = ConfigDict(from_attributes=True)

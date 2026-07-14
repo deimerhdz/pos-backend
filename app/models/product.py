@@ -1,57 +1,50 @@
-
-from app.core.models import Base,TimestampMixin,UUIDPrimaryKeyMixin
-from sqlalchemy.orm  import mapped_column,Mapped,relationship
-from sqlalchemy import String,Boolean,ForeignKey,Numeric,CheckConstraint,UniqueConstraint
-from typing import TYPE_CHECKING,Optional
-from decimal import Decimal
+from app.core.models import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import mapped_column, Mapped, relationship
+from sqlalchemy import String, Boolean, ForeignKey, CheckConstraint, UniqueConstraint
+from typing import TYPE_CHECKING, Optional, List
 
 if TYPE_CHECKING:
     from .category import Category
-    from .unit_measure import UnitMeasure
-    from .variant import Variant
-    from .product_attribute import ProductAttribute
-    from .product_modifier_group import ProductModifierGroup
+    from .product_variant import ProductVariant
+    from .product_option_group import ProductOptionGroup
 
-class Product(UUIDPrimaryKeyMixin,TimestampMixin,Base):
+
+class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Producto del menú. `preparation_type` = 'prepared' (se arma con receta)
+    o 'packaged' (se vende empacado). El precio vive en la variante."""
+
     __tablename__ = "products"
 
-    name: Mapped[str]= mapped_column(String(255),nullable=False)
+    category_id: Mapped[UUID] = mapped_column(
+        ForeignKey("categories.id"), nullable=False, index=True
+    )
+    category: Mapped[Optional["Category"]] = relationship(back_populates="products")
 
-    description: Mapped[Optional[str]] = mapped_column(String(255),nullable=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # Catálogo: SIMPLE (se vende tal cual) o CONFIGURABLE (por variantes).
-    type: Mapped[str] = mapped_column(String(50), nullable=False, server_default="SIMPLE")
+    description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
-    # Fase 5: price/cost viven en la variante (fuente de verdad única).
-
-    is_menu: Mapped[bool] = mapped_column(Boolean, default=False)
+    preparation_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="prepared"
+    )
 
     image_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
-    category_id: Mapped[str] = mapped_column(ForeignKey("categories.id"))
-    category:Mapped[Optional["Category"]] = relationship(back_populates="products")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    unit_measure_id: Mapped[str] = mapped_column(ForeignKey("unit_measures.id"))
-    unit_measure:Mapped[Optional["UnitMeasure"]] = relationship(back_populates="products")
-
-    active:Mapped[bool] = mapped_column(Boolean, default=True)
-
-    variants: Mapped[list["Variant"]] = relationship(
-        "Variant", cascade="all, delete-orphan"
+    variants: Mapped[List["ProductVariant"]] = relationship(
+        back_populates="product", cascade="all, delete-orphan"
     )
 
-    product_attributes: Mapped[list["ProductAttribute"]] = relationship(
-        "ProductAttribute", cascade="all, delete-orphan"
-    )
-
-    modifier_groups: Mapped[list["ProductModifierGroup"]] = relationship(
-        "ProductModifierGroup", cascade="all, delete-orphan"
+    option_groups: Mapped[List["ProductOptionGroup"]] = relationship(
+        back_populates="product", cascade="all, delete-orphan"
     )
 
     __table_args__ = (
         CheckConstraint(
-            "type IN ('SIMPLE', 'CONFIGURABLE')",
-            name="ck_product_kind",
+            "preparation_type IN ('prepared', 'packaged')",
+            name="ck_product_preparation_type",
         ),
         UniqueConstraint("category_id", "name", name="uq__products__category_id__name"),
         {"schema": "tenant"},

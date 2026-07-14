@@ -1,32 +1,32 @@
 
+# Catálogo / menú
 from .category import Category
 from .unit_measure import UnitMeasure
 from .product import Product
-from .tables import Table
-from .table_session import TableSession
-from .cart_item import CartItem
-from .order import Order, OrderItem
-
-# Fase 1 — catálogo de configuración
-from .attribute import Attribute
-from .attribute_value import AttributeValue
-from .product_attribute import ProductAttribute
-from .variant import Variant
-from .variant_value import VariantValue
-from .modifier_group import ModifierGroup
-from .modifier import Modifier
-from .product_modifier_group import ProductModifierGroup
-from .tax import Tax
-from .tax_link import TaxLink
-
-# Fase 2 — insumos, recetas y consumo
-from .supply import Supply
-from .supply_batch import SupplyBatch
-from .recipe import Recipe
+from .product_variant import ProductVariant
+from .option_group import OptionGroup
+from .option import Option
+from .product_option_group import ProductOptionGroup
 from .recipe_item import RecipeItem
-from .supply_movement import SupplyMovement
-from .stock_reservation import StockReservation
 
-# Fase 3 — cutover POS (variante + modificadores en carrito/orden)
-from .cart_item_modifier import CartItemModifier
-from .order_item_modifier import OrderItemModifier
+# Inventario (stock único, sin lotes)
+from .inventory_item import InventoryItem
+from .inventory_movement import InventoryMovement
+from .supplier import Supplier
+from .purchase import Purchase, PurchaseItem
+
+# Caja y conciliación
+from .cash_register import CashRegister
+from .cash_shift import CashShift
+from .cash_movement import CashMovement
+from .cash_count_denomination import CashCountDenomination
+
+# Mesas y órdenes (QR)
+from .dining_table import DiningTable
+from .dining_session import DiningSession
+from .customer_order import CustomerOrder
+from .order_item import OrderItem, OrderItemOption
+
+# Ventas
+from .sale import Sale, SaleItem
+from .payment import PaymentMethod, Payment
