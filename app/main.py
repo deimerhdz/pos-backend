@@ -20,6 +20,7 @@ from app.api.v1.catalog.router import router as catalog_router
 from app.api.v1.inventory.router import router as inventory_router
 from app.api.v1.cash.router import router as cash_router
 from app.api.v1.sales.router import router as sales_router
+from app.api.v1.uploads.router import router as uploads_router
 
 load_dotenv()
 
@@ -77,6 +78,7 @@ def create_app()->FastAPI:
     app.include_router(inventory_router, prefix="/api/v1")
     app.include_router(cash_router, prefix="/api/v1")
     app.include_router(sales_router, prefix="/api/v1")
+    app.include_router(uploads_router, prefix="/api/v1")
     return app
 
 app = create_app()

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
 from app.core.crud import get_or_404
+from app.core.storage import delete_object, key_from_public_url
 from app.models.product import Product
 from app.models.category import Category
 from app.api.v1.catalog.service import ensure_default_variant
@@ -71,8 +72,13 @@ class ProductService:
             product.description = data.description
         if data.preparation_type is not None:
             product.preparation_type = data.preparation_type.value
-        if data.image_url is not None:
+        if data.image_url is not None and data.image_url != product.image_url:
+            old_image_url = product.image_url
             product.image_url = data.image_url
+            if old_image_url:
+                old_key = key_from_public_url(old_image_url)
+                if old_key:
+                    delete_object(old_key)
         if data.active is not None:
             product.active = data.active
         db.commit()

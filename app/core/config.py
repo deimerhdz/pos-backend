@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     SUPER_ADMIN_EMAIL:str = Field(default="admin@admin.com",env="SUPER_ADMIN_EMAIL")
     SUPER_ADMIN_PASSWORD:str = Field(default="Admin1234!",env="SUPER_ADMIN_PASSWORD")
 
+    R2_ACCOUNT_ID:str = Field(...,env="R2_ACCOUNT_ID")
+    R2_ACCESS_KEY_ID:str = Field(...,env="R2_ACCESS_KEY_ID")
+    R2_SECRET_ACCESS_KEY:str = Field(...,env="R2_SECRET_ACCESS_KEY")
+    R2_BUCKET_NAME:str = Field(...,env="R2_BUCKET_NAME")
+    R2_ENDPOINT_URL:str = Field(...,env="R2_ENDPOINT_URL")
+    R2_PUBLIC_BASE_URL:str = Field(...,env="R2_PUBLIC_BASE_URL")
+    R2_PRESIGN_EXPIRE_SECONDS:int = Field(default=300,env="R2_PRESIGN_EXPIRE_SECONDS")
+
     class Config:
         env_file='.env'
         extra='ignore'  # ignora variables del .env que no son de la app (p.ej. POSTGRES_*)
