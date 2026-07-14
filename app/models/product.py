@@ -1,65 +1,51 @@
-
-from app.core.models import Base,TimestampMixin,UUIDPrimaryKeyMixin
-from sqlalchemy.orm  import mapped_column,Mapped,relationship
-from sqlalchemy import String,Boolean,ForeignKey,Numeric,CheckConstraint
-from typing import TYPE_CHECKING,Optional
-from decimal import Decimal
+from app.core.models import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import mapped_column, Mapped, relationship
+from sqlalchemy import String, Boolean, ForeignKey, CheckConstraint, UniqueConstraint
+from typing import TYPE_CHECKING, Optional, List
 
 if TYPE_CHECKING:
     from .category import Category
-    from .unit_measure import UnitMeasure
-    from .inventory import Inventory
-    from .product_component import ProductComponent
+    from .product_variant import ProductVariant
+    from .product_option_group import ProductOptionGroup
 
-class Product(UUIDPrimaryKeyMixin,TimestampMixin,Base):
+
+class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Producto del menú. `preparation_type` = 'prepared' (se arma con receta)
+    o 'packaged' (se vende empacado). El precio vive en la variante."""
+
     __tablename__ = "products"
-    
-    name: Mapped[str]= mapped_column(String(255),nullable=False)
-    
-    description: Mapped[Optional[str]] = mapped_column(String(255),nullable=True)
-    
-    price: Mapped[Decimal] = mapped_column(Numeric(10, 2),nullable=False)
-    
-    cost: Mapped[Decimal] = mapped_column(Numeric(10, 2),nullable=False)
-    
-    is_menu: Mapped[bool] = mapped_column(Boolean, default=False)
-    
-    category_id: Mapped[str] = mapped_column(ForeignKey("categories.id"))
-    category:Mapped[Optional["Category"]] = relationship(back_populates="products")
-    
-    unit_measure_id: Mapped[str] = mapped_column(ForeignKey("unit_measures.id"))
-    unit_measure:Mapped[Optional["UnitMeasure"]] = relationship(back_populates="products")
-    
-    active:Mapped[bool] = mapped_column(Boolean, default=True)
 
-    product_type: Mapped[str] = mapped_column(String(50), nullable=False, server_default="PRODUCT")
+    category_id: Mapped[UUID] = mapped_column(
+        ForeignKey("categories.id"), nullable=False, index=True
+    )
+    category: Mapped[Optional["Category"]] = relationship(back_populates="products")
 
-    control_stock: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="false", nullable=False
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    preparation_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="prepared"
     )
 
-    inventory: Mapped[Optional["Inventory"]] = relationship(
-        "Inventory", back_populates="product", uselist=False
+    image_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    variants: Mapped[List["ProductVariant"]] = relationship(
+        back_populates="product", cascade="all, delete-orphan"
     )
 
-    components: Mapped[list["ProductComponent"]] = relationship(
-        "ProductComponent",
-        foreign_keys="ProductComponent.product_id",
-        cascade="all, delete-orphan",
+    option_groups: Mapped[List["ProductOptionGroup"]] = relationship(
+        back_populates="product", cascade="all, delete-orphan"
     )
 
     __table_args__ = (
         CheckConstraint(
-            "product_type IN ('INGREDIENT', 'PRODUCT', 'RECIPE')",
-            name="ck_product_type",
+            "preparation_type IN ('prepared', 'packaged')",
+            name="ck_product_preparation_type",
         ),
+        UniqueConstraint("category_id", "name", name="uq__products__category_id__name"),
         {"schema": "tenant"},
     )
-
-    @property
-    def stock(self) -> Optional[int]:
-        return self.inventory.stock if self.inventory else None
-
-    @property
-    def stock_min(self) -> Optional[int]:
-        return self.inventory.stock_min if self.inventory else None

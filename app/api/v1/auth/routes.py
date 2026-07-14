@@ -34,7 +34,8 @@ async def login(body: LoginRequest, req: Request):
                 db.query(Tenant).filter(Tenant.host == host).one_or_none()
                 if host else None
             )
-
+            logger.info(f"Tenant resuelto: {tenant}")
+            logger.info(f"Tenant resuelto: {tenant.name if tenant else 'None'}")
             stmt = select(User).options(joinedload(User.role)).where(User.email == body.email)
             if tenant is not None:
                 stmt = stmt.where(User.tenant_id == tenant.id)   # usuario de tenant
@@ -44,6 +45,7 @@ async def login(body: LoginRequest, req: Request):
             user = db.execute(stmt).scalar_one_or_none()
 
             # Validaciones dentro de la sesión para evitar objetos detached.
+            logger.info(f"Usuario encontrado: {user.email if user else 'None'}")
             if not user or not verify_password(body.password, user.password_hash):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
