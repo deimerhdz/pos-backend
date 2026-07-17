@@ -10,7 +10,11 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRY:int = Field(default=60*24,env="ACCESS_TOKEN_EXPIRY")
 
     # QR / sesión de comensal (flujo público de mesas).
+    # Ventana deslizante de la sesión (dining_sessions.expires_at).
     SESSION_TTL_MINUTES:int = Field(default=240,env="SESSION_TTL_MINUTES")
+    # Tope absoluto del token de sesión (exp del JWT). La sesión se desliza en DB
+    # sin re-emitir token; el JWT muere en este tope. Default 24h.
+    SESSION_ABS_MAX_MINUTES:int = Field(default=1440,env="SESSION_ABS_MAX_MINUTES")
     # Secreto dedicado para firmar tokens de QR/sesión. Si es None, el helper
     # cae a JWT_SECRET (permite rotación aislada sin obligar cambio de .env).
     QR_TOKEN_SECRET:Optional[str] = Field(default=None,env="QR_TOKEN_SECRET")

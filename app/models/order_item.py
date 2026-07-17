@@ -17,6 +17,12 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
     )
     order: Mapped["CustomerOrder"] = relationship(back_populates="items")
 
+    # Origen del comensal (para el split de cuenta por sesión en Fase 7).
+    # Nullable: las órdenes de mostrador no tienen sesión de mesa.
+    session_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("dining_sessions.id"), nullable=True, index=True
+    )
+
     product_variant_id: Mapped[UUID] = mapped_column(
         ForeignKey("product_variants.id"), nullable=False, index=True
     )
@@ -27,6 +33,18 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
         Numeric(12, 2), nullable=False, default=0, server_default="0"
     )
 
+    # Ciclo de cocina (KDS), independiente del status de pago de la orden.
+    # La fuente de verdad de las transiciones pendiente→...→entregado es el KDS
+    # (Fase 6). 'anulado' se excluye de la validación de bloqueo de cobro.
+    estado_cocina: Mapped[str] = mapped_column(
+        String(15), nullable=False, server_default="pendiente"
+    )
+
+    # Si este ítem reemplaza a uno anulado (void + recreación, Fase 6).
+    void_de: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("order_items.id"), nullable=True
+    )
+
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     options: Mapped[List["OrderItemOption"]] = relationship(
@@ -35,6 +53,10 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
 
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_order_item_quantity_positive"),
+        CheckConstraint(
+            "estado_cocina IN ('pendiente', 'en_preparacion', 'listo', 'entregado', 'anulado')",
+            name="ck_order_item_estado_cocina",
+        ),
         {"schema": "tenant"},
     )
 
