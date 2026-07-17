@@ -20,14 +20,14 @@ class Settings(BaseSettings):
     QR_TOKEN_SECRET:Optional[str] = Field(default=None,env="QR_TOKEN_SECRET")
 
     PROJECT_NAME:str ="pos"
-    REDIS_URL:str =  Field(default="redis://localhost:6379/0",env="REDIS_URL")
+    REDIS_URL:str =  Field(env="REDIS_URL")
     RESEND_API_KEY:str = Field(...,env="RESEND_API_KEY")
     MAIL_FROM_NAME:str = Field(...,env="MAIL_FROM_NAME")
     MAIL_FROM:str = Field(...,env="MAIL_FROM")
 
-    SUPER_ADMIN_NAME:str = Field(default="Super Admin",env="SUPER_ADMIN_NAME")
-    SUPER_ADMIN_EMAIL:str = Field(default="admin@admin.com",env="SUPER_ADMIN_EMAIL")
-    SUPER_ADMIN_PASSWORD:str = Field(default="Admin1234!",env="SUPER_ADMIN_PASSWORD")
+    SUPER_ADMIN_NAME:str = Field(env="SUPER_ADMIN_NAME")
+    SUPER_ADMIN_EMAIL:str = Field(env="SUPER_ADMIN_EMAIL")
+    SUPER_ADMIN_PASSWORD:str = Field(env="SUPER_ADMIN_PASSWORD")
 
     R2_ACCOUNT_ID:str = Field(...,env="R2_ACCOUNT_ID")
     R2_ACCESS_KEY_ID:str = Field(...,env="R2_ACCESS_KEY_ID")

@@ -6,20 +6,31 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# install dependencies (capa cacheable)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Dependencias del sistema
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# copiar el código
+# Dependencias de Python
+COPY requirements.txt .
+
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Código fuente
 COPY . .
 
-# entrypoint: aplica migraciones y arranca la API
-RUN chmod +x /app/entrypoint.sh
+# Permisos
+RUN chmod +x /app/docker/api-entrypoint.sh && \
+    chmod +x /app/docker/worker-entrypoint.sh
 
-# usuario no-root
-RUN useradd --create-home appuser && chown -R appuser:appuser /app
+# Usuario sin privilegios
+RUN useradd --create-home --shell /bin/bash appuser && \
+    chown -R appuser:appuser /app
+
 USER appuser
 
 EXPOSE 8000
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["/app/docker/api-entrypoint.sh"]

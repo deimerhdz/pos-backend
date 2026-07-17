@@ -1,46 +1,156 @@
+name: skeilopos
 services:
   postgres:
-    image: postgres:16
-    container_name: pos
+    image: postgres:16.10
+
     restart: unless-stopped
+
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    # sin 'ports': solo accesible en la red interna de compose
+      - /opt/skeilopos/data/postgres:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    networks:
+      - backend
 
   redis:
-    image: redis:7-alpine
-    container_name: pos-redis
+    image: redis:7.4-alpine
+
     restart: unless-stopped
-    # sin 'ports': solo accesible en la red interna de compose
+
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+
+    volumes:
+      - /opt/skeilopos/data/redis:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    networks:
+      - backend
 
   api:
     image: ghcr.io/deimerhdz/pos-backend:${IMAGE_TAG:-latest}
-    container_name: pos-api
+
     restart: unless-stopped
-    env_file: .env
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
+
+    init: true
+
+    stop_grace_period: 30s
+
+    entrypoint:
+      - /app/docker/api-entrypoint.sh
+
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+
+    env_file:
+      - .env
+
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
     ports:
-      - "127.0.0.1:8000:8000"   # solo local; Nginx hace el proxy público
+      - "127.0.0.1:8000:8000"
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    networks:
+      - backend
 
   worker:
     image: ghcr.io/deimerhdz/pos-backend:${IMAGE_TAG:-latest}
-    container_name: pos-worker
-    restart: unless-stopped
-    entrypoint: ["celery", "-A", "app.celery_task:c_app", "worker", "--loglevel=info"]
-    env_file: .env
-    environment:
-      REDIS_URL: ${REDIS_URL}
-    depends_on:
-      - redis
 
-volumes:
-  postgres_data:
+    restart: unless-stopped
+
+    init: true
+
+    stop_grace_period: 60s
+
+    entrypoint:
+      - /app/docker/worker-entrypoint.sh
+
+    command:
+      - celery
+      - -A
+      - app.celery_task:c_app
+      - worker
+      - --loglevel=info
+
+    env_file:
+      - .env
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.celery_task:c_app", "inspect", "ping"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    networks:
+      - backend
+
+networks:
+  backend:
+    name: skeilopos-network
+    driver: bridge
