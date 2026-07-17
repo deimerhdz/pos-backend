@@ -26,6 +26,12 @@ class Sale(UUIDPrimaryKeyMixin, Base):
         ForeignKey("dining_tables.id"), nullable=True
     )
 
+    # Orden de mesa que originó esta venta (cobro de mesa, Fase 7). Null en
+    # ventas de mostrador directas. Gancho para la facturación por order (Fase 8).
+    customer_order_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("customer_orders.id"), nullable=True, index=True
+    )
+
     cash_shift_id: Mapped[UUID] = mapped_column(
         ForeignKey("cash_shifts.id"), nullable=False, index=True
     )

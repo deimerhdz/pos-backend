@@ -141,6 +141,17 @@ def get_tenant(req: Request) -> Tenant:
 
     return tenant
 
+def resolve_tenant_by_id(tenant_id: int) -> Tenant:
+    """Gemelo de get_tenant() pero resolviendo por id en vez de host. Lo usa el
+    flujo público de QR/sesión, donde el tenant viaja firmado dentro del token
+    (claim `t`) y no hay header x-tenant-host."""
+    with with_db(None) as db:
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).one_or_none()
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return tenant
+
+
 def get_db(tenant: Tenant = Depends(get_tenant)):
     logger.info(f"Obteniendo DB para tenant: {tenant.name} (schema: {tenant.schema})")
     with with_db(tenant.schema) as db:

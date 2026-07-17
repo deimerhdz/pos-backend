@@ -1,6 +1,6 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy import String, ForeignKey, DateTime, func, CheckConstraint
+from sqlalchemy import String, Integer, ForeignKey, DateTime, func, CheckConstraint, Index, text
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import Optional, List
 from datetime import datetime
@@ -8,11 +8,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .order_item import OrderItem
+    from .order_cancel_log import OrderCancelLog
 
 
 class CustomerOrder(UUIDPrimaryKeyMixin, Base):
-    """Comanda. Puede venir por QR (ligada a una sesión de mesa) o por mostrador
-    (con nombre suelto). `user_id` es null cuando el cliente pidió por QR."""
+    """Orden de mesa (spec `orders`). Una o más por mesa a lo largo de su ciclo
+    de vida, pero **solo una `abierta` por mesa a la vez** (índice parcial). El
+    `status` es el ciclo de pago; el estado de cocina vive por ítem
+    (`order_items.estado_cocina`). `user_id` es null cuando el cliente pidió por
+    QR."""
 
     __tablename__ = "customer_orders"
 
@@ -28,7 +32,10 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
 
     channel: Mapped[str] = mapped_column(String(10), nullable=False, server_default="qr")
 
-    status: Mapped[str] = mapped_column(String(12), nullable=False, server_default="pending")
+    status: Mapped[str] = mapped_column(String(12), nullable=False, server_default="abierta")
+
+    # Lock optimista para la transición abierta→bloqueada del cobro (Fase 7).
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     # Referencia blanda a shared.users.id (null si el cliente pidió por QR).
     user_id: Mapped[Optional[UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
@@ -43,13 +50,25 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
         back_populates="order", cascade="all, delete-orphan"
     )
 
+    cancel_logs: Mapped[List["OrderCancelLog"]] = relationship(
+        back_populates="order", cascade="all, delete-orphan"
+    )
+
     __table_args__ = (
         CheckConstraint(
             "channel IN ('qr', 'counter', 'waiter')", name="ck_customer_order_channel"
         ),
         CheckConstraint(
-            "status IN ('pending', 'preparing', 'served', 'cancelled')",
+            "status IN ('abierta', 'bloqueada', 'pagada', 'cancelada')",
             name="ck_customer_order_status",
+        ),
+        # Solo una orden 'abierta' por mesa a la vez (decisión #5 del spec).
+        # Los dining_table_id NULL (mostrador) no colisionan entre sí.
+        Index(
+            "idx_open_order_per_table",
+            "dining_table_id",
+            unique=True,
+            postgresql_where=text("status = 'abierta'"),
         ),
         {"schema": "tenant"},
     )

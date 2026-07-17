@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -6,6 +8,17 @@ class Settings(BaseSettings):
     JWT_SECRET:str = Field(...,env="JWT_SECRET")
     JWT_ALGORITHM:str = Field(default="HS256",env="JWT_ALGORITHM")
     ACCESS_TOKEN_EXPIRY:int = Field(default=60*24,env="ACCESS_TOKEN_EXPIRY")
+
+    # QR / sesión de comensal (flujo público de mesas).
+    # Ventana deslizante de la sesión (dining_sessions.expires_at).
+    SESSION_TTL_MINUTES:int = Field(default=240,env="SESSION_TTL_MINUTES")
+    # Tope absoluto del token de sesión (exp del JWT). La sesión se desliza en DB
+    # sin re-emitir token; el JWT muere en este tope. Default 24h.
+    SESSION_ABS_MAX_MINUTES:int = Field(default=1440,env="SESSION_ABS_MAX_MINUTES")
+    # Secreto dedicado para firmar tokens de QR/sesión. Si es None, el helper
+    # cae a JWT_SECRET (permite rotación aislada sin obligar cambio de .env).
+    QR_TOKEN_SECRET:Optional[str] = Field(default=None,env="QR_TOKEN_SECRET")
+
     PROJECT_NAME:str ="pos"
     REDIS_URL:str =  Field(default="redis://localhost:6379/0",env="REDIS_URL")
     RESEND_API_KEY:str = Field(...,env="RESEND_API_KEY")

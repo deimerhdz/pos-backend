@@ -42,7 +42,7 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             dining_table_id=table_id,
             customer_name=customer_name,
             channel=data.channel.value,
-            status="pending",
+            status="abierta",
             user_id=user_id,
             notes=data.notes,
         )
@@ -57,6 +57,7 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             unit_price = Decimal(variant.price)
             item = OrderItem(
                 order_id=order.id,
+                session_id=data.dining_session_id,
                 product_variant_id=variant.id,
                 quantity=line.quantity,
                 notes=line.notes,

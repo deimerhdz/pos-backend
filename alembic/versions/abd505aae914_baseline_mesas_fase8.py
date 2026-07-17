@@ -1,8 +1,8 @@
-"""baseline heladeria simple
+"""baseline mesas fase8
 
-Revision ID: ca3b1684ba9d
+Revision ID: abd505aae914
 Revises: 
-Create Date: 2026-07-12 12:32:54.674579
+Create Date: 2026-07-17 09:37:56.718669
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = 'ca3b1684ba9d'
+revision: str = 'abd505aae914'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -48,10 +48,20 @@ def upgrade(schema: str) -> None:
     sa.Column('name', sa.String(length=255), nullable=True),
     sa.Column('qr_token', sa.UUID(), nullable=False),
     sa.Column('active', sa.Boolean(), nullable=False),
+    sa.Column('status', sa.String(length=10), server_default='libre', nullable=False),
     sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
+    sa.CheckConstraint("status IN ('libre', 'ocupada')", name=op.f('ck__dining_tables__ck_dining_table_status')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk__dining_tables')),
     sa.UniqueConstraint('number', name=op.f('uq__dining_tables__number')),
     sa.UniqueConstraint('qr_token', name=op.f('uq__dining_tables__qr_token')),
+    schema=schema
+    )
+    op.create_table('invoice_counters',
+    sa.Column('prefix', sa.String(length=20), server_default='', nullable=False),
+    sa.Column('next_number', sa.Integer(), server_default='1', nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk__invoice_counters')),
+    sa.UniqueConstraint('prefix', name=op.f('uq__invoice_counters__prefix')),
     schema=schema
     )
     op.create_table('option_groups',
@@ -122,6 +132,7 @@ def upgrade(schema: str) -> None:
     sa.Column('customer_name', sa.String(length=255), nullable=False),
     sa.Column('status', sa.String(length=10), server_default='open', nullable=False),
     sa.Column('opened_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('expires_at', sa.DateTime(), nullable=True),
     sa.Column('closed_at', sa.DateTime(), nullable=True),
     sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
     sa.CheckConstraint("status IN ('open', 'closed')", name=op.f('ck__dining_sessions__ck_dining_session_status')),
@@ -129,7 +140,6 @@ def upgrade(schema: str) -> None:
     sa.PrimaryKeyConstraint('id', name=op.f('pk__dining_sessions')),
     schema=schema
     )
-    op.create_index('idx_open_session_per_table', 'dining_sessions', ['dining_table_id'], unique=True, schema=schema, postgresql_where=sa.text("status = 'open'"))
     op.create_index(op.f('ix__dining_sessions__dining_table_id'), 'dining_sessions', ['dining_table_id'], unique=False, schema=schema)
     op.create_table('inventory_items',
     sa.Column('name', sa.String(length=255), nullable=False),
@@ -178,6 +188,18 @@ def upgrade(schema: str) -> None:
     schema=schema
     )
     op.create_index(op.f('ix__purchases__supplier_id'), 'purchases', ['supplier_id'], unique=False, schema=schema)
+    op.create_table('carts',
+    sa.Column('session_id', sa.UUID(), nullable=False),
+    sa.Column('status', sa.String(length=12), server_default='abierto', nullable=False),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
+    sa.CheckConstraint("status IN ('abierto', 'confirmado', 'abandonado')", name=op.f('ck__carts__ck_cart_status')),
+    sa.ForeignKeyConstraint(['session_id'], ['tenant_default.dining_sessions.id'], name=op.f('fk__carts__session_id__dining_sessions')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk__carts')),
+    schema=schema
+    )
+    op.create_index('idx_open_cart_per_session', 'carts', ['session_id'], unique=True, schema=schema, postgresql_where=sa.text("status = 'abierto'"))
+    op.create_index(op.f('ix__carts__session_id'), 'carts', ['session_id'], unique=False, schema=schema)
     op.create_table('cash_count_denominations',
     sa.Column('cash_shift_id', sa.UUID(), nullable=False),
     sa.Column('denomination', sa.Numeric(precision=12, scale=2), nullable=False),
@@ -211,18 +233,20 @@ def upgrade(schema: str) -> None:
     sa.Column('dining_table_id', sa.UUID(), nullable=True),
     sa.Column('customer_name', sa.String(length=255), nullable=True),
     sa.Column('channel', sa.String(length=10), server_default='qr', nullable=False),
-    sa.Column('status', sa.String(length=12), server_default='pending', nullable=False),
+    sa.Column('status', sa.String(length=12), server_default='abierta', nullable=False),
+    sa.Column('version', sa.Integer(), server_default='0', nullable=False),
     sa.Column('user_id', sa.UUID(), nullable=True),
     sa.Column('notes', sa.String(length=500), nullable=True),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
     sa.CheckConstraint("channel IN ('qr', 'counter', 'waiter')", name=op.f('ck__customer_orders__ck_customer_order_channel')),
-    sa.CheckConstraint("status IN ('pending', 'preparing', 'served', 'cancelled')", name=op.f('ck__customer_orders__ck_customer_order_status')),
+    sa.CheckConstraint("status IN ('abierta', 'bloqueada', 'pagada', 'cancelada')", name=op.f('ck__customer_orders__ck_customer_order_status')),
     sa.ForeignKeyConstraint(['dining_session_id'], ['tenant_default.dining_sessions.id'], name=op.f('fk__customer_orders__dining_session_id__dining_sessions')),
     sa.ForeignKeyConstraint(['dining_table_id'], ['tenant_default.dining_tables.id'], name=op.f('fk__customer_orders__dining_table_id__dining_tables')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk__customer_orders')),
     schema=schema
     )
+    op.create_index('idx_open_order_per_table', 'customer_orders', ['dining_table_id'], unique=True, schema=schema, postgresql_where=sa.text("status = 'abierta'"))
     op.create_index(op.f('ix__customer_orders__dining_session_id'), 'customer_orders', ['dining_session_id'], unique=False, schema=schema)
     op.create_table('inventory_movements',
     sa.Column('inventory_item_id', sa.UUID(), nullable=False),
@@ -304,9 +328,73 @@ def upgrade(schema: str) -> None:
     )
     op.create_index(op.f('ix__purchase_items__inventory_item_id'), 'purchase_items', ['inventory_item_id'], unique=False, schema=schema)
     op.create_index(op.f('ix__purchase_items__purchase_id'), 'purchase_items', ['purchase_id'], unique=False, schema=schema)
+    op.create_table('cart_items',
+    sa.Column('cart_id', sa.UUID(), nullable=False),
+    sa.Column('product_variant_id', sa.UUID(), nullable=False),
+    sa.Column('quantity', sa.Integer(), server_default='1', nullable=False),
+    sa.Column('unit_price', sa.Numeric(precision=12, scale=2), server_default='0', nullable=False),
+    sa.Column('notes', sa.String(length=500), nullable=True),
+    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
+    sa.CheckConstraint('quantity > 0', name=op.f('ck__cart_items__ck_cart_item_quantity_positive')),
+    sa.ForeignKeyConstraint(['cart_id'], ['tenant_default.carts.id'], name=op.f('fk__cart_items__cart_id__carts'), ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['product_variant_id'], ['tenant_default.product_variants.id'], name=op.f('fk__cart_items__product_variant_id__product_variants')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk__cart_items')),
+    schema=schema
+    )
+    op.create_index(op.f('ix__cart_items__cart_id'), 'cart_items', ['cart_id'], unique=False, schema=schema)
+    op.create_index(op.f('ix__cart_items__product_variant_id'), 'cart_items', ['product_variant_id'], unique=False, schema=schema)
+    op.create_table('order_cancel_logs',
+    sa.Column('order_id', sa.UUID(), nullable=False),
+    sa.Column('motivo', sa.String(length=500), nullable=False),
+    sa.Column('user_id', sa.UUID(), nullable=False),
+    sa.Column('user_name', sa.String(length=255), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
+    sa.ForeignKeyConstraint(['order_id'], ['tenant_default.customer_orders.id'], name=op.f('fk__order_cancel_logs__order_id__customer_orders'), ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk__order_cancel_logs')),
+    schema=schema
+    )
+    op.create_index(op.f('ix__order_cancel_logs__order_id'), 'order_cancel_logs', ['order_id'], unique=False, schema=schema)
+    op.create_table('order_items',
+    sa.Column('order_id', sa.UUID(), nullable=False),
+    sa.Column('session_id', sa.UUID(), nullable=True),
+    sa.Column('product_variant_id', sa.UUID(), nullable=False),
+    sa.Column('quantity', sa.Integer(), server_default='1', nullable=False),
+    sa.Column('unit_price', sa.Numeric(precision=12, scale=2), server_default='0', nullable=False),
+    sa.Column('estado_cocina', sa.String(length=15), server_default='pendiente', nullable=False),
+    sa.Column('void_de', sa.UUID(), nullable=True),
+    sa.Column('notes', sa.String(length=500), nullable=True),
+    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
+    sa.CheckConstraint("estado_cocina IN ('pendiente', 'en_preparacion', 'listo', 'entregado', 'anulado')", name=op.f('ck__order_items__ck_order_item_estado_cocina')),
+    sa.CheckConstraint('quantity > 0', name=op.f('ck__order_items__ck_order_item_quantity_positive')),
+    sa.ForeignKeyConstraint(['order_id'], ['tenant_default.customer_orders.id'], name=op.f('fk__order_items__order_id__customer_orders'), ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['product_variant_id'], ['tenant_default.product_variants.id'], name=op.f('fk__order_items__product_variant_id__product_variants')),
+    sa.ForeignKeyConstraint(['session_id'], ['tenant_default.dining_sessions.id'], name=op.f('fk__order_items__session_id__dining_sessions')),
+    sa.ForeignKeyConstraint(['void_de'], ['tenant_default.order_items.id'], name=op.f('fk__order_items__void_de__order_items')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk__order_items')),
+    schema=schema
+    )
+    op.create_index(op.f('ix__order_items__order_id'), 'order_items', ['order_id'], unique=False, schema=schema)
+    op.create_index(op.f('ix__order_items__product_variant_id'), 'order_items', ['product_variant_id'], unique=False, schema=schema)
+    op.create_index(op.f('ix__order_items__session_id'), 'order_items', ['session_id'], unique=False, schema=schema)
+    op.create_table('recipe_items',
+    sa.Column('product_variant_id', sa.UUID(), nullable=False),
+    sa.Column('inventory_item_id', sa.UUID(), nullable=False),
+    sa.Column('quantity', sa.Numeric(precision=12, scale=3), nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
+    sa.CheckConstraint('quantity > 0', name=op.f('ck__recipe_items__ck_recipe_item_qty_positive')),
+    sa.ForeignKeyConstraint(['inventory_item_id'], ['tenant_default.inventory_items.id'], name=op.f('fk__recipe_items__inventory_item_id__inventory_items')),
+    sa.ForeignKeyConstraint(['product_variant_id'], ['tenant_default.product_variants.id'], name=op.f('fk__recipe_items__product_variant_id__product_variants'), ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk__recipe_items')),
+    sa.UniqueConstraint('product_variant_id', 'inventory_item_id', name='uq__recipe_items__product_variant_id__inventory_item_id'),
+    schema=schema
+    )
+    op.create_index(op.f('ix__recipe_items__inventory_item_id'), 'recipe_items', ['inventory_item_id'], unique=False, schema=schema)
+    op.create_index(op.f('ix__recipe_items__product_variant_id'), 'recipe_items', ['product_variant_id'], unique=False, schema=schema)
     op.create_table('sales',
     sa.Column('dining_session_id', sa.UUID(), nullable=True),
     sa.Column('dining_table_id', sa.UUID(), nullable=True),
+    sa.Column('customer_order_id', sa.UUID(), nullable=True),
     sa.Column('cash_shift_id', sa.UUID(), nullable=False),
     sa.Column('user_id', sa.UUID(), nullable=False),
     sa.Column('user_name', sa.String(length=255), nullable=True),
@@ -321,27 +409,78 @@ def upgrade(schema: str) -> None:
     sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
     sa.CheckConstraint("status IN ('issued', 'paid', 'void')", name=op.f('ck__sales__ck_sale_status')),
     sa.ForeignKeyConstraint(['cash_shift_id'], ['tenant_default.cash_shifts.id'], name=op.f('fk__sales__cash_shift_id__cash_shifts')),
+    sa.ForeignKeyConstraint(['customer_order_id'], ['tenant_default.customer_orders.id'], name=op.f('fk__sales__customer_order_id__customer_orders')),
     sa.ForeignKeyConstraint(['dining_session_id'], ['tenant_default.dining_sessions.id'], name=op.f('fk__sales__dining_session_id__dining_sessions')),
     sa.ForeignKeyConstraint(['dining_table_id'], ['tenant_default.dining_tables.id'], name=op.f('fk__sales__dining_table_id__dining_tables')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk__sales')),
     schema=schema
     )
     op.create_index(op.f('ix__sales__cash_shift_id'), 'sales', ['cash_shift_id'], unique=False, schema=schema)
-    op.create_table('order_items',
-    sa.Column('order_id', sa.UUID(), nullable=False),
-    sa.Column('product_variant_id', sa.UUID(), nullable=False),
-    sa.Column('quantity', sa.Integer(), server_default='1', nullable=False),
-    sa.Column('unit_price', sa.Numeric(precision=12, scale=2), server_default='0', nullable=False),
-    sa.Column('notes', sa.String(length=500), nullable=True),
+    op.create_index(op.f('ix__sales__customer_order_id'), 'sales', ['customer_order_id'], unique=False, schema=schema)
+    op.create_table('cart_item_options',
+    sa.Column('cart_item_id', sa.UUID(), nullable=False),
+    sa.Column('option_id', sa.UUID(), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
-    sa.CheckConstraint('quantity > 0', name=op.f('ck__order_items__ck_order_item_quantity_positive')),
-    sa.ForeignKeyConstraint(['order_id'], ['tenant_default.customer_orders.id'], name=op.f('fk__order_items__order_id__customer_orders'), ondelete='CASCADE'),
-    sa.ForeignKeyConstraint(['product_variant_id'], ['tenant_default.product_variants.id'], name=op.f('fk__order_items__product_variant_id__product_variants')),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk__order_items')),
+    sa.ForeignKeyConstraint(['cart_item_id'], ['tenant_default.cart_items.id'], name=op.f('fk__cart_item_options__cart_item_id__cart_items'), ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['option_id'], ['tenant_default.options.id'], name=op.f('fk__cart_item_options__option_id__options')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk__cart_item_options')),
+    sa.UniqueConstraint('cart_item_id', 'option_id', name='uq__cart_item_options__cart_item_id__option_id'),
     schema=schema
     )
-    op.create_index(op.f('ix__order_items__order_id'), 'order_items', ['order_id'], unique=False, schema=schema)
-    op.create_index(op.f('ix__order_items__product_variant_id'), 'order_items', ['product_variant_id'], unique=False, schema=schema)
+    op.create_index(op.f('ix__cart_item_options__cart_item_id'), 'cart_item_options', ['cart_item_id'], unique=False, schema=schema)
+    op.create_index(op.f('ix__cart_item_options__option_id'), 'cart_item_options', ['option_id'], unique=False, schema=schema)
+    op.create_table('invoices',
+    sa.Column('sale_id', sa.UUID(), nullable=False),
+    sa.Column('customer_order_id', sa.UUID(), nullable=True),
+    sa.Column('prefix', sa.String(length=20), server_default='', nullable=False),
+    sa.Column('number', sa.Integer(), nullable=False),
+    sa.Column('customer_name', sa.String(length=255), nullable=True),
+    sa.Column('subtotal', sa.Numeric(precision=12, scale=2), server_default='0', nullable=False),
+    sa.Column('discount', sa.Numeric(precision=12, scale=2), server_default='0', nullable=False),
+    sa.Column('tax', sa.Numeric(precision=12, scale=2), server_default='0', nullable=False),
+    sa.Column('tip', sa.Numeric(precision=12, scale=2), server_default='0', nullable=False),
+    sa.Column('total', sa.Numeric(precision=12, scale=2), server_default='0', nullable=False),
+    sa.Column('status', sa.String(length=10), server_default='issued', nullable=False),
+    sa.Column('issued_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('user_id', sa.UUID(), nullable=False),
+    sa.Column('user_name', sa.String(length=255), nullable=True),
+    sa.Column('cufe', sa.String(length=255), nullable=True),
+    sa.Column('dian_status', sa.String(length=20), nullable=True),
+    sa.Column('dian_sent_at', sa.DateTime(), nullable=True),
+    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
+    sa.CheckConstraint("status IN ('issued', 'void')", name=op.f('ck__invoices__ck_invoice_status')),
+    sa.ForeignKeyConstraint(['customer_order_id'], ['tenant_default.customer_orders.id'], name=op.f('fk__invoices__customer_order_id__customer_orders')),
+    sa.ForeignKeyConstraint(['sale_id'], ['tenant_default.sales.id'], name=op.f('fk__invoices__sale_id__sales')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk__invoices')),
+    sa.UniqueConstraint('prefix', 'number', name='uq__invoices__prefix__number'),
+    schema=schema
+    )
+    op.create_index(op.f('ix__invoices__customer_order_id'), 'invoices', ['customer_order_id'], unique=False, schema=schema)
+    op.create_index(op.f('ix__invoices__sale_id'), 'invoices', ['sale_id'], unique=True, schema=schema)
+    op.create_table('order_item_options',
+    sa.Column('order_item_id', sa.UUID(), nullable=False),
+    sa.Column('option_id', sa.UUID(), nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
+    sa.ForeignKeyConstraint(['option_id'], ['tenant_default.options.id'], name=op.f('fk__order_item_options__option_id__options')),
+    sa.ForeignKeyConstraint(['order_item_id'], ['tenant_default.order_items.id'], name=op.f('fk__order_item_options__order_item_id__order_items'), ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk__order_item_options')),
+    sa.UniqueConstraint('order_item_id', 'option_id', name='uq__order_item_options__order_item_id__option_id'),
+    schema=schema
+    )
+    op.create_index(op.f('ix__order_item_options__option_id'), 'order_item_options', ['option_id'], unique=False, schema=schema)
+    op.create_index(op.f('ix__order_item_options__order_item_id'), 'order_item_options', ['order_item_id'], unique=False, schema=schema)
+    op.create_table('order_item_void_logs',
+    sa.Column('order_item_id', sa.UUID(), nullable=False),
+    sa.Column('motivo', sa.String(length=500), nullable=False),
+    sa.Column('user_id', sa.UUID(), nullable=False),
+    sa.Column('user_name', sa.String(length=255), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
+    sa.ForeignKeyConstraint(['order_item_id'], ['tenant_default.order_items.id'], name=op.f('fk__order_item_void_logs__order_item_id__order_items'), ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk__order_item_void_logs')),
+    schema=schema
+    )
+    op.create_index(op.f('ix__order_item_void_logs__order_item_id'), 'order_item_void_logs', ['order_item_id'], unique=False, schema=schema)
     op.create_table('payments',
     sa.Column('sale_id', sa.UUID(), nullable=False),
     sa.Column('payment_method_id', sa.UUID(), nullable=False),
@@ -357,20 +496,6 @@ def upgrade(schema: str) -> None:
     )
     op.create_index(op.f('ix__payments__payment_method_id'), 'payments', ['payment_method_id'], unique=False, schema=schema)
     op.create_index(op.f('ix__payments__sale_id'), 'payments', ['sale_id'], unique=False, schema=schema)
-    op.create_table('recipe_items',
-    sa.Column('product_variant_id', sa.UUID(), nullable=False),
-    sa.Column('inventory_item_id', sa.UUID(), nullable=False),
-    sa.Column('quantity', sa.Numeric(precision=12, scale=3), nullable=False),
-    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
-    sa.CheckConstraint('quantity > 0', name=op.f('ck__recipe_items__ck_recipe_item_qty_positive')),
-    sa.ForeignKeyConstraint(['inventory_item_id'], ['tenant_default.inventory_items.id'], name=op.f('fk__recipe_items__inventory_item_id__inventory_items')),
-    sa.ForeignKeyConstraint(['product_variant_id'], ['tenant_default.product_variants.id'], name=op.f('fk__recipe_items__product_variant_id__product_variants'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk__recipe_items')),
-    sa.UniqueConstraint('product_variant_id', 'inventory_item_id', name='uq__recipe_items__product_variant_id__inventory_item_id'),
-    schema=schema
-    )
-    op.create_index(op.f('ix__recipe_items__inventory_item_id'), 'recipe_items', ['inventory_item_id'], unique=False, schema=schema)
-    op.create_index(op.f('ix__recipe_items__product_variant_id'), 'recipe_items', ['product_variant_id'], unique=False, schema=schema)
     op.create_table('sale_items',
     sa.Column('sale_id', sa.UUID(), nullable=False),
     sa.Column('product_variant_id', sa.UUID(), nullable=False),
@@ -387,18 +512,6 @@ def upgrade(schema: str) -> None:
     schema=schema
     )
     op.create_index(op.f('ix__sale_items__sale_id'), 'sale_items', ['sale_id'], unique=False, schema=schema)
-    op.create_table('order_item_options',
-    sa.Column('order_item_id', sa.UUID(), nullable=False),
-    sa.Column('option_id', sa.UUID(), nullable=False),
-    sa.Column('id', sa.UUID(), nullable=False, comment='Unique record identifier'),
-    sa.ForeignKeyConstraint(['option_id'], ['tenant_default.options.id'], name=op.f('fk__order_item_options__option_id__options')),
-    sa.ForeignKeyConstraint(['order_item_id'], ['tenant_default.order_items.id'], name=op.f('fk__order_item_options__order_item_id__order_items'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk__order_item_options')),
-    sa.UniqueConstraint('order_item_id', 'option_id', name='uq__order_item_options__order_item_id__option_id'),
-    schema=schema
-    )
-    op.create_index(op.f('ix__order_item_options__option_id'), 'order_item_options', ['option_id'], unique=False, schema=schema)
-    op.create_index(op.f('ix__order_item_options__order_item_id'), 'order_item_options', ['order_item_id'], unique=False, schema=schema)
     # ### end Alembic commands ###
 
 
@@ -409,22 +522,37 @@ def downgrade(schema: str) -> None:
     schema_quoted = preparer.format_schema(schema)
     
     # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_index(op.f('ix__order_item_options__order_item_id'), table_name='order_item_options', schema=schema)
-    op.drop_index(op.f('ix__order_item_options__option_id'), table_name='order_item_options', schema=schema)
-    op.drop_table('order_item_options', schema=schema)
     op.drop_index(op.f('ix__sale_items__sale_id'), table_name='sale_items', schema=schema)
     op.drop_table('sale_items', schema=schema)
-    op.drop_index(op.f('ix__recipe_items__product_variant_id'), table_name='recipe_items', schema=schema)
-    op.drop_index(op.f('ix__recipe_items__inventory_item_id'), table_name='recipe_items', schema=schema)
-    op.drop_table('recipe_items', schema=schema)
     op.drop_index(op.f('ix__payments__sale_id'), table_name='payments', schema=schema)
     op.drop_index(op.f('ix__payments__payment_method_id'), table_name='payments', schema=schema)
     op.drop_table('payments', schema=schema)
+    op.drop_index(op.f('ix__order_item_void_logs__order_item_id'), table_name='order_item_void_logs', schema=schema)
+    op.drop_table('order_item_void_logs', schema=schema)
+    op.drop_index(op.f('ix__order_item_options__order_item_id'), table_name='order_item_options', schema=schema)
+    op.drop_index(op.f('ix__order_item_options__option_id'), table_name='order_item_options', schema=schema)
+    op.drop_table('order_item_options', schema=schema)
+    op.drop_index(op.f('ix__invoices__sale_id'), table_name='invoices', schema=schema)
+    op.drop_index(op.f('ix__invoices__customer_order_id'), table_name='invoices', schema=schema)
+    op.drop_table('invoices', schema=schema)
+    op.drop_index(op.f('ix__cart_item_options__option_id'), table_name='cart_item_options', schema=schema)
+    op.drop_index(op.f('ix__cart_item_options__cart_item_id'), table_name='cart_item_options', schema=schema)
+    op.drop_table('cart_item_options', schema=schema)
+    op.drop_index(op.f('ix__sales__customer_order_id'), table_name='sales', schema=schema)
+    op.drop_index(op.f('ix__sales__cash_shift_id'), table_name='sales', schema=schema)
+    op.drop_table('sales', schema=schema)
+    op.drop_index(op.f('ix__recipe_items__product_variant_id'), table_name='recipe_items', schema=schema)
+    op.drop_index(op.f('ix__recipe_items__inventory_item_id'), table_name='recipe_items', schema=schema)
+    op.drop_table('recipe_items', schema=schema)
+    op.drop_index(op.f('ix__order_items__session_id'), table_name='order_items', schema=schema)
     op.drop_index(op.f('ix__order_items__product_variant_id'), table_name='order_items', schema=schema)
     op.drop_index(op.f('ix__order_items__order_id'), table_name='order_items', schema=schema)
     op.drop_table('order_items', schema=schema)
-    op.drop_index(op.f('ix__sales__cash_shift_id'), table_name='sales', schema=schema)
-    op.drop_table('sales', schema=schema)
+    op.drop_index(op.f('ix__order_cancel_logs__order_id'), table_name='order_cancel_logs', schema=schema)
+    op.drop_table('order_cancel_logs', schema=schema)
+    op.drop_index(op.f('ix__cart_items__product_variant_id'), table_name='cart_items', schema=schema)
+    op.drop_index(op.f('ix__cart_items__cart_id'), table_name='cart_items', schema=schema)
+    op.drop_table('cart_items', schema=schema)
     op.drop_index(op.f('ix__purchase_items__purchase_id'), table_name='purchase_items', schema=schema)
     op.drop_index(op.f('ix__purchase_items__inventory_item_id'), table_name='purchase_items', schema=schema)
     op.drop_table('purchase_items', schema=schema)
@@ -439,11 +567,15 @@ def downgrade(schema: str) -> None:
     op.drop_index('idx_invmov_ref', table_name='inventory_movements', schema=schema)
     op.drop_table('inventory_movements', schema=schema)
     op.drop_index(op.f('ix__customer_orders__dining_session_id'), table_name='customer_orders', schema=schema)
+    op.drop_index('idx_open_order_per_table', table_name='customer_orders', schema=schema, postgresql_where=sa.text("status = 'abierta'"))
     op.drop_table('customer_orders', schema=schema)
     op.drop_index(op.f('ix__cash_movements__cash_shift_id'), table_name='cash_movements', schema=schema)
     op.drop_table('cash_movements', schema=schema)
     op.drop_index(op.f('ix__cash_count_denominations__cash_shift_id'), table_name='cash_count_denominations', schema=schema)
     op.drop_table('cash_count_denominations', schema=schema)
+    op.drop_index(op.f('ix__carts__session_id'), table_name='carts', schema=schema)
+    op.drop_index('idx_open_cart_per_session', table_name='carts', schema=schema, postgresql_where=sa.text("status = 'abierto'"))
+    op.drop_table('carts', schema=schema)
     op.drop_index(op.f('ix__purchases__supplier_id'), table_name='purchases', schema=schema)
     op.drop_table('purchases', schema=schema)
     op.drop_index(op.f('ix__products__category_id'), table_name='products', schema=schema)
@@ -452,7 +584,6 @@ def downgrade(schema: str) -> None:
     op.drop_index(op.f('ix__inventory_items__name'), table_name='inventory_items', schema=schema)
     op.drop_table('inventory_items', schema=schema)
     op.drop_index(op.f('ix__dining_sessions__dining_table_id'), table_name='dining_sessions', schema=schema)
-    op.drop_index('idx_open_session_per_table', table_name='dining_sessions', schema=schema, postgresql_where=sa.text("status = 'open'"))
     op.drop_table('dining_sessions', schema=schema)
     op.drop_index(op.f('ix__cash_shifts__cash_register_id'), table_name='cash_shifts', schema=schema)
     op.drop_index('idx_open_shift_per_register', table_name='cash_shifts', schema=schema, postgresql_where=sa.text("status = 'open'"))
@@ -462,6 +593,7 @@ def downgrade(schema: str) -> None:
     op.drop_table('suppliers', schema=schema)
     op.drop_table('payment_methods', schema=schema)
     op.drop_table('option_groups', schema=schema)
+    op.drop_table('invoice_counters', schema=schema)
     op.drop_table('dining_tables', schema=schema)
     op.drop_index(op.f('ix__categories__name'), table_name='categories', schema=schema)
     op.drop_table('categories', schema=schema)

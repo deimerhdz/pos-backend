@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.db import get_db
+from app.core.qr_context import open_qr_context
 from app.models.category import Category
 from app.models.product import Product
 from app.models.product_option_group import ProductOptionGroup
@@ -76,7 +77,7 @@ def public_menu(db: Session = Depends(get_db)):
     return _build_menu(db)
 
 
-@router.get("/qr/{qr_token}", summary="Resolver mesa por token QR + menú")
+@router.get("/qr/{qr_token}", summary="Resolver mesa por token QR (UUID legacy) + menú")
 def menu_by_qr(qr_token: UUID, db: Session = Depends(get_db)):
     table = db.execute(
         select(DiningTable).where(DiningTable.qr_token == qr_token, DiningTable.active.is_(True))
@@ -87,3 +88,21 @@ def menu_by_qr(qr_token: UUID, db: Session = Depends(get_db)):
         "table": MenuTableResponse.model_validate(table),
         "menu": _build_menu(db),
     }
+
+
+@router.get("/qr-token/{token}", summary="Resolver mesa por token QR firmado + menú")
+def menu_by_signed_qr(token: str):
+    """Flujo público del comensal: el token firmado lleva tenant + mesa, así que
+    resuelve todo sin header x-tenant-host y sin exponer el table_id plano."""
+    with open_qr_context(token) as ctx:
+        table = ctx.db.execute(
+            select(DiningTable).where(
+                DiningTable.id == ctx.table_id, DiningTable.active.is_(True)
+            )
+        ).scalar_one_or_none()
+        if table is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Mesa no encontrada o inactiva")
+        return {
+            "table": MenuTableResponse.model_validate(table),
+            "menu": _build_menu(ctx.db),
+        }

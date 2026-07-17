@@ -44,6 +44,10 @@ class TokenBearer(HTTPBearer):
         if not self.token_valid(token):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN ,detail="Invalid or expired token")
 
+        # Un token de QR/sesión (claim `typ`) nunca es un token de usuario.
+        if token_data and token_data.get("typ"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid or expired token")
+
        
         if await token_in_blocklist(token_data["jti"]):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
@@ -86,7 +90,7 @@ def get_current_user(
 ) -> User:
     token_data = decode_token(credentials.credentials)
     logger.info(f"Token data decodificado: {token_data}")
-    if not token_data or token_data.get("refresh"):
+    if not token_data or token_data.get("refresh") or token_data.get("typ"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
@@ -123,7 +127,7 @@ def get_authenticated_user(
     """Usuario autenticado por JWT contra el schema shared. Vale para super admin
     (tenant_id NULL) y usuarios de tenant, sin necesitar x-tenant-host."""
     token_data = decode_token(credentials.credentials)
-    if not token_data or token_data.get("refresh"):
+    if not token_data or token_data.get("refresh") or token_data.get("typ"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
@@ -156,7 +160,7 @@ def get_current_super_admin(
 ) -> User:
     """Autentica al super admin global por JWT (sin requerir x-tenant-host)."""
     token_data = decode_token(credentials.credentials)
-    if not token_data or token_data.get("refresh"):
+    if not token_data or token_data.get("refresh") or token_data.get("typ"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",

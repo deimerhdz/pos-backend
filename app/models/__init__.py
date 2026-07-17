@@ -24,9 +24,16 @@ from .cash_count_denomination import CashCountDenomination
 # Mesas y órdenes (QR)
 from .dining_table import DiningTable
 from .dining_session import DiningSession
+from .cart import Cart
+from .cart_item import CartItem, CartItemOption
 from .customer_order import CustomerOrder
 from .order_item import OrderItem, OrderItemOption
+from .order_cancel_log import OrderCancelLog
+from .order_item_void_log import OrderItemVoidLog
 
 # Ventas
 from .sale import Sale, SaleItem
 from .payment import PaymentMethod, Payment
+
+# Facturación
+from .invoice import Invoice, InvoiceCounter
