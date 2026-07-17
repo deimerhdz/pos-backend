@@ -5,17 +5,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
 
-from app.core.db import get_db
+from app.core.db import get_db, get_tenant
 from app.core.crud import get_or_404
 from app.core.dependencies import get_current_user, require_tenant_admin
-from app.core.models import User
+from app.core.models import User, Tenant
+from app.core.qr_token import mint_qr_token
 from app.models.dining_table import DiningTable
 from app.models.dining_session import DiningSession
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem
 from app.api.v1.orders import service
 from app.api.v1.orders.schemas import (
-    TableCreate, TableUpdate, TableResponse,
+    TableCreate, TableUpdate, TableResponse, TableQrTokenResponse,
     SessionOpen, SessionResponse,
     OrderCreate, OrderStatusUpdate, OrderResponse,
 )
@@ -63,6 +64,27 @@ def update_table(
     db.commit()
     db.refresh(table)
     return table
+
+
+@router.get(
+    "/tables/{table_id}/qr-token",
+    response_model=TableQrTokenResponse,
+    summary="Emitir token firmado del QR de la mesa (imprimible)",
+)
+def issue_table_qr_token(
+    table_id: UUID,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+    _: User = Depends(require_tenant_admin),
+):
+    table = get_or_404(db, DiningTable, table_id, "Table not found")
+    token = mint_qr_token(tenant.id, table.id)
+    return TableQrTokenResponse(
+        table_id=table.id,
+        number=table.number,
+        qr_token=token,
+        menu_path=f"/api/v1/menu/qr-token/{token}",
+    )
 
 
 # ============================ Sesiones (público, QR) ============================

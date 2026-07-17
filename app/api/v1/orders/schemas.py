@@ -40,6 +40,15 @@ class TableResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class TableQrTokenResponse(BaseModel):
+    """Token firmado (tenant_id + table_id) para imprimir en el QR de la mesa,
+    junto al path público del menú que lo consume."""
+    table_id: UUID
+    number: int
+    qr_token: str
+    menu_path: str
+
+
 # ---------- Sesiones ----------
 class SessionOpen(BaseModel):
     qr_token: UUID = Field(..., description="Token QR de la mesa escaneada.")
