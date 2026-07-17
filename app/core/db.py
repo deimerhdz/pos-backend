@@ -1,4 +1,6 @@
 import logging
+import uuid
+from datetime import datetime, timezone
 
 from contextlib import contextmanager
 from fastapi import Depends,Request,HTTPException
@@ -139,14 +141,85 @@ def get_tenant(req: Request) -> Tenant:
 
     return tenant
 
+def resolve_tenant_by_id(tenant_id: int) -> Tenant:
+    """Gemelo de get_tenant() pero resolviendo por id en vez de host. Lo usa el
+    flujo público de QR/sesión, donde el tenant viaja firmado dentro del token
+    (claim `t`) y no hay header x-tenant-host."""
+    with with_db(None) as db:
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).one_or_none()
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return tenant
+
+
 def get_db(tenant: Tenant = Depends(get_tenant)):
     logger.info(f"Obteniendo DB para tenant: {tenant.name} (schema: {tenant.schema})")
     with with_db(tenant.schema) as db:
         yield db
 
 
+ROLE_NAMES = ("SUPER_ADMIN", "ADMIN", "CASHIER")
+
+
+def _seed_shared_data(db):
+    """Seed base data (roles + super admin) into the shared schema.
+
+    Runs during first-time initialization, right after the shared tables are
+    created and before Alembic is stamped to head. Idempotent by name/email so
+    it is safe if the shared tables already hold some rows.
+    """
+    now = datetime.now(timezone.utc)
+
+    existing_roles = {
+        row[0] for row in db.execute(text("SELECT name FROM shared.roles")).fetchall()
+    }
+    for name in ROLE_NAMES:
+        if name in existing_roles:
+            continue
+        db.execute(
+            text(
+                "INSERT INTO shared.roles (id, name, active, created_at) "
+                "VALUES (:id, :name, true, :created_at)"
+            ),
+            {"id": uuid.uuid4(), "name": name, "created_at": now},
+        )
+
+    super_admin_exists = db.execute(
+        text("SELECT 1 FROM shared.users WHERE email = :email"),
+        {"email": settings.SUPER_ADMIN_EMAIL},
+    ).first()
+    if super_admin_exists:
+        logger.info("shared base data already present")
+        return
+
+    role_id = db.execute(
+        text("SELECT id FROM shared.roles WHERE name = 'SUPER_ADMIN' LIMIT 1")
+    ).scalar_one()
+
+    password_hash = bcrypt.hashpw(
+        settings.SUPER_ADMIN_PASSWORD.encode(), bcrypt.gensalt()
+    ).decode()
+
+    db.execute(
+        text(
+            "INSERT INTO shared.users "
+            "(id, name, email, password_hash, active, must_change_password, role_id, tenant_id, created_at) "
+            "VALUES (:id, :name, :email, :password_hash, true, true, :role_id, NULL, :created_at)"
+        ),
+        {
+            "id": uuid.uuid4(),
+            "name": settings.SUPER_ADMIN_NAME,
+            "email": settings.SUPER_ADMIN_EMAIL,
+            "password_hash": password_hash,
+            "role_id": role_id,
+            "created_at": now,
+        },
+    )
+    logger.info("seeded roles and super admin user")
+
+
 def initialize_database():
-    
+
     with engine.begin() as db:
         context = MigrationContext.configure(db)
         if context.get_current_revision() is not None:
@@ -157,6 +230,8 @@ def initialize_database():
 
         logger.info("creating shared tables...")
         get_shared_metadata().create_all(bind=db)
+        logger.info("seeding shared base data...")
+        _seed_shared_data(db)
         logger.info("register versión in Alembic...")
         alembic_config.attributes["connection"] = db
         command.stamp(alembic_config, "head", purge=True)

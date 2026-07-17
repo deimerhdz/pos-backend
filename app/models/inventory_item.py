@@ -1,0 +1,52 @@
+from app.core.models import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import String, Boolean, Numeric, ForeignKey, CheckConstraint
+from sqlalchemy.orm import mapped_column, Mapped, relationship
+from typing import Optional, TYPE_CHECKING
+from decimal import Decimal
+
+if TYPE_CHECKING:
+    from .unit_measure import UnitMeasure
+
+
+class InventoryItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Insumo de inventario con stock único (sin lotes ni vencimiento).
+
+    `type` distingue materia prima (se consume por receta) de un producto
+    empacado que se vende/descuenta directamente.
+    """
+
+    __tablename__ = "inventory_items"
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+
+    unit_measure_id: Mapped[UUID] = mapped_column(
+        ForeignKey("unit_measures.id"), nullable=False, index=True
+    )
+    unit_measure: Mapped["UnitMeasure"] = relationship()
+
+    type: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="raw_material"
+    )
+
+    current_stock: Mapped[Decimal] = mapped_column(
+        Numeric(12, 3), nullable=False, default=0, server_default="0"
+    )
+
+    min_stock: Mapped[Decimal] = mapped_column(
+        Numeric(12, 3), nullable=False, default=0, server_default="0"
+    )
+
+    unit_cost: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, default=0, server_default="0"
+    )
+
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "type IN ('raw_material', 'packaged')",
+            name="ck_inventory_item_type",
+        ),
+        {"schema": "tenant"},
+    )

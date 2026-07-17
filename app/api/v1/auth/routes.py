@@ -7,10 +7,11 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.exc import SQLAlchemyError, OperationalError
 from datetime import datetime
 from sqlalchemy.orm import Session
-from app.core.db import with_db, get_db
+from app.core.db import with_db
 from app.core.models import User, Tenant
 from app.core.utils import verify_password, create_access_token, generate_passwd_hash
-from app.core.dependencies import RefreshTokenBearer,AccessTokenBearer, get_current_user
+from app.core.dependencies import RefreshTokenBearer,AccessTokenBearer, get_authenticated_user
+from app.core.dependencies import get_shared_db
 from app.core.exceptions import InvalidToken
 from app.api.v1.auth.schemas import LoginRequest, ChangePasswordRequest
 from app.core.redis import add_jti_to_blocklist
@@ -33,7 +34,8 @@ async def login(body: LoginRequest, req: Request):
                 db.query(Tenant).filter(Tenant.host == host).one_or_none()
                 if host else None
             )
-
+            logger.info(f"Tenant resuelto: {tenant}")
+            logger.info(f"Tenant resuelto: {tenant.name if tenant else 'None'}")
             stmt = select(User).options(joinedload(User.role)).where(User.email == body.email)
             if tenant is not None:
                 stmt = stmt.where(User.tenant_id == tenant.id)   # usuario de tenant
@@ -43,6 +45,7 @@ async def login(body: LoginRequest, req: Request):
             user = db.execute(stmt).scalar_one_or_none()
 
             # Validaciones dentro de la sesión para evitar objetos detached.
+            logger.info(f"Usuario encontrado: {user.email if user else 'None'}")
             if not user or not verify_password(body.password, user.password_hash):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
@@ -90,8 +93,8 @@ async def login(body: LoginRequest, req: Request):
 @auth_router.post("/change-password")
 def change_password(
     body: ChangePasswordRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    user: User = Depends(get_authenticated_user),
+    db: Session = Depends(get_shared_db),
 ):
     if not verify_password(body.current_password, user.password_hash):
         raise HTTPException(

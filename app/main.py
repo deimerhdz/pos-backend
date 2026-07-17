@@ -12,13 +12,18 @@ from app.api.v1.auth.routes import auth_router
 from app.api.v1.categories.router import router as categories_router
 from app.api.v1.unit_measures.router import router as unit_measures_router
 from app.api.v1.products.router import router as products_router
-from app.api.v1.tables.router import router as tables_router
-from app.api.v1.inventory.router import router as inventory_router
 from app.api.v1.users.router import router as users_router
 from app.api.v1.super_admin.router import router as super_admin_router
 from app.api.v1.menu.router import router as menu_router
 from app.api.v1.orders.router import router as orders_router
-
+from app.api.v1.catalog.router import router as catalog_router
+from app.api.v1.inventory.router import router as inventory_router
+from app.api.v1.cash.router import router as cash_router
+from app.api.v1.sales.router import router as sales_router
+from app.api.v1.uploads.router import router as uploads_router
+from app.api.v1.cart.router import router as cart_router
+from app.api.v1.invoices.router import router as invoices_router
+from app.api.v1.health.router import router as health_router
 load_dotenv()
 
 logging.basicConfig(
@@ -67,12 +72,18 @@ def create_app()->FastAPI:
     app.include_router(categories_router, prefix="/api/v1")
     app.include_router(unit_measures_router, prefix="/api/v1")
     app.include_router(products_router, prefix="/api/v1")
-    app.include_router(tables_router, prefix="/api/v1")
-    app.include_router(inventory_router, prefix="/api/v1")
     app.include_router(users_router, prefix="/api/v1")
     app.include_router(super_admin_router, prefix="/api/v1")
     app.include_router(menu_router, prefix="/api/v1")
     app.include_router(orders_router, prefix="/api/v1")
+    app.include_router(catalog_router, prefix="/api/v1")
+    app.include_router(inventory_router, prefix="/api/v1")
+    app.include_router(cash_router, prefix="/api/v1")
+    app.include_router(sales_router, prefix="/api/v1")
+    app.include_router(uploads_router, prefix="/api/v1")
+    app.include_router(cart_router, prefix="/api/v1")
+    app.include_router(invoices_router, prefix="/api/v1")
+    app.include_router(health_router, prefix="/api/v1")
     return app
 
 app = create_app()

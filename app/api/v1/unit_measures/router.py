@@ -76,7 +76,10 @@ def create_unit_measure(
 ):
     ensure_unique(db, UnitMeasure, UnitMeasure.abbreviation, body.abbreviation, "Unit measure abbreviation already exists")
 
-    unit_measure = UnitMeasure(name=body.name, abbreviation=body.abbreviation)
+    unit_measure = UnitMeasure(
+        name=body.name,
+        abbreviation=body.abbreviation,
+    )
     db.add(unit_measure)
     db.commit()
     db.refresh(unit_measure)
