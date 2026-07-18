@@ -59,7 +59,7 @@ def create_app()->FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origin_regex=r"^https?://([a-z0-9-]+\.)?localhost:4200$",
+        allow_origin_regex=r"^https?://([a-z0-9-]+\.)?localhost:4200$|^https://([a-z0-9-]+\.)?skeilopos\.com$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
