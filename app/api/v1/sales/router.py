@@ -28,7 +28,12 @@ def list_payment_methods(db: Session = Depends(get_db), _: User = Depends(get_cu
 @router.post("/payment-methods", response_model=PaymentMethodResponse, status_code=status.HTTP_201_CREATED, summary="Crear método de pago")
 def create_payment_method(body: PaymentMethodCreate, db: Session = Depends(get_db), _: User = Depends(require_tenant_admin)):
     ensure_unique(db, PaymentMethod, PaymentMethod.name, body.name, "Payment method already exists")
-    pm = PaymentMethod(name=body.name, is_cash=body.is_cash)
+    # Mantener is_cash y type consistentes (is_cash ⇔ type == 'cash').
+    if body.type is not None:
+        method_type = body.type.value
+    else:
+        method_type = "cash" if body.is_cash else "other"
+    pm = PaymentMethod(name=body.name, type=method_type, is_cash=(method_type == "cash"))
     db.add(pm)
     db.commit()
     db.refresh(pm)

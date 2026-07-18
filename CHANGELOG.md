@@ -5,6 +5,30 @@ Todos los cambios notables de este proyecto se documentan en este archivo.
 El formato se basa en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
+## [Unreleased]
+
+### Caja (rediseño del módulo)
+- **Movimientos tipados**: `cash_movements.type` → `kind`
+  (`ingreso`/`egreso`/`retiro`) + `category`; `retiro` (salida a banco/caja
+  fuerte) se reporta aparte del `egreso` (gasto operativo). `description` pasa a
+  opcional; se snapshotea `user_name` del cajero. Movimientos inmutables.
+- **Reconciliación extendida**: ventas del turno desglosadas por método de pago
+  (`ventas_efectivo`/`ventas_tarjeta`/`ventas_transferencia` + `sales_by_method`)
+  y movimientos por `kind`. `expected = apertura + ventas_efectivo + ingresos −
+  egresos − retiros`; solo el efectivo suma al esperado.
+- **Métodos de pago**: `payment_methods.type`
+  (`cash`/`card`/`transfer`/`other`, CHECK) para clasificar el desglose;
+  `is_cash` y `type` se mantienen consistentes (`is_cash ⇔ type='cash'`).
+- **Cierre con observación**: `cash_shifts.close_note`; obligatoria (422) si el
+  arqueo no cuadra (`difference != 0`).
+- **Endpoints nuevos**: `GET /cash/shifts/current` (turno abierto de una caja),
+  `GET /cash/shifts/{id}/movements` (listado), `GET /cash/shifts/{id}/report`
+  (reporte de cierre consolidado).
+- Corrige el doble conteo del cierre cuando llegaban `counted_amount` y
+  `denominations` a la vez (ahora las denominaciones tienen prioridad).
+- Migración Alembic incremental con backfill (`in→ingreso`, `out→egreso`,
+  `is_cash→type='cash'`), aplicada por cada schema de tenant.
+
 ## [1.0.0] - 2026-07-17
 
 Primera versión estable. Backend POS multi-tenant (schema-per-tenant) sobre

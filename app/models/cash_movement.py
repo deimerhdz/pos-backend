@@ -8,8 +8,9 @@ from datetime import datetime
 
 
 class CashMovement(UUIDPrimaryKeyMixin, Base):
-    """Entrada/salida de efectivo del turno distinta a una venta (retiros,
-    fondos, gastos menores)."""
+    """Movimiento manual de efectivo del turno, distinto a una venta:
+    ingreso (aporte al cajón), egreso (gasto operativo) o retiro (salida a
+    banco/caja fuerte). Las ventas NO se guardan aquí: se derivan de Payment."""
 
     __tablename__ = "cash_movements"
 
@@ -17,21 +18,28 @@ class CashMovement(UUIDPrimaryKeyMixin, Base):
         ForeignKey("cash_shifts.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
-    type: Mapped[str] = mapped_column(String(10), nullable=False)
+    # ingreso (+), egreso (−), retiro (−) sobre el efectivo esperado.
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    # Categoría del movimiento (p. ej. "Compra de hielo", "Consignación").
+    category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
 
-    description: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # Referencia blanda a shared.users.id (sin FK cross-schema).
+    # Referencia blanda a shared.users.id (sin FK cross-schema) + snapshot.
     user_id: Mapped[Optional[UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    user_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )
 
     __table_args__ = (
-        CheckConstraint("type IN ('in', 'out')", name="ck_cash_movement_type"),
+        CheckConstraint(
+            "kind IN ('ingreso', 'egreso', 'retiro')", name="ck_cash_movement_kind"
+        ),
         CheckConstraint("amount > 0", name="ck_cash_movement_amount_positive"),
         {"schema": "tenant"},
     )
