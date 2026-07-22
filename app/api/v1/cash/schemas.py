@@ -6,9 +6,10 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class CashMovementType(str, Enum):
-    IN = "in"
-    OUT = "out"
+class CashMovementKind(str, Enum):
+    INGRESO = "ingreso"
+    EGRESO = "egreso"
+    RETIRO = "retiro"
 
 
 # ---------- Cajas ----------
@@ -38,6 +39,8 @@ class DenominationIn(BaseModel):
 class ShiftClose(BaseModel):
     counted_amount: Decimal | None = Field(None, ge=0, max_digits=12, decimal_places=2)
     denominations: list[DenominationIn] = Field(default_factory=list)
+    # Obligatoria si difference != 0 (se valida en el router).
+    close_note: str | None = Field(None, max_length=500)
 
 
 class ShiftResponse(BaseModel):
@@ -50,36 +53,65 @@ class ShiftResponse(BaseModel):
     closed_at: datetime | None = None
     counted_amount: Decimal | None = None
     status: str
+    close_note: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
 # ---------- Movimientos de efectivo ----------
 class CashMovementIn(BaseModel):
-    type: CashMovementType
+    kind: CashMovementKind
     amount: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
-    description: str = Field(..., min_length=1, max_length=255)
+    category: str = Field(..., min_length=1, max_length=100)
+    description: str | None = Field(None, max_length=255)
 
 
 class CashMovementResponse(BaseModel):
     id: UUID
     cash_shift_id: UUID
-    type: str
+    kind: str
     amount: Decimal
-    description: str
+    category: str | None = None
+    description: str | None = None
+    user_name: str | None = None
     occurred_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
 
-# ---------- Arqueo ----------
+# ---------- Arqueo / Reconciliación ----------
+class SalesByMethod(BaseModel):
+    method_id: UUID
+    method_name: str
+    method_type: str
+    total: Decimal
+    count: int
+
+
 class ReconciliationResponse(BaseModel):
     cash_shift_id: UUID
     status: str
     opening_amount: Decimal
-    cash_sales: Decimal
-    cash_in: Decimal
-    cash_out: Decimal
+    # Ventas del turno desglosadas por clasificación del método de pago.
+    ventas_efectivo: Decimal       # ÚNICA que suma a expected
+    ventas_tarjeta: Decimal        # informativa
+    ventas_transferencia: Decimal  # informativa
+    sales_by_method: list[SalesByMethod]
+    # Movimientos manuales por kind.
+    ingresos: Decimal
+    egresos: Decimal
+    retiros: Decimal
     expected: Decimal
     counted_amount: Decimal | None = None
     difference: Decimal | None = None
+    # DEPRECADO: alias de ventas_efectivo por compatibilidad con el frontend.
+    cash_sales: Decimal
+
+
+# ---------- Reporte de cierre ----------
+class ShiftReportResponse(BaseModel):
+    shift: ShiftResponse
+    reconciliation: ReconciliationResponse
+    movements: list[CashMovementResponse]
+    denominations: list[DenominationIn]
+    close_note: str | None = None

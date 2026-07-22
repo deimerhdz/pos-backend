@@ -1,3 +1,4 @@
+from enum import Enum
 from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
@@ -6,14 +7,25 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------- Métodos de pago ----------
+class PaymentMethodType(str, Enum):
+    CASH = "cash"
+    CARD = "card"
+    TRANSFER = "transfer"
+    OTHER = "other"
+
+
 class PaymentMethodCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, examples=["Efectivo", "Nequi"])
+    # Clasificación del método para el desglose de ventas del arqueo.
+    # Si se omite, se deriva de `is_cash` (cash / other).
+    type: PaymentMethodType | None = None
     is_cash: bool = False
 
 
 class PaymentMethodResponse(BaseModel):
     id: UUID
     name: str
+    type: str
     is_cash: bool
     active: bool
 

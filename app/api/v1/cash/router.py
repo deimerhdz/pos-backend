@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -19,7 +19,8 @@ from app.api.v1.cash.schemas import (
     RegisterCreate, RegisterResponse,
     ShiftOpen, ShiftClose, ShiftResponse,
     CashMovementIn, CashMovementResponse,
-    ReconciliationResponse,
+    ReconciliationResponse, ShiftReportResponse,
+    DenominationIn,
 )
 
 router = APIRouter(prefix="/cash", tags=["cash"])
@@ -62,23 +63,46 @@ def open_shift(body: ShiftOpen, db: Session = Depends(get_db), user: User = Depe
     return shift
 
 
+@router.get("/shifts/current", response_model=ShiftResponse, summary="Turno abierto actual de una caja")
+def current_shift(cash_register_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    shift = service.get_open_shift(db, cash_register_id)
+    if shift is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "La caja no tiene un turno abierto")
+    return shift
+
+
 @router.post("/shifts/{shift_id}/close", response_model=ShiftResponse, summary="Cerrar turno (arqueo)")
 def close_shift(shift_id: UUID, body: ShiftClose, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     shift = get_or_404(db, CashShift, shift_id, "Shift not found")
     if shift.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "El turno ya está cerrado")
 
-    counted = body.counted_amount
+    # counted = Σ(denominación*cantidad) si se envían denominaciones; si no, el valor enviado.
     if body.denominations:
-        counted = sum((d.denomination * d.quantity for d in body.denominations), start=counted or 0)
+        counted = sum((d.denomination * d.quantity for d in body.denominations), start=0)
+    else:
+        counted = body.counted_amount
+
+    shift.counted_amount = counted
+
+    # difference != 0 exige observación (close_note).
+    if counted is not None:
+        recon = service.reconcile(db, shift)
+        if recon["difference"] != 0 and not (body.close_note and body.close_note.strip()):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "El arqueo no cuadra: la observación (close_note) es obligatoria",
+            )
+
+    if body.denominations:
         for d in body.denominations:
             db.add(CashCountDenomination(
                 cash_shift_id=shift.id, denomination=d.denomination, quantity=d.quantity
             ))
 
-    shift.counted_amount = counted
+    shift.close_note = body.close_note
     shift.status = "closed"
-    shift.closed_at = datetime.utcnow()
+    shift.closed_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(shift)
     return shift
@@ -90,15 +114,51 @@ def reconciliation(shift_id: UUID, db: Session = Depends(get_db), _: User = Depe
     return service.reconcile(db, shift)
 
 
+@router.get("/shifts/{shift_id}/report", response_model=ShiftReportResponse, summary="Reporte de cierre consolidado")
+def shift_report(shift_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    shift = get_or_404(db, CashShift, shift_id, "Shift not found")
+    movements = db.execute(
+        select(CashMovement)
+        .where(CashMovement.cash_shift_id == shift.id)
+        .order_by(CashMovement.occurred_at.desc())
+    ).scalars().all()
+    denominations = db.execute(
+        select(CashCountDenomination)
+        .where(CashCountDenomination.cash_shift_id == shift.id)
+        .order_by(CashCountDenomination.denomination.desc())
+    ).scalars().all()
+    return {
+        "shift": shift,
+        "reconciliation": service.reconcile(db, shift),
+        "movements": movements,
+        "denominations": [
+            DenominationIn(denomination=d.denomination, quantity=d.quantity)
+            for d in denominations
+        ],
+        "close_note": shift.close_note,
+    }
+
+
 # ============================ Movimientos de efectivo ============================
-@router.post("/shifts/{shift_id}/movements", response_model=CashMovementResponse, status_code=status.HTTP_201_CREATED, summary="Registrar entrada/salida de efectivo")
+@router.get("/shifts/{shift_id}/movements", response_model=list[CashMovementResponse], summary="Listar movimientos del turno")
+def list_movements(shift_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    get_or_404(db, CashShift, shift_id, "Shift not found")
+    return db.execute(
+        select(CashMovement)
+        .where(CashMovement.cash_shift_id == shift_id)
+        .order_by(CashMovement.occurred_at.desc())
+    ).scalars().all()
+
+
+@router.post("/shifts/{shift_id}/movements", response_model=CashMovementResponse, status_code=status.HTTP_201_CREATED, summary="Registrar ingreso/egreso/retiro de efectivo")
 def add_movement(shift_id: UUID, body: CashMovementIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     shift = get_or_404(db, CashShift, shift_id, "Shift not found")
     if shift.status != "open":
         raise HTTPException(status.HTTP_409_CONFLICT, "El turno está cerrado")
     mov = CashMovement(
-        cash_shift_id=shift.id, type=body.type.value, amount=body.amount,
-        description=body.description, user_id=user.id,
+        cash_shift_id=shift.id, kind=body.kind.value, amount=body.amount,
+        category=body.category, description=body.description,
+        user_id=user.id, user_name=user.name,
     )
     db.add(mov)
     db.commit()

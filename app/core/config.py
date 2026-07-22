@@ -21,7 +21,8 @@ class Settings(BaseSettings):
 
     PROJECT_NAME:str ="pos"
     REDIS_URL:str =  Field(env="REDIS_URL")
-    RESEND_API_KEY:str = Field(...,env="RESEND_API_KEY")
+    # URL base del servicio de email; el envío hace POST a EMAIL_API_URL + /api/email/send.
+    EMAIL_API_URL:str = Field(...,env="EMAIL_API_URL")
     MAIL_FROM_NAME:str = Field(...,env="MAIL_FROM_NAME")
     MAIL_FROM:str = Field(...,env="MAIL_FROM")
 

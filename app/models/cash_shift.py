@@ -37,6 +37,9 @@ class CashShift(UUIDPrimaryKeyMixin, Base):
 
     status: Mapped[str] = mapped_column(String(10), nullable=False, server_default="open")
 
+    # Observación del arqueo; obligatoria si difference != 0 (se valida en el router).
+    close_note: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
     __table_args__ = (
         CheckConstraint("opening_amount >= 0", name="ck_cash_shift_opening_positive"),
         CheckConstraint(

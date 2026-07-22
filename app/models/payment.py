@@ -17,9 +17,19 @@ class PaymentMethod(UUIDPrimaryKeyMixin, Base):
 
     is_cash: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
+    # Clasifica el método para el desglose de ventas del arqueo.
+    # Invariante: is_cash ⇔ type == 'cash'.
+    type: Mapped[str] = mapped_column(String(20), nullable=False, server_default="other")
+
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    __table_args__ = ({"schema": "tenant"},)
+    __table_args__ = (
+        CheckConstraint(
+            "type IN ('cash', 'card', 'transfer', 'other')",
+            name="ck_payment_method_type",
+        ),
+        {"schema": "tenant"},
+    )
 
 
 class Payment(UUIDPrimaryKeyMixin, Base):
