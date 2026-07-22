@@ -1,19 +1,42 @@
-import resend
+import logging
+
+import httpx
+
 from .config import settings
 
-resend.api_key = settings.RESEND_API_KEY
+logger = logging.getLogger(__name__)
+
+EMAIL_SEND_PATH = "/api/email/send"
 
 def create_message(recipients: list[str], subject: str, body: str):
     return {
         "from": f"{settings.MAIL_FROM_NAME} <{settings.MAIL_FROM}>",
         "to": recipients,
         "subject": subject,
-        "html": body,
+        "htmlBody": body,
     }
-    
+
 def send_email(message: dict):
-    response = resend.Emails.send(message)
-    return response
+    logger.info(message)
+    url = f"{settings.EMAIL_API_URL.rstrip('/')}{EMAIL_SEND_PATH}"
+    logger.info("Enviando email a %s con asunto '%s'", message["to"], message["subject"])
+    try:
+        response = httpx.post(url, json=message, timeout=10.0)
+        response.raise_for_status()
+        return response
+    except httpx.HTTPStatusError as exc:
+        # La API respondió con un status de error: expone su cuerpo.
+        detail = exc.response.text
+        logger.error(
+            "Email API respondió %s: %s", exc.response.status_code, detail
+        )
+        raise RuntimeError(
+            f"Error del servicio de email ({exc.response.status_code}): {detail}"
+        ) from exc
+    except httpx.RequestError as exc:
+        # No hubo respuesta (timeout, conexión, DNS…).
+        logger.error("No se pudo contactar el servicio de email: %s", exc)
+        raise RuntimeError(f"No se pudo contactar el servicio de email: {exc}") from exc
 
 
 def welcome_email_body(tenant_name: str, login_url: str, email: str, password: str) -> str:
