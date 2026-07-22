@@ -2,6 +2,7 @@ import logging
 
 from fastapi import APIRouter, Depends
 
+from app.core.config import settings
 from app.core.db import tenant_create
 from app.core.dependencies import get_current_super_admin
 from app.core.mail import welcome_email_body
@@ -27,7 +28,10 @@ def create_tenant(body: TenantCreateWithUser):
         admin_password=password,
     )
 
-    login_url = f"https://{body.host}"
+    if settings.ENVIRONMENT == "prod":
+        login_url = f"https://{body.host}.skeilopos.com/login"
+    else:
+        login_url = f"http://{body.host}.localhost:4200/login"
     try:
         send_email_task.delay(
             recipients=[body.email],

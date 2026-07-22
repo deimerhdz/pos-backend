@@ -17,7 +17,6 @@ def create_message(recipients: list[str], subject: str, body: str):
     }
 
 def send_email(message: dict):
-    logger.info(message)
     url = f"{settings.EMAIL_API_URL.rstrip('/')}{EMAIL_SEND_PATH}"
     logger.info("Enviando email a %s con asunto '%s'", message["to"], message["subject"])
     try:

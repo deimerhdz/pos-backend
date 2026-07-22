@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     QR_TOKEN_SECRET:Optional[str] = Field(default=None,env="QR_TOKEN_SECRET")
 
     PROJECT_NAME:str ="pos"
+    # Ambiente de ejecución: "prod" o "dev". Afecta, p. ej., la URL de login del correo.
+    ENVIRONMENT:str = Field(default="dev",env="ENVIRONMENT")
     REDIS_URL:str =  Field(env="REDIS_URL")
     # URL base del servicio de email; el envío hace POST a EMAIL_API_URL + /api/email/send.
     EMAIL_API_URL:str = Field(...,env="EMAIL_API_URL")
