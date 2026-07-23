@@ -26,6 +26,7 @@ from app.api.v1.invoices.router import router as invoices_router
 from app.api.v1.health.router import router as health_router
 from app.api.v1.tenant.router import router as tenant_router
 from app.api.v1.reports.router import router as reports_router
+from app.api.v1.promotions.router import router as promotions_router
 load_dotenv()
 
 logging.basicConfig(
@@ -88,6 +89,7 @@ def create_app()->FastAPI:
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(tenant_router, prefix="/api/v1")
     app.include_router(reports_router, prefix="/api/v1")
+    app.include_router(promotions_router, prefix="/api/v1")
     return app
 
 app = create_app()

@@ -35,5 +35,8 @@ from .order_item_void_log import OrderItemVoidLog
 from .sale import Sale, SaleItem
 from .payment import PaymentMethod, Payment
 
+# Promociones
+from .promotion import Promotion, PromotionTarget
+
 # Facturación
 from .invoice import Invoice, InvoiceCounter
