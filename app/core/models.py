@@ -52,7 +52,9 @@ class Tenant(Base,TimestampMixin):
     plan:Mapped[str] = mapped_column("plan", String(100), nullable=False, default="basic")
     
     host:Mapped[str] = mapped_column("host", String(255), nullable=False, unique=True)
-    
+
+    logo_url:Mapped[Optional[str]] = mapped_column("logo_url", String(500), nullable=True)
+
     users: Mapped[list["User"]] = relationship(
             back_populates="tenant",
             cascade="all, delete-orphan"

@@ -24,6 +24,7 @@ from app.api.v1.uploads.router import router as uploads_router
 from app.api.v1.cart.router import router as cart_router
 from app.api.v1.invoices.router import router as invoices_router
 from app.api.v1.health.router import router as health_router
+from app.api.v1.tenant.router import router as tenant_router
 load_dotenv()
 
 logging.basicConfig(
@@ -84,6 +85,7 @@ def create_app()->FastAPI:
     app.include_router(cart_router, prefix="/api/v1")
     app.include_router(invoices_router, prefix="/api/v1")
     app.include_router(health_router, prefix="/api/v1")
+    app.include_router(tenant_router, prefix="/api/v1")
     return app
 
 app = create_app()
