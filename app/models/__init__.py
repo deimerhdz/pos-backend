@@ -39,5 +39,9 @@ from .payment import PaymentMethod, Payment
 # Promociones
 from .promotion import Promotion, PromotionTarget
 
+# Administración (horarios, auditoría)
+from .business_hours import BusinessHours
+from .audit_log import AuditLog
+
 # Facturación
 from .invoice import Invoice, InvoiceCounter
