@@ -20,6 +20,7 @@ from .cash_register import CashRegister
 from .cash_shift import CashShift
 from .cash_movement import CashMovement
 from .cash_count_denomination import CashCountDenomination
+from .cash_partial_count import CashPartialCount
 
 # Mesas y órdenes (QR)
 from .dining_table import DiningTable

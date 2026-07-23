@@ -53,6 +53,11 @@ class Sale(UUIDPrimaryKeyMixin, Base):
         ForeignKey("promotions.id"), nullable=True
     )
 
+    # Efectivo recibido y cambio entregado (RF-029). Nullable: ventas antiguas
+    # o sin desglose no lo registran.
+    paid_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    change_given: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+
     status: Mapped[str] = mapped_column(String(10), nullable=False, server_default="issued")
 
     sold_at: Mapped[datetime] = mapped_column(

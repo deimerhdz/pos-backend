@@ -60,7 +60,15 @@ def reconcile(db: Session, shift: CashShift) -> dict:
         if method_type in by_type:
             by_type[method_type] += total
 
-    ventas_efectivo = by_type["cash"]
+    # El cambio (RF-029) sale del cajón, así que el efectivo neto de ventas es
+    # Σ pagos en efectivo − Σ cambio entregado.
+    change_total = db.execute(
+        select(func.coalesce(func.sum(Sale.change_given), 0)).where(
+            Sale.cash_shift_id == shift.id, Sale.status == "paid"
+        )
+    ).scalar_one()
+
+    ventas_efectivo = by_type["cash"] - Decimal(change_total)
     ventas_tarjeta = by_type["card"]
     ventas_transferencia = by_type["transfer"]
 

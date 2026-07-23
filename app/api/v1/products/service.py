@@ -45,6 +45,7 @@ class ProductService:
                 description=data.description,
                 preparation_type=data.preparation_type.value,
                 image_url=data.image_url,
+                available=data.available,
             )
             db.add(product)
             db.flush()
@@ -81,6 +82,8 @@ class ProductService:
                     delete_object(old_key)
         if data.active is not None:
             product.active = data.active
+        if data.available is not None:
+            product.available = data.available
         db.commit()
         db.refresh(product)
         return product

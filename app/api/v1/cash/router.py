@@ -14,13 +14,14 @@ from app.models.cash_register import CashRegister
 from app.models.cash_shift import CashShift
 from app.models.cash_movement import CashMovement
 from app.models.cash_count_denomination import CashCountDenomination
+from app.models.cash_partial_count import CashPartialCount
 from app.api.v1.cash import service
 from app.api.v1.cash.schemas import (
     RegisterCreate, RegisterResponse,
     ShiftOpen, ShiftClose, ShiftResponse,
     CashMovementIn, CashMovementResponse,
     ReconciliationResponse, ShiftReportResponse,
-    DenominationIn,
+    DenominationIn, PartialCountIn, PartialCountResponse,
 )
 
 router = APIRouter(prefix="/cash", tags=["cash"])
@@ -112,6 +113,27 @@ def close_shift(shift_id: UUID, body: ShiftClose, db: Session = Depends(get_db),
 def reconciliation(shift_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     shift = get_or_404(db, CashShift, shift_id, "Shift not found")
     return service.reconcile(db, shift)
+
+
+@router.post("/shifts/{shift_id}/partial-count", response_model=PartialCountResponse,
+             status_code=status.HTTP_201_CREATED, summary="Arqueo parcial (sin cerrar el turno)")
+def partial_count(shift_id: UUID, body: PartialCountIn, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    shift = get_or_404(db, CashShift, shift_id, "Shift not found")
+    if shift.status != "open":
+        raise HTTPException(status.HTTP_409_CONFLICT, "El turno está cerrado")
+    recon = service.reconcile(db, shift)
+    expected = recon["expected"]
+    difference = body.counted_amount - expected
+    row = CashPartialCount(
+        cash_shift_id=shift.id, counted_amount=body.counted_amount,
+        expected_amount=expected, difference=difference, note=body.note,
+        user_id=user.id, user_name=user.name,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 @router.get("/shifts/{shift_id}/report", response_model=ShiftReportResponse, summary="Reporte de cierre consolidado")

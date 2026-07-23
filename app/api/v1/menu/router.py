@@ -30,7 +30,7 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
 
     products = db.execute(
         select(Product)
-        .where(Product.active.is_(True))
+        .where(Product.active.is_(True), Product.available.is_(True))
         .options(
             selectinload(Product.variants),
             selectinload(Product.option_groups)

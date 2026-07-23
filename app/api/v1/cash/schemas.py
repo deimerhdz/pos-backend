@@ -108,6 +108,25 @@ class ReconciliationResponse(BaseModel):
     cash_sales: Decimal
 
 
+# ---------- Arqueo parcial (RF-046) ----------
+class PartialCountIn(BaseModel):
+    counted_amount: Decimal = Field(..., ge=0, max_digits=12, decimal_places=2)
+    note: str | None = Field(None, max_length=500)
+
+
+class PartialCountResponse(BaseModel):
+    id: UUID
+    cash_shift_id: UUID
+    counted_amount: Decimal
+    expected_amount: Decimal
+    difference: Decimal
+    note: str | None = None
+    user_name: str | None = None
+    counted_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # ---------- Reporte de cierre ----------
 class ShiftReportResponse(BaseModel):
     shift: ShiftResponse

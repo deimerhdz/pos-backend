@@ -89,6 +89,8 @@ class SaleResponse(BaseModel):
     tax: Decimal
     tip: Decimal
     total: Decimal
+    paid_amount: Decimal | None = None
+    change_given: Decimal | None = None
     status: str
     sold_at: datetime
     items: list[SaleItemResponse] = Field(default_factory=list)

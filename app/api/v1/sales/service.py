@@ -111,6 +111,8 @@ def checkout(db: Session, data: SaleCreate, cashier: User) -> Sale:
         sale.discount = effective_discount
         sale.promotion_id = promo_id
         sale.total = total
+        sale.paid_amount = paid
+        sale.change_given = paid - total  # RF-029: cambio a devolver
         sale.status = "paid"
 
         # La sesión tiene autoflush=False; forzamos el flush para que deduct_sale
