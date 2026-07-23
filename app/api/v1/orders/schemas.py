@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Literal
 from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
@@ -51,6 +52,37 @@ class TableResponse(BaseModel):
     status: str
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Mesas avanzado (RF-051..053) ----------
+class TableStatusUpdate(BaseModel):
+    status: Literal["libre", "ocupada", "reservada", "pendiente_pago"]
+
+
+class MoveOrderIn(BaseModel):
+    dining_table_id: UUID
+
+
+class MergeOrdersIn(BaseModel):
+    order_ids: list[UUID] = Field(..., min_length=2)
+
+
+class MergeResponse(BaseModel):
+    merged_group_id: UUID
+    order_ids: list[UUID]
+
+
+class GroupBillOrderLine(BaseModel):
+    order_id: UUID
+    dining_table_id: UUID | None = None
+    status: str
+    subtotal: Decimal
+
+
+class GroupBillResponse(BaseModel):
+    merged_group_id: UUID
+    total: Decimal
+    orders: list[GroupBillOrderLine]
 
 
 class TableQrTokenResponse(BaseModel):
