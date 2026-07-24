@@ -110,6 +110,7 @@ class PurchaseItemResponse(BaseModel):
     id: UUID
     inventory_item_id: UUID
     quantity: Decimal
+    received_quantity: Decimal
     unit_cost: Decimal
 
     model_config = ConfigDict(from_attributes=True)
@@ -119,11 +120,22 @@ class PurchaseResponse(BaseModel):
     id: UUID
     supplier_id: UUID | None = None
     invoice_number: str | None = None
+    status: str
     total: Decimal
     purchased_at: datetime
     items: list[PurchaseItemResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Recepción parcial (RF-022) ----------
+class PurchaseReceiveItemIn(BaseModel):
+    purchase_item_id: UUID
+    quantity: Decimal = Field(..., gt=0, max_digits=12, decimal_places=3)
+
+
+class PurchaseReceiveIn(BaseModel):
+    items: list[PurchaseReceiveItemIn] = Field(..., min_length=1)
 
 
 class LowStockResponse(BaseModel):
