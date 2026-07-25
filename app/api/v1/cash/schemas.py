@@ -134,3 +134,20 @@ class ShiftReportResponse(BaseModel):
     movements: list[CashMovementResponse]
     denominations: list[DenominationIn]
     close_note: str | None = None
+
+
+# ---------- Histórico de turnos / cierres ----------
+class ShiftSummaryResponse(BaseModel):
+    """Fila del histórico: datos del turno + arqueo (esperado/diferencia calculados)."""
+    id: UUID
+    cash_register_id: UUID
+    register_name: str
+    user_name: str | None = None
+    opening_amount: Decimal
+    counted_amount: Decimal | None = None
+    opened_at: datetime
+    closed_at: datetime | None = None
+    status: str
+    close_note: str | None = None
+    expected: Decimal
+    difference: Decimal | None = None
