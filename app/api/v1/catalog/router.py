@@ -23,8 +23,10 @@ from app.api.v1.catalog.schemas import (
     RecipeSet,
     RecipeItemResponse,
     OptionGroupCreate,
+    OptionGroupUpdate,
     OptionGroupResponse,
     OptionCreate,
+    OptionUpdate,
     OptionResponse,
     ProductOptionGroupCreate,
     ProductOptionGroupResponse,
@@ -177,12 +179,14 @@ def set_recipe(
     summary="Listar grupos de opciones con sus opciones",
 )
 def list_option_groups(
+    active: bool | None = None,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    return db.execute(
-        select(OptionGroup).options(selectinload(OptionGroup.options)).order_by(OptionGroup.name)
-    ).scalars().all()
+    stmt = select(OptionGroup).options(selectinload(OptionGroup.options))
+    if active is not None:
+        stmt = stmt.where(OptionGroup.active.is_(active))
+    return db.execute(stmt.order_by(OptionGroup.name)).scalars().all()
 
 
 @router.post(
@@ -201,6 +205,54 @@ def create_option_group(
     ensure_unique(db, OptionGroup, OptionGroup.name, body.name, "Option group name already exists")
     group = OptionGroup(name=body.name, min_select=body.min_select, max_select=body.max_select)
     db.add(group)
+    db.commit()
+    db.refresh(group)
+    return group
+
+
+@router.patch(
+    "/option-groups/{group_id}",
+    response_model=OptionGroupResponse,
+    summary="Actualizar un grupo de opciones (nombre, min/max, activo)",
+)
+def update_option_group(
+    group_id: UUID,
+    body: OptionGroupUpdate,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_tenant_admin),
+):
+    group = get_or_404(db, OptionGroup, group_id, "Option group not found")
+    if body.name is not None and body.name != group.name:
+        ensure_unique(
+            db, OptionGroup, OptionGroup.name, body.name,
+            "Option group name already exists", exclude_id=group_id,
+        )
+        group.name = body.name
+    min_select = body.min_select if body.min_select is not None else group.min_select
+    max_select = body.max_select if body.max_select is not None else group.max_select
+    if max_select < min_select:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "max_select < min_select")
+    group.min_select = min_select
+    group.max_select = max_select
+    if body.active is not None:
+        group.active = body.active
+    db.commit()
+    db.refresh(group)
+    return group
+
+
+@router.delete(
+    "/option-groups/{group_id}",
+    response_model=OptionGroupResponse,
+    summary="Desactivar un grupo de opciones (soft-delete)",
+)
+def delete_option_group(
+    group_id: UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_tenant_admin),
+):
+    group = get_or_404(db, OptionGroup, group_id, "Option group not found")
+    group.active = False
     db.commit()
     db.refresh(group)
     return group
@@ -239,6 +291,65 @@ def add_option(
     return option
 
 
+@router.patch(
+    "/options/{option_id}",
+    response_model=OptionResponse,
+    summary="Actualizar una opción (nombre, precio extra, insumo, activa)",
+)
+def update_option(
+    option_id: UUID,
+    body: OptionUpdate,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_tenant_admin),
+):
+    option = get_or_404(db, Option, option_id, "Option not found")
+    if body.name is not None and body.name != option.name:
+        dup = db.execute(
+            select(Option).where(
+                Option.option_group_id == option.option_group_id,
+                Option.name == body.name,
+                Option.id != option_id,
+            )
+        ).scalar_one_or_none()
+        if dup is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Option name already exists in group")
+        option.name = body.name
+    if body.extra_price is not None:
+        option.extra_price = body.extra_price
+    # `None` explícito desliga el insumo; ausente = no tocar.
+    if "inventory_item_id" in body.model_fields_set:
+        if body.inventory_item_id is not None:
+            get_or_404(db, InventoryItem, body.inventory_item_id, "Inventory item not found")
+            option.inventory_item_id = body.inventory_item_id
+        else:
+            option.inventory_item_id = None
+            option.item_quantity = 0
+    if body.item_quantity is not None and option.inventory_item_id is not None:
+        option.item_quantity = body.item_quantity
+    if body.active is not None:
+        option.active = body.active
+    db.commit()
+    db.refresh(option)
+    return option
+
+
+@router.delete(
+    "/options/{option_id}",
+    response_model=OptionResponse,
+    summary="Desactivar una opción (soft-delete: conserva el histórico de ventas)",
+)
+def delete_option(
+    option_id: UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_tenant_admin),
+):
+    option = get_or_404(db, Option, option_id, "Option not found")
+    option.active = False
+    db.commit()
+    db.refresh(option)
+    return option
+
+
 # ============================ Asignación grupo<->producto ============================
 @router.post(
     "/products/{product_id}/option-groups",
@@ -253,7 +364,9 @@ def assign_option_group(
     _: User = Depends(require_tenant_admin),
 ):
     get_or_404(db, Product, product_id, "Product not found")
-    get_or_404(db, OptionGroup, body.option_group_id, "Option group not found")
+    group = get_or_404(db, OptionGroup, body.option_group_id, "Option group not found")
+    if not group.active:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Option group is inactive")
     dup = db.execute(
         select(ProductOptionGroup).where(
             ProductOptionGroup.product_id == product_id,
@@ -272,3 +385,26 @@ def assign_option_group(
     db.commit()
     db.refresh(link)
     return link
+
+
+@router.delete(
+    "/products/{product_id}/option-groups/{option_group_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Quitar un grupo de opciones de un producto",
+)
+def unassign_option_group(
+    product_id: UUID,
+    option_group_id: UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_tenant_admin),
+):
+    link = db.execute(
+        select(ProductOptionGroup).where(
+            ProductOptionGroup.product_id == product_id,
+            ProductOptionGroup.option_group_id == option_group_id,
+        )
+    ).scalar_one_or_none()
+    if link is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Option group not assigned to product")
+    db.delete(link)
+    db.commit()

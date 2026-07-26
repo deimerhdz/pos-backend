@@ -70,8 +70,9 @@ Columnas: **ID · Actor · Requerimiento · Endpoint**.
 | RF-CAT-08 | Autenticado | Listar variantes de un producto | `GET /products/{id}/variants` |
 | RF-CAT-09 | Admin | Crear / editar / desactivar variante (SKU autogenerado si falta) | `POST /products/{id}/variants`, `PATCH/DELETE /variants/{id}` |
 | RF-CAT-10 | Autenticado / Admin | Ver / definir la receta (BOM) de una variante | `GET/PUT /variants/{id}/recipe` |
-| RF-CAT-11 | Autenticado / Admin | Listar / crear grupos de opciones y sus opciones (con precio extra e insumo) | `GET/POST /option-groups`, `POST /option-groups/{id}/options` |
-| RF-CAT-12 | Admin | Asignar un grupo de opciones a un producto (min/max propios) | `POST /products/{id}/option-groups` |
+| RF-CAT-11 | Autenticado / Admin | Listar (filtro `active`) / crear / editar / desactivar grupos de opciones | `GET/POST /option-groups`, `PATCH/DELETE /option-groups/{id}` |
+| RF-CAT-11b | Admin | Crear / editar / desactivar opciones de un grupo (precio extra e insumo) | `POST /option-groups/{id}/options`, `PATCH/DELETE /options/{id}` |
+| RF-CAT-12 | Admin | Asignar / quitar un grupo de opciones a un producto (min/max propios) | `POST/DELETE /products/{id}/option-groups/{...}` |
 
 ### 2.5 Inventario
 | ID | Actor | Requerimiento | Endpoint |
