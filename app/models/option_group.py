@@ -1,5 +1,5 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
-from sqlalchemy import String, Integer, CheckConstraint
+from sqlalchemy import String, Integer, Boolean, CheckConstraint
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import List, TYPE_CHECKING
 
@@ -18,6 +18,10 @@ class OptionGroup(UUIDPrimaryKeyMixin, Base):
     min_select: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     max_select: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
 
     options: Mapped[List["Option"]] = relationship(
         back_populates="option_group", cascade="all, delete-orphan"

@@ -29,6 +29,13 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
   público oculta lo no disponible.
 - **Cambio en efectivo (RF-029)**: el checkout registra `paid_amount` y
   `change_given`; la reconciliación de caja descuenta el cambio del efectivo.
+- **Edición de grupos de opciones (RF-CAT-11)**: `PATCH/DELETE /option-groups/{id}`
+  y `PATCH/DELETE /options/{id}`. Nueva columna `option_groups.active`; el borrado
+  es soft (las opciones vendidas siguen referenciadas por `order_item_options`) y
+  el menú público oculta grupos y opciones inactivos. `GET /option-groups` acepta
+  `?active=`.
+- **Desasignar grupo de un producto (RF-CAT-12)**:
+  `DELETE /products/{id}/option-groups/{group_id}`; asignar un grupo inactivo → 422.
 
 ### Inventario / Compras
 - **Recepción parcial (RF-022)**: `purchases.status` + `received_quantity`; flujo
