@@ -8,6 +8,7 @@ from app.core.db import get_db
 from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User
+from app.core.pagination import Page, paginate
 from app.models.inventory_item import InventoryItem
 from app.models.inventory_movement import InventoryMovement
 from app.models.unit_measure import UnitMeasure
@@ -16,7 +17,7 @@ from app.models.purchase import Purchase
 from app.api.v1.inventory import service
 from app.api.v1.inventory.stock import apply_adjustment
 from app.api.v1.inventory.schemas import (
-    InventoryItemCreate, InventoryItemUpdate, InventoryItemResponse,
+    InventoryItemCreate, InventoryItemUpdate, InventoryItemResponse, InventoryItemType,
     AdjustmentIn, MovementResponse,
     SupplierCreate, SupplierUpdate, SupplierResponse,
     PurchaseCreate, PurchaseResponse, PurchaseReceiveIn,
@@ -27,16 +28,24 @@ router = APIRouter(prefix="/inventory", tags=["inventory"])
 
 
 # ============================ Insumos ============================
-@router.get("/items", response_model=list[InventoryItemResponse], summary="Listar insumos")
+@router.get("/items", response_model=Page[InventoryItemResponse], summary="Listar insumos")
 def list_items(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None, description="Búsqueda por nombre (contiene, sin distinguir mayúsculas)"),
+    type: InventoryItemType | None = Query(None, description="Filtrar por tipo de insumo"),
     active: bool | None = Query(None),
+    low_stock: bool | None = Query(None, description="Solo insumos en o bajo el mínimo"),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    q = select(InventoryItem).order_by(InventoryItem.name)
-    if active is not None:
-        q = q.where(InventoryItem.active == active)
-    return db.execute(q).scalars().all()
+    stmt = service.list_items_query(
+        search=search.strip() if search else None,
+        type_=type.value if type is not None else None,
+        active=active,
+        low_stock=low_stock,
+    )
+    return paginate(db, stmt, page, size)
 
 
 @router.get("/items/low-stock", response_model=list[LowStockResponse], summary="Insumos en o bajo el mínimo")
@@ -120,18 +129,21 @@ def adjust_item(
     return movement
 
 
-@router.get("/items/{item_id}/movements", response_model=list[MovementResponse], summary="Kardex de un insumo")
+@router.get("/items/{item_id}/movements", response_model=Page[MovementResponse], summary="Kardex de un insumo")
 def item_movements(
     item_id: UUID,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
     get_or_404(db, InventoryItem, item_id, "Inventory item not found")
-    return db.execute(
+    stmt = (
         select(InventoryMovement)
         .where(InventoryMovement.inventory_item_id == item_id)
         .order_by(InventoryMovement.moved_at.desc())
-    ).scalars().all()
+    )
+    return paginate(db, stmt, page, size)
 
 
 # ============================ Proveedores ============================
@@ -165,9 +177,15 @@ def update_supplier(
 
 
 # ============================ Compras ============================
-@router.get("/purchases", response_model=list[PurchaseResponse], summary="Listar compras")
-def list_purchases(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    return db.execute(select(Purchase).order_by(Purchase.purchased_at.desc())).scalars().all()
+@router.get("/purchases", response_model=Page[PurchaseResponse], summary="Listar compras")
+def list_purchases(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    stmt = select(Purchase).order_by(Purchase.purchased_at.desc())
+    return paginate(db, stmt, page, size)
 
 
 @router.post("/purchases", response_model=PurchaseResponse, status_code=status.HTTP_201_CREATED, summary="Registrar compra (da alta de stock total)")
