@@ -2,6 +2,7 @@
 la liga al turno de caja y descuenta inventario (receta + opciones). Dueño de la
 transacción."""
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from app.models.payment import Payment, PaymentMethod
 from app.models.sale import Sale, SaleItem
 from app.api.v1.sales.consumption import deduct_sale
 from app.api.v1.sales.schemas import SaleCreate
+from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,7 @@ def checkout(db: Session, data: SaleCreate, cashier: User) -> Sale:
         db.flush()
 
         subtotal = Decimal("0")
+        promo_lines: list[dict] = []
         for line in data.items:
             variant = get_or_404(db, ProductVariant, line.product_variant_id, "Variant not found")
             product = db.get(Product, variant.product_id)
@@ -63,6 +66,12 @@ def checkout(db: Session, data: SaleCreate, cashier: User) -> Sale:
 
             line_total = unit_price * Decimal(line.quantity)
             subtotal += line_total
+            promo_lines.append({
+                "product_id": variant.product_id,
+                "category_id": product.category_id if product else None,
+                "quantity": line.quantity,
+                "line_total": line_total,
+            })
             db.add(SaleItem(
                 sale_id=sale.id,
                 product_variant_id=variant.id,
@@ -73,7 +82,13 @@ def checkout(db: Session, data: SaleCreate, cashier: User) -> Sale:
                 line_total=line_total,
             ))
 
-        total = subtotal - Decimal(data.discount) + Decimal(data.tax) + Decimal(data.tip)
+        # Descuento automático por promociones (RF-012); se suma al descuento manual.
+        promo_discount, promo_id = promotions.evaluate(
+            db, promo_lines, datetime.now(timezone.utc)
+        )
+        effective_discount = Decimal(data.discount) + promo_discount
+
+        total = subtotal - effective_discount + Decimal(data.tax) + Decimal(data.tip)
         if total < 0:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "El total no puede ser negativo")
 
@@ -93,7 +108,11 @@ def checkout(db: Session, data: SaleCreate, cashier: User) -> Sale:
             )
 
         sale.subtotal = subtotal
+        sale.discount = effective_discount
+        sale.promotion_id = promo_id
         sale.total = total
+        sale.paid_amount = paid
+        sale.change_given = paid - total  # RF-029: cambio a devolver
         sale.status = "paid"
 
         # La sesión tiene autoflush=False; forzamos el flush para que deduct_sale

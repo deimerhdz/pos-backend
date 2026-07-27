@@ -40,6 +40,11 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
     # Referencia blanda a shared.users.id (null si el cliente pidió por QR).
     user_id: Mapped[Optional[UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
 
+    # Unión de mesas (RF-053): órdenes con el mismo grupo se cobran juntas.
+    merged_group_id: Mapped[Optional[UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(

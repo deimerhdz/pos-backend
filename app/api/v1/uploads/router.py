@@ -52,9 +52,12 @@ def presign_upload(
 
     # La key nunca usa el filename del cliente (evita path traversal / keys raras);
     # solo se loguea el nombre original para trazabilidad.
-    logger.info("Presign de subida solicitado: tenant=%s filename=%s", tenant.schema, body.filename)
+    logger.info(
+        "Presign de subida solicitado: tenant=%s folder=%s filename=%s",
+        tenant.schema, body.folder, body.filename,
+    )
 
-    key = build_object_key(tenant.schema, "products", extension)
+    key = build_object_key(tenant.schema, body.folder, extension)
     upload_url = generate_presigned_put_url(key, body.content_type)
 
     return PresignResponse(

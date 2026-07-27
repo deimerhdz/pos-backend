@@ -49,3 +49,16 @@ class MenuTableResponse(BaseModel):
     name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MenuBusinessResponse(BaseModel):
+    """Branding del negocio para el menú público del QR.
+
+    El comensal es anónimo y no puede llamar a `GET /tenant` (requiere auth), así
+    que el nombre y el logo del negocio viajan dentro de la respuesta del menú.
+    """
+
+    name: str
+    logo_url: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)

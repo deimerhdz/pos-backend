@@ -57,6 +57,17 @@ class OptionCreate(BaseModel):
     item_quantity: Decimal = Field(0, ge=0, max_digits=12, decimal_places=3)
 
 
+class OptionUpdate(BaseModel):
+    """Parcial: solo se aplican los campos presentes en el body. `inventory_item_id`
+    en `null` desliga el insumo (usar `model_fields_set` para distinguirlo de ausente)."""
+
+    name: str | None = Field(None, min_length=1, max_length=255)
+    extra_price: Decimal | None = Field(None, ge=0, max_digits=12, decimal_places=2)
+    inventory_item_id: UUID | None = None
+    item_quantity: Decimal | None = Field(None, ge=0, max_digits=12, decimal_places=3)
+    active: bool | None = None
+
+
 class OptionResponse(BaseModel):
     id: UUID
     option_group_id: UUID
@@ -75,11 +86,19 @@ class OptionGroupCreate(BaseModel):
     max_select: int = Field(1, ge=1)
 
 
+class OptionGroupUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=255)
+    min_select: int | None = Field(None, ge=0)
+    max_select: int | None = Field(None, ge=1)
+    active: bool | None = None
+
+
 class OptionGroupResponse(BaseModel):
     id: UUID
     name: str
     min_select: int
     max_select: int
+    active: bool
     options: list[OptionResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

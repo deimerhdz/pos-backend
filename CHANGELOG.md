@@ -7,6 +7,50 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+### Reportes (RF-059..065)
+- Nuevo módulo `/reports` (solo lectura, admin): ventas, por producto,
+  más vendidos, por categoría, por cajero, inventario (valorización) y
+  rentabilidad (COGS por receta). Sin tablas nuevas.
+
+### Promociones (RF-008..012)
+- Nuevo módulo `/promotions` (CRUD admin) con vigencia (fechas, días, horario) y
+  alcance por producto/categoría. Descuento automático (`percent`/`fixed`)
+  aplicado en el checkout; `sales.promotion_id`. `combo`/`2x1`/`precio por
+  cantidad` reservados para fase 2.
+
+### Mesas avanzado (RF-051..054)
+- Estados de mesa `reservada`/`pendiente_pago`; cambio de mesa
+  (`POST /orders/{id}/move`); unión de mesas (`merged_group_id`,
+  `POST /orders/merge`, `GET /orders/group/{id}/bill`). División por comensal ya
+  disponible en el bill de mesa (`session_id`).
+
+### Catálogo / Ventas
+- **Disponibilidad (RF-006)**: `products.available` ('agotado temporal'); el menú
+  público oculta lo no disponible.
+- **Cambio en efectivo (RF-029)**: el checkout registra `paid_amount` y
+  `change_given`; la reconciliación de caja descuenta el cambio del efectivo.
+- **Edición de grupos de opciones (RF-CAT-11)**: `PATCH/DELETE /option-groups/{id}`
+  y `PATCH/DELETE /options/{id}`. Nueva columna `option_groups.active`; el borrado
+  es soft (las opciones vendidas siguen referenciadas por `order_item_options`) y
+  el menú público oculta grupos y opciones inactivos. `GET /option-groups` acepta
+  `?active=`.
+- **Desasignar grupo de un producto (RF-CAT-12)**:
+  `DELETE /products/{id}/option-groups/{group_id}`; asignar un grupo inactivo → 422.
+
+### Inventario / Compras
+- **Recepción parcial (RF-022)**: `purchases.status` + `received_quantity`; flujo
+  orden→recepción (`/inventory/purchases/order`, `/{id}/receive`). El alta directa
+  se mantiene.
+
+### Administración
+- **Arqueos parciales (RF-046)**: `POST /cash/shifts/{id}/partial-count`.
+- **Horarios (RF-073)**: `/business-hours` (GET/PUT semanal).
+- **Auditoría (RF-076)**: `audit_logs` + `record_audit()` + `/audit-logs`.
+
+### Datos
+- Seed del menú "El Fin del Calor" (`app/scripts/seed_menu_fin_del_calor.py`):
+  categorías, 24 sabores de crema, ~78 productos con selección de N sabores.
+
 ### Caja (rediseño del módulo)
 - **Movimientos tipados**: `cash_movements.type` → `kind`
   (`ingreso`/`egreso`/`retiro`) + `category`; `retiro` (salida a banco/caja

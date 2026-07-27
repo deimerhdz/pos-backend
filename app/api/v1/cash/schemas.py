@@ -108,6 +108,25 @@ class ReconciliationResponse(BaseModel):
     cash_sales: Decimal
 
 
+# ---------- Arqueo parcial (RF-046) ----------
+class PartialCountIn(BaseModel):
+    counted_amount: Decimal = Field(..., ge=0, max_digits=12, decimal_places=2)
+    note: str | None = Field(None, max_length=500)
+
+
+class PartialCountResponse(BaseModel):
+    id: UUID
+    cash_shift_id: UUID
+    counted_amount: Decimal
+    expected_amount: Decimal
+    difference: Decimal
+    note: str | None = None
+    user_name: str | None = None
+    counted_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # ---------- Reporte de cierre ----------
 class ShiftReportResponse(BaseModel):
     shift: ShiftResponse
@@ -115,3 +134,20 @@ class ShiftReportResponse(BaseModel):
     movements: list[CashMovementResponse]
     denominations: list[DenominationIn]
     close_note: str | None = None
+
+
+# ---------- Histórico de turnos / cierres ----------
+class ShiftSummaryResponse(BaseModel):
+    """Fila del histórico: datos del turno + arqueo (esperado/diferencia calculados)."""
+    id: UUID
+    cash_register_id: UUID
+    register_name: str
+    user_name: str | None = None
+    opening_amount: Decimal
+    counted_amount: Decimal | None = None
+    opened_at: datetime
+    closed_at: datetime | None = None
+    status: str
+    close_note: str | None = None
+    expected: Decimal
+    difference: Decimal | None = None

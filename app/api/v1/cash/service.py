@@ -11,6 +11,8 @@ from uuid import UUID
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
+from app.core.pagination import paginate
+from app.models.cash_register import CashRegister
 from app.models.cash_shift import CashShift
 from app.models.cash_movement import CashMovement
 from app.models.sale import Sale
@@ -24,6 +26,51 @@ def get_open_shift(db: Session, cash_register_id: UUID) -> CashShift | None:
             CashShift.status == "open",
         )
     ).scalar_one_or_none()
+
+
+def list_shifts(
+    db: Session,
+    status: str | None,
+    cash_register_id: UUID | None,
+    page: int,
+    size: int,
+) -> dict:
+    """Histórico de turnos paginado (por defecto los cerrados), más recientes
+    primero. Cada fila incluye el nombre de la caja y el arqueo (esperado y
+    diferencia) calculados con `reconcile`."""
+    stmt = select(CashShift)
+    if status:
+        stmt = stmt.where(CashShift.status == status)
+    if cash_register_id:
+        stmt = stmt.where(CashShift.cash_register_id == cash_register_id)
+    stmt = stmt.order_by(
+        CashShift.closed_at.desc().nullslast(), CashShift.opened_at.desc()
+    )
+
+    result = paginate(db, stmt, page, size)
+
+    names = dict(
+        db.execute(select(CashRegister.id, CashRegister.name)).all()
+    )
+    items = []
+    for shift in result["items"]:
+        recon = reconcile(db, shift)
+        items.append({
+            "id": shift.id,
+            "cash_register_id": shift.cash_register_id,
+            "register_name": names.get(shift.cash_register_id, "—"),
+            "user_name": shift.user_name,
+            "opening_amount": Decimal(shift.opening_amount),
+            "counted_amount": shift.counted_amount,
+            "opened_at": shift.opened_at,
+            "closed_at": shift.closed_at,
+            "status": shift.status,
+            "close_note": shift.close_note,
+            "expected": recon["expected"],
+            "difference": recon["difference"],
+        })
+    result["items"] = items
+    return result
 
 
 def reconcile(db: Session, shift: CashShift) -> dict:
@@ -60,7 +107,15 @@ def reconcile(db: Session, shift: CashShift) -> dict:
         if method_type in by_type:
             by_type[method_type] += total
 
-    ventas_efectivo = by_type["cash"]
+    # El cambio (RF-029) sale del cajón, así que el efectivo neto de ventas es
+    # Σ pagos en efectivo − Σ cambio entregado.
+    change_total = db.execute(
+        select(func.coalesce(func.sum(Sale.change_given), 0)).where(
+            Sale.cash_shift_id == shift.id, Sale.status == "paid"
+        )
+    ).scalar_one()
+
+    ventas_efectivo = by_type["cash"] - Decimal(change_total)
     ventas_tarjeta = by_type["card"]
     ventas_transferencia = by_type["transfer"]
 
