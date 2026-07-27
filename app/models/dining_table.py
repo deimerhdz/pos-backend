@@ -26,10 +26,13 @@ class DiningTable(UUIDPrimaryKeyMixin, Base):
     # Ocupación operativa (distinto de `active`). La liberación a 'libre' está
     # sujeta a la regla dura de Fase 7 (ninguna orden propia no-terminal).
     status: Mapped[str] = mapped_column(
-        String(10), nullable=False, server_default="libre"
+        String(15), nullable=False, server_default="libre"
     )
 
     __table_args__ = (
-        CheckConstraint("status IN ('libre', 'ocupada')", name="ck_dining_table_status"),
+        CheckConstraint(
+            "status IN ('libre', 'ocupada', 'reservada', 'pendiente_pago')",
+            name="ck_dining_table_status",
+        ),
         {"schema": "tenant"},
     )

@@ -48,6 +48,16 @@ class Sale(UUIDPrimaryKeyMixin, Base):
     tip: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
     total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
 
+    # Promoción aplicada automáticamente (RF-012); su descuento está incluido en `discount`.
+    promotion_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("promotions.id"), nullable=True
+    )
+
+    # Efectivo recibido y cambio entregado (RF-029). Nullable: ventas antiguas
+    # o sin desglose no lo registran.
+    paid_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    change_given: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+
     status: Mapped[str] = mapped_column(String(10), nullable=False, server_default="issued")
 
     sold_at: Mapped[datetime] = mapped_column(

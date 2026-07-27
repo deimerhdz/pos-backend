@@ -8,7 +8,10 @@ from datetime import datetime
 
 
 class Purchase(UUIDPrimaryKeyMixin, Base):
-    """Compra a proveedor. Al registrar sus items se da alta de stock."""
+    """Compra a proveedor. `status` gobierna la recepción (RF-022):
+    - `draft`: orden creada, sin dar alta de stock.
+    - `partial`: recibida parcialmente.
+    - `received`: recibida por completo (el alta directa vía POST /purchases nace así)."""
 
     __tablename__ = "purchases"
 
@@ -20,6 +23,10 @@ class Purchase(UUIDPrimaryKeyMixin, Base):
     user_id: Mapped[Optional[UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     invoice_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, server_default="received"
+    )
 
     total: Mapped[Decimal] = mapped_column(
         Numeric(12, 2), nullable=False, default=0, server_default="0"
@@ -33,7 +40,12 @@ class Purchase(UUIDPrimaryKeyMixin, Base):
         back_populates="purchase", cascade="all, delete-orphan"
     )
 
-    __table_args__ = ({"schema": "tenant"},)
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'partial', 'received')", name="ck_purchase_status"
+        ),
+        {"schema": "tenant"},
+    )
 
 
 class PurchaseItem(UUIDPrimaryKeyMixin, Base):
@@ -50,11 +62,20 @@ class PurchaseItem(UUIDPrimaryKeyMixin, Base):
 
     quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3), nullable=False)
 
+    # Cantidad ya recibida (RF-022); el resto queda pendiente.
+    received_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(12, 3), nullable=False, default=0, server_default="0"
+    )
+
     unit_cost: Mapped[Decimal] = mapped_column(
         Numeric(12, 2), nullable=False, default=0, server_default="0"
     )
 
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_purchase_item_qty_positive"),
+        CheckConstraint(
+            "received_quantity >= 0 AND received_quantity <= quantity",
+            name="ck_purchase_item_received_range",
+        ),
         {"schema": "tenant"},
     )

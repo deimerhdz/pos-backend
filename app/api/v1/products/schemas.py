@@ -20,6 +20,7 @@ class ProductCreate(BaseModel):
         description="prepared (receta) o packaged (empacado).",
     )
     image_url: str | None = Field(None, max_length=500)
+    available: bool = True
 
 
 class ProductUpdate(BaseModel):
@@ -29,6 +30,7 @@ class ProductUpdate(BaseModel):
     preparation_type: PreparationType | None = None
     image_url: str | None = Field(None, max_length=500)
     active: bool | None = None
+    available: bool | None = None
 
 
 class ProductResponse(BaseModel):
@@ -39,6 +41,7 @@ class ProductResponse(BaseModel):
     preparation_type: PreparationType
     image_url: str | None = None
     active: bool
+    available: bool
     created_at: datetime
     updated_at: datetime | None = None
 

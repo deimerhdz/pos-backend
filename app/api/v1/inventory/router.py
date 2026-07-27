@@ -19,7 +19,7 @@ from app.api.v1.inventory.schemas import (
     InventoryItemCreate, InventoryItemUpdate, InventoryItemResponse,
     AdjustmentIn, MovementResponse,
     SupplierCreate, SupplierUpdate, SupplierResponse,
-    PurchaseCreate, PurchaseResponse,
+    PurchaseCreate, PurchaseResponse, PurchaseReceiveIn,
     LowStockResponse,
 )
 
@@ -170,10 +170,31 @@ def list_purchases(db: Session = Depends(get_db), _: User = Depends(get_current_
     return db.execute(select(Purchase).order_by(Purchase.purchased_at.desc())).scalars().all()
 
 
-@router.post("/purchases", response_model=PurchaseResponse, status_code=status.HTTP_201_CREATED, summary="Registrar compra (da alta de stock)")
+@router.post("/purchases", response_model=PurchaseResponse, status_code=status.HTTP_201_CREATED, summary="Registrar compra (da alta de stock total)")
 def create_purchase(
     body: PurchaseCreate,
     db: Session = Depends(get_db),
     user: User = Depends(require_tenant_admin),
 ):
     return service.create_purchase(db, body, user_id=user.id)
+
+
+@router.post("/purchases/order", response_model=PurchaseResponse, status_code=status.HTTP_201_CREATED,
+             summary="Crear orden de compra (draft, sin alta de stock) — RF-022")
+def create_purchase_order(
+    body: PurchaseCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_tenant_admin),
+):
+    return service.create_purchase_order(db, body, user_id=user.id)
+
+
+@router.post("/purchases/{purchase_id}/receive", response_model=PurchaseResponse,
+             summary="Recibir una orden de compra (parcial o total) — RF-022")
+def receive_purchase(
+    purchase_id: UUID,
+    body: PurchaseReceiveIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_tenant_admin),
+):
+    return service.receive_purchase(db, purchase_id, body, user_id=user.id)

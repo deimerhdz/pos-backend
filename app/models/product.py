@@ -33,6 +33,12 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Disponibilidad operativa (RF-006): 'agotado temporal' sin dar de baja el
+    # producto. Distinto de `active` (alta/baja del catálogo).
+    available: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+
     variants: Mapped[List["ProductVariant"]] = relationship(
         back_populates="product", cascade="all, delete-orphan"
     )

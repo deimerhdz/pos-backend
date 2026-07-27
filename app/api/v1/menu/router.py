@@ -30,7 +30,7 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
 
     products = db.execute(
         select(Product)
-        .where(Product.active.is_(True))
+        .where(Product.active.is_(True), Product.available.is_(True))
         .options(
             selectinload(Product.variants),
             selectinload(Product.option_groups)
@@ -57,6 +57,8 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
             groups = []
             for link in p.option_groups:
                 g = link.option_group
+                if not g.active:
+                    continue
                 groups.append(MenuOptionGroupResponse(
                     id=g.id, name=g.name,
                     min_select=link.min_select, max_select=link.max_select,

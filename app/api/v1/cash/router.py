@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -10,17 +10,20 @@ from app.core.db import get_db
 from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User
+from app.core.pagination import Page
 from app.models.cash_register import CashRegister
 from app.models.cash_shift import CashShift
 from app.models.cash_movement import CashMovement
 from app.models.cash_count_denomination import CashCountDenomination
+from app.models.cash_partial_count import CashPartialCount
 from app.api.v1.cash import service
 from app.api.v1.cash.schemas import (
     RegisterCreate, RegisterResponse,
     ShiftOpen, ShiftClose, ShiftResponse,
     CashMovementIn, CashMovementResponse,
     ReconciliationResponse, ShiftReportResponse,
-    DenominationIn,
+    DenominationIn, PartialCountIn, PartialCountResponse,
+    ShiftSummaryResponse,
 )
 
 router = APIRouter(prefix="/cash", tags=["cash"])
@@ -43,6 +46,19 @@ def create_register(body: RegisterCreate, db: Session = Depends(get_db), _: User
 
 
 # ============================ Turnos ============================
+@router.get("/shifts", response_model=Page[ShiftSummaryResponse],
+            summary="Histórico de turnos (cierres) — gestión admin")
+def list_shifts(
+    status: str | None = Query("closed", description="Filtra por estado ('closed' | 'open')."),
+    cash_register_id: UUID | None = Query(None),
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_tenant_admin),
+):
+    return service.list_shifts(db, status, cash_register_id, page, size)
+
+
 @router.post("/shifts/open", response_model=ShiftResponse, status_code=status.HTTP_201_CREATED, summary="Abrir turno de caja")
 def open_shift(body: ShiftOpen, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     get_or_404(db, CashRegister, body.cash_register_id, "Register not found")
@@ -112,6 +128,27 @@ def close_shift(shift_id: UUID, body: ShiftClose, db: Session = Depends(get_db),
 def reconciliation(shift_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     shift = get_or_404(db, CashShift, shift_id, "Shift not found")
     return service.reconcile(db, shift)
+
+
+@router.post("/shifts/{shift_id}/partial-count", response_model=PartialCountResponse,
+             status_code=status.HTTP_201_CREATED, summary="Arqueo parcial (sin cerrar el turno)")
+def partial_count(shift_id: UUID, body: PartialCountIn, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    shift = get_or_404(db, CashShift, shift_id, "Shift not found")
+    if shift.status != "open":
+        raise HTTPException(status.HTTP_409_CONFLICT, "El turno está cerrado")
+    recon = service.reconcile(db, shift)
+    expected = recon["expected"]
+    difference = body.counted_amount - expected
+    row = CashPartialCount(
+        cash_shift_id=shift.id, counted_amount=body.counted_amount,
+        expected_amount=expected, difference=difference, note=body.note,
+        user_id=user.id, user_name=user.name,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 @router.get("/shifts/{shift_id}/report", response_model=ShiftReportResponse, summary="Reporte de cierre consolidado")

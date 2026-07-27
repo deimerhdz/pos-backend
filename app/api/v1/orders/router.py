@@ -18,6 +18,7 @@ from app.api.v1.orders import service
 from app.api.v1.orders.consolidation import consolidate_table, add_item_to_table
 from app.api.v1.orders import kitchen
 from app.api.v1.orders import checkout
+from app.api.v1.orders import tables_advanced
 from app.api.v1.invoices import service as invoice_service
 from app.api.v1.invoices.schemas import InvoiceResponse
 from app.api.v1.sales.schemas import SaleResponse
@@ -27,6 +28,7 @@ from app.api.v1.orders.schemas import (
     OrderCreate, OrderStatusUpdate, OrderResponse, OrderItemIn,
     OrderItemResponse, KdsOrderResponse, KitchenTransitionIn, VoidItemIn,
     BlockIn, CancelIn, PayIn, BillResponse,
+    TableStatusUpdate, MoveOrderIn, MergeOrdersIn, MergeResponse, GroupBillResponse,
 )
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -72,6 +74,44 @@ def update_table(
     db.commit()
     db.refresh(table)
     return table
+
+
+# ============================ Mesas avanzado (RF-051..054) ============================
+@router.patch("/tables/{table_id}/status", response_model=TableResponse,
+              summary="Cambiar estado operativo de la mesa (RF-051)")
+def set_table_status(
+    table_id: UUID, body: TableStatusUpdate,
+    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    return tables_advanced.set_table_status(db, table_id, body.status)
+
+
+@router.post("/{order_id}/move", response_model=OrderResponse,
+             summary="Cambiar una orden de mesa (RF-052)")
+def move_order(
+    order_id: UUID, body: MoveOrderIn,
+    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    tables_advanced.move_order(db, order_id, body.dining_table_id)
+    return _load_order(db, order_id)
+
+
+@router.post("/merge", response_model=MergeResponse,
+             summary="Unir mesas en una sola cuenta (RF-053)")
+def merge_orders(
+    body: MergeOrdersIn,
+    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    return tables_advanced.merge_orders(db, body.order_ids)
+
+
+@router.get("/group/{group_id}/bill", response_model=GroupBillResponse,
+            summary="Cuenta consolidada de un grupo de mesas (RF-053)")
+def group_bill(
+    group_id: UUID,
+    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    return tables_advanced.group_bill(db, group_id)
 
 
 @router.get(

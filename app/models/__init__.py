@@ -20,6 +20,7 @@ from .cash_register import CashRegister
 from .cash_shift import CashShift
 from .cash_movement import CashMovement
 from .cash_count_denomination import CashCountDenomination
+from .cash_partial_count import CashPartialCount
 
 # Mesas y órdenes (QR)
 from .dining_table import DiningTable
@@ -34,6 +35,13 @@ from .order_item_void_log import OrderItemVoidLog
 # Ventas
 from .sale import Sale, SaleItem
 from .payment import PaymentMethod, Payment
+
+# Promociones
+from .promotion import Promotion, PromotionTarget
+
+# Administración (horarios, auditoría)
+from .business_hours import BusinessHours
+from .audit_log import AuditLog
 
 # Facturación
 from .invoice import Invoice, InvoiceCounter
