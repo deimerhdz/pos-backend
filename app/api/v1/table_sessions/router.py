@@ -10,9 +10,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.core.db import get_db
+from app.core.db import get_db, get_tenant
 from app.core.dependencies import get_current_user
-from app.core.models import User
+from app.core.models import Tenant, User
 from app.api.v1.table_sessions import service
 from app.api.v1.table_sessions.schemas import (
     CloseSessionIn, CloseSessionResponse, SessionBillResponse, TableSessionResponse,
@@ -72,7 +72,10 @@ def close_session(
     body: CloseSessionIn,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
 ):
     """Cierra en cascada: cobra, marca los pedidos `pagada`, cierra a los
     comensales, abandona sus carritos y libera la mesa. Todo en una transacción."""
-    return service.close_session(db, table_session_id, body, user)
+    return service.close_session(
+        db, table_session_id, body, user, invoice_prefix=tenant.invoice_prefix or ""
+    )

@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.db import get_db
+from app.core.db import get_db, get_tenant
 from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
-from app.core.models import User
+from app.core.models import Tenant, User
 from app.models.payment import PaymentMethod
 from app.models.sale import Sale
 from app.api.v1.sales import service
@@ -42,8 +42,13 @@ def create_payment_method(body: PaymentMethodCreate, db: Session = Depends(get_d
 
 # ============================ Ventas ============================
 @router.post("", response_model=SaleResponse, status_code=status.HTTP_201_CREATED, summary="Checkout: emitir y cobrar una venta")
-def create_sale(body: SaleCreate, db: Session = Depends(get_db), cashier: User = Depends(get_current_user)):
-    sale = service.checkout(db, body, cashier)
+def create_sale(
+    body: SaleCreate,
+    db: Session = Depends(get_db),
+    cashier: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
+):
+    sale = service.checkout(db, body, cashier, invoice_prefix=tenant.invoice_prefix or "")
     return _load_sale(db, sale.id)
 
 

@@ -59,6 +59,11 @@ class Tenant(Base,TimestampMixin):
     # su texto por defecto.
     receipt_message:Mapped[Optional[str]] = mapped_column("receipt_message", String(255), nullable=True)
 
+    # Prefijo del consecutivo de facturación (`invoices.prefix`). Cada prefijo
+    # lleva su propia numeración, así que a futuro mapea a una resolución DIAN.
+    # NULL = sin prefijo, numeración corrida.
+    invoice_prefix:Mapped[Optional[str]] = mapped_column("invoice_prefix", String(20), nullable=True)
+
     users: Mapped[list["User"]] = relationship(
             back_populates="tenant",
             cascade="all, delete-orphan"

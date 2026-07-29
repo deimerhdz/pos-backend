@@ -77,11 +77,19 @@ def build_sale(
     participant_id: UUID | None = None,
     customer_order_id: UUID | None = None,
     promotion_id: UUID | None = None,
+    invoice_prefix: str = "",
 ) -> Sale:
-    """Arma `Sale` + `SaleItem` + `Payment` y deja la venta en `paid`.
+    """Arma `Sale` + `SaleItem` + `Payment`, deja la venta en `paid` y **emite su
+    factura**.
 
     Valida que el total no sea negativo y que el pago lo cubra. **No hace commit
     ni toca inventario**: se une a la transacción del caller.
+
+    La factura se emite aquí y no en cada camino de cobro por la misma razón que
+    todo lo demás vive aquí: hay cuatro formas de cobrar (mostrador, cierre
+    unificado, cierre dividido y el `pay_order` legacy) y hacerlo en cada una
+    garantizaba que alguna se quedara fuera —que es exactamente lo que pasaba
+    cuando facturar dependía de que alguien pulsara un botón.
     """
     if not lines:
         raise HTTPException(status.HTTP_409_CONFLICT, "La venta no tiene ítems cobrables")
@@ -145,4 +153,10 @@ def build_sale(
     sale.paid_amount = paid
     sale.change_given = paid - total
     sale.status = "paid"
+
+    # Factura: en la misma transacción, con los totales ya cerrados. Import local
+    # para no crear un ciclo (invoices importa modelos de ventas).
+    from app.api.v1.invoices.service import issue_for_sale
+
+    issue_for_sale(db, sale, user=cashier, prefix=invoice_prefix)
     return sale

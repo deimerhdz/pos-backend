@@ -8,6 +8,7 @@ class TenantInfoResponse(BaseModel):
     plan: str
     logo_url: str | None = None
     receipt_message: str | None = None
+    invoice_prefix: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -18,3 +19,5 @@ class TenantUpdate(BaseModel):
     # Mensaje que cierra la factura impresa. Cadena vacía = borrarlo (queda NULL);
     # omitirlo = dejarlo como está.
     receipt_message: str | None = Field(None, max_length=255)
+    # Prefijo del consecutivo de facturación. Vaciarlo = numeración sin prefijo.
+    invoice_prefix: str | None = Field(None, max_length=20)

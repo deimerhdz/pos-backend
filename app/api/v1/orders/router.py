@@ -17,8 +17,6 @@ from app.api.v1.orders.consolidation import consolidate_table, add_item_to_table
 from app.api.v1.orders import kitchen
 from app.api.v1.orders import checkout
 from app.api.v1.orders import tables_advanced
-from app.api.v1.invoices import service as invoice_service
-from app.api.v1.invoices.schemas import InvoiceResponse
 from app.api.v1.sales.schemas import SaleResponse
 from app.api.v1.orders.schemas import (
     TableCreate, TableUpdate, TableResponse, TableQrTokenResponse,
@@ -285,29 +283,16 @@ def release_table(
     return checkout.release_table(db, table_id, closed_by=user)
 
 
-# ============================ Facturación (Fase 8) ============================
-@router.post(
-    "/{order_id}/invoice",
-    response_model=InvoiceResponse,
-    summary="Generar factura de una orden pagada (idempotente)",
-)
-def invoice_order(
-    order_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)
-):
-    invoice = invoice_service.generate_for_order(db, order_id, user)
-    return invoice_service.serialize_invoice(db, invoice)
-
-
-@router.post(
-    "/tables/{table_id}/invoice-all",
-    response_model=list[InvoiceResponse],
-    summary="Cierre de mesa: una factura por cada orden pagada (idempotente)",
-)
-def invoice_table(
-    table_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)
-):
-    invoices = invoice_service.generate_all_for_table(db, table_id, user)
-    return [invoice_service.serialize_invoice(db, inv) for inv in invoices]
+# ============================ Facturación ============================
+# Los endpoints de generación manual se eliminaron: la factura se emite sola al
+# cobrar, dentro de la transacción de la venta (`sales/builder.py:build_sale`).
+#
+# Además partían del **pedido**, que es la unidad equivocada: `Invoice.sale_id` es
+# único —una factura por venta— y tras el cobro por sesión un cierre `split` emite
+# N ventas, mientras que una venta de mostrador no cuelga de ningún pedido. Por eso
+# 12 de 20 ventas reales eran imposibles de facturar por esa vía.
+#
+# Consulta e impresión: `GET /invoices` y `GET /invoices/{id}`.
 
 
 # ============================ Comandas ============================

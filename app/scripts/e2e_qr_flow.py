@@ -45,6 +45,11 @@ def note(label):
     print(f"  ok  · {label}")
 
 
+# Prefijo de facturación que el fixture deja configurado en el tenant, para poder
+# comprobar que llega desde `shared.tenants` hasta la factura emitida.
+PREFIJO_FACTURA = "E2E"
+
+
 # --------------------------------------------------------------------- fixture
 
 def seed():
@@ -56,6 +61,13 @@ def seed():
         if row is None:
             raise SystemExit("No hay tenants en shared.tenants.")
         tenant_id, host, schema = row
+
+        # El prefijo es config del negocio; se fija aquí y se restaura en teardown.
+        prefijo_previo = db.execute(
+            text("SELECT invoice_prefix FROM shared.tenants WHERE id = :i"), {"i": tenant_id}
+        ).scalar()
+        db.execute(text("UPDATE shared.tenants SET invoice_prefix = :p WHERE id = :i"),
+                   {"p": PREFIJO_FACTURA, "i": tenant_id})
 
         role_id = db.execute(
             text("SELECT id FROM shared.roles WHERE name = 'ADMIN'")
@@ -116,11 +128,21 @@ def seed():
             "tenant_host": host, "schema": schema, "email": email,
             "user_id": user_id, "item_id": item.id, "variant_id": variant.id,
             "product_id": product.id, "table_id": table.id,
+            "tenant_id": tenant_id, "prefijo_previo": prefijo_previo,
         }
 
 
 def teardown(fx):
     s = fx["schema"]
+    with with_db(None) as shared:
+        # Restaura el prefijo del tenant y borra el consecutivo de la prueba.
+        shared.execute(text("UPDATE shared.tenants SET invoice_prefix = :p WHERE id = :i"),
+                       {"p": fx.get("prefijo_previo"), "i": fx["tenant_id"]})
+        shared.commit()
+    with with_db(s) as db:
+        db.execute(text(f'DELETE FROM "{s}".invoice_counters WHERE prefix = :p'),
+                   {"p": PREFIJO_FACTURA})
+        db.commit()
     with with_db(s) as db:
         tid, vid, pid, iid = (str(fx["table_id"]), str(fx["variant_id"]),
                               str(fx["product_id"]), str(fx["item_id"]))
@@ -131,6 +153,8 @@ def teardown(fx):
             f'SELECT id FROM "{s}".sales WHERE dining_table_id = :t'
         ), {"t": tid})]
         for sql, params in [
+            # Antes que `sales`: `invoices.sale_id` tiene FK.
+            (f'DELETE FROM "{s}".invoices WHERE sale_id = ANY(:v)', {"v": ventas}),
             (f'DELETE FROM "{s}".payments WHERE sale_id = ANY(:v)', {"v": ventas}),
             (f'DELETE FROM "{s}".sale_items WHERE sale_id = ANY(:v)', {"v": ventas}),
             (f'DELETE FROM "{s}".sales WHERE id = ANY(:v)', {"v": ventas}),
@@ -308,6 +332,20 @@ def main():
               cierre["table_session"]["status"], "closed")
         check("y registra el billing_mode elegido",
               cierre["table_session"]["billing_mode"], "split")
+
+        # Facturación: una por venta. Es el caso que antes era imposible —el
+        # generador partía del pedido y un split no cuelga de ninguno— y además
+        # comprueba que el prefijo del tenant llega de verdad desde el router.
+        with with_db(fx["schema"]) as db:
+            facturas = db.execute(text(f'''
+                SELECT i.prefix, i.number FROM "{fx["schema"]}".invoices i
+                WHERE i.sale_id = ANY(:ids) ORDER BY i.number
+            '''), {"ids": [str(s) for s in cierre["sale_ids"]]}).fetchall()
+        check("el split emite una factura por venta", len(facturas), 2)
+        check("con el prefijo configurado en el tenant",
+              {f[0] for f in facturas}, {PREFIJO_FACTURA})
+        check("y números consecutivos",
+              [f[1] for f in facturas], [facturas[0][1], facturas[0][1] + 1])
 
         mesa = next(t for t in api("GET", "/api/v1/orders/tables").json()
                     if t["id"] == str(fx["table_id"]))

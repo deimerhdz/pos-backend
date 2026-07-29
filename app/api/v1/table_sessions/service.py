@@ -188,7 +188,8 @@ def _assert_closable(db: Session, orders: list[CustomerOrder]) -> None:
 
 
 def close_session(
-    db: Session, table_session_id: UUID, data: CloseSessionIn, cashier: User
+    db: Session, table_session_id: UUID, data: CloseSessionIn, cashier: User,
+    *, invoice_prefix: str = "",
 ) -> CloseSessionResponse:
     """Cobra y cierra la sesión de mesa. Solo staff (el comensal anónimo no puede).
 
@@ -216,9 +217,9 @@ def close_session(
 
     try:
         if data.billing_mode is BillingMode.UNIFIED:
-            sales = [_close_unified(db, ts, orders, data, shift, cashier)]
+            sales = [_close_unified(db, ts, orders, data, shift, cashier, invoice_prefix)]
         else:
-            sales = _close_split(db, ts, orders, data, shift, cashier)
+            sales = _close_split(db, ts, orders, data, shift, cashier, invoice_prefix)
 
         for order in orders:
             order.status = "pagada"
@@ -247,7 +248,7 @@ def close_session(
 
 def _close_unified(
     db: Session, ts: TableSession, orders: list[CustomerOrder],
-    data: CloseSessionIn, shift, cashier: User,
+    data: CloseSessionIn, shift, cashier: User, invoice_prefix: str = "",
 ) -> Sale:
     """Una sola venta con las líneas de todos los pedidos de la sesión."""
     if not data.payments:
@@ -271,12 +272,13 @@ def _close_unified(
         table_session_id=ts.id,
         # Una venta unificada cubre a varios comensales: no cuelga de ninguno.
         customer_order_id=orders[0].id if len(orders) == 1 else None,
+        invoice_prefix=invoice_prefix,
     )
 
 
 def _close_split(
     db: Session, ts: TableSession, orders: list[CustomerOrder],
-    data: CloseSessionIn, shift, cashier: User,
+    data: CloseSessionIn, shift, cashier: User, invoice_prefix: str = "",
 ) -> list[Sale]:
     """Una venta por comensal. Se exige un bloque de pago por cada comensal con
     consumo: si falta uno, la mesa quedaría medio cobrada."""
@@ -331,5 +333,6 @@ def _close_split(
             dining_table_id=ts.dining_table_id,
             table_session_id=ts.id,
             participant_id=bloque.participant_id,
+            invoice_prefix=invoice_prefix,
         ))
     return sales
