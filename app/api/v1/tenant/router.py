@@ -39,7 +39,7 @@ def get_tenant_info(
 @router.patch(
     "",
     response_model=TenantInfoResponse,
-    summary="Actualizar la información del negocio (logo)",
+    summary="Actualizar la información del negocio (logo, recibo, prefijo de factura)",
     responses={
         401: {"description": "No autenticado o token inválido."},
         403: {"description": "El usuario no es administrador del tenant."},
@@ -60,6 +60,15 @@ def update_tenant(
             old_key = key_from_public_url(old_logo_url)
             if old_key:
                 delete_object(old_key)
+
+    if body.receipt_message is not None:
+        # Vaciar el campo es la forma de quitar el mensaje del recibo.
+        row.receipt_message = body.receipt_message.strip() or None
+
+    if body.invoice_prefix is not None:
+        # Cambiarlo arranca una numeración nueva: cada prefijo lleva su propio
+        # consecutivo, así que el nuevo empieza en 1 y el anterior se conserva.
+        row.invoice_prefix = body.invoice_prefix.strip().upper() or None
 
     db.commit()
     db.refresh(row)

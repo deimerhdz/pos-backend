@@ -11,9 +11,6 @@ import jwt
 from app.core.config import settings
 
 
-ACCESS_TOKEN_EXPIRY = 3600
-
-
 def generate_passwd_hash(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8")[:72], bcrypt.gensalt()).decode("utf-8")
 
@@ -31,12 +28,27 @@ def verify_password(password: str, hash: str) -> bool:
 def create_access_token(
     user_data: dict, expiry: timedelta = None, refresh: bool = False
 ):
+    """Acuña un JWT de usuario.
+
+    Con `refresh=True` el token vive `REFRESH_TOKEN_EXPIRY_MINUTES` en vez de
+    `ACCESS_TOKEN_EXPIRY`: si ambos duraran lo mismo, el refresh caducaría junto
+    al access y `/auth/refresh-token` nunca podría renovar nada.
+    """
+    if expiry is None:
+        minutes = (
+            settings.REFRESH_TOKEN_EXPIRY_MINUTES
+            if refresh
+            else settings.ACCESS_TOKEN_EXPIRY
+        )
+        expiry = timedelta(minutes=minutes)
+
+    now = datetime.now(timezone.utc)
+
     payload = {}
 
     payload["user"] = user_data
-    payload["exp"] = datetime.now(timezone.utc) + (
-        expiry if expiry is not None else timedelta(seconds=ACCESS_TOKEN_EXPIRY)
-    )
+    payload["iat"] = now
+    payload["exp"] = now + expiry
     payload["jti"] = str(uuid.uuid4())
 
     payload["refresh"] = refresh

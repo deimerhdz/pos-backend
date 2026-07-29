@@ -17,10 +17,11 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
     )
     order: Mapped["CustomerOrder"] = relationship(back_populates="items")
 
-    # Origen del comensal (para el split de cuenta por sesión en Fase 7).
-    # Nullable: las órdenes de mostrador no tienen sesión de mesa.
-    session_id: Mapped[Optional[UUID]] = mapped_column(
-        ForeignKey("dining_sessions.id"), nullable=True, index=True
+    # Comensal al que se le carga esta línea. La asignación es **por ítem**, no
+    # por pedido: así el split de cuenta es exacto aunque un pedido mezcle
+    # comensales. Nullable: mostrador, o línea agregada por el mesero.
+    participant_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("session_participants.id"), nullable=True, index=True
     )
 
     product_variant_id: Mapped[UUID] = mapped_column(

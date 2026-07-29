@@ -64,31 +64,60 @@ class SessionContext:
     db: Session
     tenant: Tenant
     table_id: UUID
-    session: "DiningSession"  # noqa: F821
+    participant: "SessionParticipant"  # noqa: F821
+    table_session: "TableSession"  # noqa: F821
 
 
-def _abandon_expired(db: Session, session) -> None:
-    """Cierra la sesión y abandona su carrito abierto (sesión expirada). Sin
-    impacto de inventario: el descuento solo ocurre al consolidar (Fase 4)."""
+def close_participant(db: Session, participant) -> None:
+    """Cierra a un comensal y abandona su carrito abierto. **No hace commit**: se
+    une a la transacción del caller.
+
+    Sin impacto de inventario: el descuento solo ocurre al confirmar el pedido,
+    así que un carrito abandonado no devuelve nada al stock.
+
+    No cierra la `table_session` — los demás comensales siguen en la mesa. De
+    liberar la mesa cuando ya no queda nadie se encarga `try_release_if_empty`.
+    """
     from app.models.cart import Cart
 
-    session.status = "closed"
-    if session.closed_at is None:
-        session.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    participant.status = "closed"
+    if participant.closed_at is None:
+        participant.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
     for cart in db.execute(
-        select(Cart).where(Cart.session_id == session.id, Cart.status == "abierto")
+        select(Cart).where(
+            Cart.participant_id == participant.id, Cart.status == "abierto"
+        )
     ).scalars():
         cart.status = "abandonado"
+
+
+def _abandon_expired(db: Session, participant) -> None:
+    """Cierra al comensal cuyo token expiró y libera la mesa si era el último y
+    no quedó ningún pedido que cobrar."""
+    from app.api.v1.table_sessions.service import try_release_if_empty
+
+    close_participant(db, participant)
+    try_release_if_empty(db, participant.table_session_id)
     db.commit()
 
 
 @contextmanager
 def open_session_context(token: str) -> Iterator[SessionContext]:
-    """Verifica el token de sesión, carga la fila de `DiningSession`, aplica la
-    política de expiración (cerrar + abandonar carrito) y, si está viva, desliza
-    `expires_at` (ventana de 4h). Lanza 401 si el token o la sesión no son
-    válidos/expiraron."""
-    from app.models.dining_session import DiningSession
+    """Autentica al comensal por su token y devuelve el contexto de reingreso.
+
+    Cadena de validación (todo antes de exponer datos):
+
+    1. firma + ``exp`` del token;
+    2. el participante existe y sigue `open`;
+    3. **la sesión de mesa del token es la que sigue `active` en esa mesa** — si la
+       mesa se cerró y se abrió otra, el token viejo no sirve para entrar a la
+       nueva (regla de reingreso: nunca reusar un `table_session_id` inválido);
+    4. TTL deslizante del comensal (4 h, se corre en cada actividad);
+    5. tope absoluto contra `TableSession.opened_at` (24 h) como red de seguridad,
+       independiente de que el token se siga refrescando.
+    """
+    from app.models.session_participant import SessionParticipant
+    from app.models.table_session import TableSession
 
     try:
         claims = verify_session_token(token)
@@ -104,26 +133,49 @@ def open_session_context(token: str) -> Iterator[SessionContext]:
 
     tenant = resolve_tenant_by_id(claims.tenant_id)
     with with_db(tenant.schema) as db:
-        session = db.get(DiningSession, claims.session_id)
-        if session is None or session.status != "open":
+        participant = db.get(SessionParticipant, claims.participant_id)
+        if participant is None or participant.status != "open":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión no activa"
             )
 
+        table_session = db.get(TableSession, claims.table_session_id)
+        if (
+            table_session is None
+            or table_session.status != "active"
+            or participant.table_session_id != table_session.id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="La mesa ya no tiene esta sesión abierta. Vuelve a escanear el QR.",
+            )
+
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        if session.expires_at is not None and session.expires_at <= now:
-            _abandon_expired(db, session)
+
+        if participant.expires_at is not None and participant.expires_at <= now:
+            _abandon_expired(db, participant)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Sesión expirada por inactividad. Vuelve a escanear el QR.",
             )
 
-        # Refresco deslizante: cada actividad corre la ventana 4h.
-        session.expires_at = now + timedelta(minutes=settings.SESSION_TTL_MINUTES)
+        max_age = timedelta(minutes=settings.SESSION_ABS_MAX_MINUTES)
+        if table_session.opened_at + max_age <= now:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="La sesión de la mesa superó su duración máxima. Vuelve a escanear el QR.",
+            )
+
+        # Refresco deslizante: cada actividad corre la ventana del comensal.
+        participant.expires_at = now + timedelta(minutes=settings.SESSION_TTL_MINUTES)
         db.commit()
 
         yield SessionContext(
-            db=db, tenant=tenant, table_id=claims.table_id, session=session
+            db=db,
+            tenant=tenant,
+            table_id=claims.table_id,
+            participant=participant,
+            table_session=table_session,
         )
 
 

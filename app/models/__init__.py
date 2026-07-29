@@ -24,7 +24,8 @@ from .cash_partial_count import CashPartialCount
 
 # Mesas y órdenes (QR)
 from .dining_table import DiningTable
-from .dining_session import DiningSession
+from .table_session import TableSession
+from .session_participant import SessionParticipant
 from .cart import Cart
 from .cart_item import CartItem, CartItemOption
 from .customer_order import CustomerOrder

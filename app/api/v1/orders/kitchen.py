@@ -18,7 +18,7 @@ from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
 from app.models.order_item_void_log import OrderItemVoidLog
 from app.models.product_variant import ProductVariant
-from app.api.v1.orders.consumption import deduct_order_item, reverse_order_item
+from app.api.v1.orders.consumption import deduct_order_items, reverse_order_items
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.orders.schemas import (
     KdsItemResponse, KdsOrderResponse, KitchenTransitionIn, VoidItemIn,
@@ -44,11 +44,14 @@ def _item_options(db: Session, item: OrderItem) -> list[Option]:
 
 
 def list_kds(db: Session) -> list[KdsOrderResponse]:
-    """Ítems activos de cocina, agrupados por orden/mesa (no por comensal)."""
+    """Ítems activos de cocina, agrupados por orden/mesa (no por comensal).
+
+    Excluye los pedidos en `recibida`: el comensal ya los envió pero el staff aún
+    no los confirmó, así que no han comprometido stock y no deben llegar a cocina."""
     orders = db.execute(
         select(CustomerOrder)
         .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
-        .where(CustomerOrder.status != "cancelada")
+        .where(CustomerOrder.status.notin_(("cancelada", "recibida")))
         .order_by(CustomerOrder.created_at)
     ).scalars().all()
 
@@ -127,7 +130,9 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
 
         if was_pendiente:
             # Cocina no consumió físicamente: se devuelve el inventario.
-            reverse_order_item(db, item, _item_options(db, item), user.id, reference_id=order_id)
+            reverse_order_items(
+                db, [(item, _item_options(db, item))], user.id, reference_id=order_id
+            )
 
         db.add(OrderItemVoidLog(
             order_item_id=item.id, motivo=data.motivo,
@@ -137,7 +142,7 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
         if data.replacement is not None:
             new_item = OrderItem(
                 order_id=order_id,
-                session_id=item.session_id,
+                participant_id=item.participant_id,
                 product_variant_id=repl_variant.id,
                 quantity=data.replacement.quantity,
                 unit_price=compute_line_price(repl_variant, repl_options),
@@ -150,7 +155,9 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
             for opt in repl_options:
                 db.add(OrderItemOption(order_item_id=new_item.id, option_id=opt.id))
             # Nuevo consumo (con lock; puede 400 y hacer rollback total).
-            deduct_order_item(db, new_item, repl_options, user.id, reference_id=order_id)
+            deduct_order_items(
+                db, [(new_item, repl_options)], user.id, reference_id=order_id
+            )
 
         db.commit()
     except HTTPException:

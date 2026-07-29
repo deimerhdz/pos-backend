@@ -47,7 +47,8 @@ class PaymentIn(BaseModel):
 
 class SaleCreate(BaseModel):
     cash_shift_id: UUID
-    dining_session_id: UUID | None = None
+    participant_id: UUID | None = None
+    table_session_id: UUID | None = None
     dining_table_id: UUID | None = None
     customer_name: str | None = Field(None, max_length=255)
     discount: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)

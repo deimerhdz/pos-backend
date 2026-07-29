@@ -1,7 +1,12 @@
 """Cobro y ciclo de cierre de una orden de mesa (Fase 7): bloqueo con lock
 optimista + validación de cocina, cuenta/split por comensal, pago (crea Sale sin
-re-descontar), cancelación con reversa, y liberación de mesa."""
+re-descontar), cancelación con reversa **parcial**, y liberación de mesa.
+
+La reversa de inventario al cancelar es asimétrica y depende del estado de cocina
+de cada ítem: solo vuelve al stock lo que cocina no llegó a preparar. Ver
+`cancel_order`."""
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -9,21 +14,23 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.audit import record_audit
 from app.core.crud import get_or_404
 from app.core.models import User
 from app.models.dining_table import DiningTable
-from app.models.dining_session import DiningSession
+from app.models.table_session import TableSession
+from app.models.session_participant import SessionParticipant
 from app.models.cart import Cart
 from app.models.option import Option
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.cash_shift import CashShift
-from app.models.payment import Payment, PaymentMethod
-from app.models.sale import Sale, SaleItem
+from app.models.sale import Sale
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem
 from app.models.order_cancel_log import OrderCancelLog
-from app.api.v1.orders.consumption import reverse_order_item
+from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
+from app.api.v1.orders.consumption import deduct_order_items, reverse_order_items
 from app.api.v1.orders.schemas import (
     BlockIn, CancelIn, PayIn,
     BillResponse, BillOrderLine, BillItemLine, BillSessionLine,
@@ -34,6 +41,15 @@ logger = logging.getLogger(__name__)
 # Estados de cocina que impiden bloquear para cobro.
 _NOT_READY = ("pendiente", "en_preparacion")
 TERMINAL = ("pagada", "cancelada")
+
+# Estados de cocina en los que el insumo YA se combinó físicamente: cancelar no
+# lo devuelve al stock, es pérdida. El 'out' de la confirmación ya representa esa
+# pérdida, así que tampoco se escribe un movimiento extra (sería doble descuento).
+_CONSUMED_KITCHEN = ("en_preparacion", "listo", "entregado")
+
+# Estados de orden en los que el inventario todavía NO se descontó: el descuento
+# ocurre al confirmar. Cancelar desde aquí no genera ningún movimiento.
+_NOT_DEDUCTED = ("recibida",)
 
 
 def _item_options(db: Session, item: OrderItem) -> list[Option]:
@@ -86,7 +102,7 @@ def block_order(db: Session, order_id: UUID, data: BlockIn) -> CustomerOrder:
                             "order_item_id": str(it.id),
                             "product_variant_id": str(it.product_variant_id),
                             "estado_cocina": it.estado_cocina,
-                            "session_id": str(it.session_id) if it.session_id else None,
+                            "participant_id": str(it.participant_id) if it.participant_id else None,
                         }
                         for it in pendientes
                     ],
@@ -123,7 +139,9 @@ def compute_bill(db: Session, table_id: UUID) -> BillResponse:
     ).scalars().all()
 
     # nombres de comensal por sesión
-    names = dict(db.execute(select(DiningSession.id, DiningSession.customer_name)).all())
+    names = dict(db.execute(
+        select(SessionParticipant.id, SessionParticipant.display_label)
+    ).all())
 
     total = Decimal("0")
     order_lines: list[BillOrderLine] = []
@@ -137,10 +155,10 @@ def compute_bill(db: Session, table_id: UUID) -> BillResponse:
                 continue
             line_total = Decimal(it.unit_price) * it.quantity
             subtotal += line_total
-            split[it.session_id] = split.get(it.session_id, Decimal("0")) + line_total
+            split[it.participant_id] = split.get(it.participant_id, Decimal("0")) + line_total
             items.append(BillItemLine(
                 order_item_id=it.id, product_variant_id=it.product_variant_id,
-                session_id=it.session_id, quantity=it.quantity,
+                participant_id=it.participant_id, quantity=it.quantity,
                 unit_price=it.unit_price, line_total=line_total,
                 estado_cocina=it.estado_cocina,
             ))
@@ -151,8 +169,8 @@ def compute_bill(db: Session, table_id: UUID) -> BillResponse:
 
     split_lines = [
         BillSessionLine(
-            session_id=sid,
-            customer_name=names.get(sid) if sid else None,
+            participant_id=sid,
+            display_label=names.get(sid) if sid else None,
             subtotal=amount,
         )
         for sid, amount in split.items()
@@ -165,6 +183,51 @@ def compute_bill(db: Session, table_id: UUID) -> BillResponse:
 
 # ------------------------------------------------------------------------ Pago
 
+#: Centinela para "sin filtrar por comensal". No sirve `None`: en el cobro split,
+#: `participant_id=None` significa justamente "las líneas sin comensal asignado"
+#: (las que metió el mesero), que es un filtro `IS NULL`, no la ausencia de filtro.
+ALL_PARTICIPANTS = object()
+
+
+def order_sale_lines(
+    db: Session, order_id: UUID, *, participant_id=ALL_PARTICIPANTS
+) -> list[SaleLine]:
+    """Líneas cobrables de un pedido, convertidas al formato del constructor de
+    venta (con el snapshot inmutable de descripción y opciones).
+
+    Con `participant_id` devuelve solo las de ese comensal (o las sin asignar si
+    se pasa `None`): es lo que hace posible el cobro `split`, una venta por
+    persona."""
+    stmt = (
+        select(OrderItem)
+        .options(selectinload(OrderItem.options))
+        .where(OrderItem.order_id == order_id, OrderItem.estado_cocina != "anulado")
+    )
+    if participant_id is not ALL_PARTICIPANTS:
+        stmt = stmt.where(OrderItem.participant_id == participant_id)
+
+    lines: list[SaleLine] = []
+    for it in db.execute(stmt).scalars():
+        variant = db.get(ProductVariant, it.product_variant_id)
+        product = db.get(Product, variant.product_id) if variant else None
+        description = (
+            f"{product.name} - {variant.name}" if product
+            else (variant.name if variant else "")
+        )
+        lines.append(SaleLine(
+            product_variant_id=it.product_variant_id,
+            description=description,
+            options=[
+                {"option_id": str(o.id), "name": o.name,
+                 "extra_price": str(o.extra_price)}
+                for o in _item_options(db, it)
+            ],
+            quantity=it.quantity,
+            unit_price=Decimal(it.unit_price),
+        ))
+    return lines
+
+
 def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
     order = get_or_404(db, CustomerOrder, order_id, "Order not found")
     if order.status != "bloqueada":
@@ -172,75 +235,24 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
             status.HTTP_409_CONFLICT,
             "La orden debe estar bloqueada para cobrar (bloquea primero).",
         )
-    shift = get_or_404(db, CashShift, data.cash_shift_id, "Shift not found")
-    if shift.status != "open":
-        raise HTTPException(status.HTTP_409_CONFLICT, "El turno de caja está cerrado")
+    shift = ensure_open_shift(db, data.cash_shift_id)
 
     try:
-        sale = Sale(
-            cash_shift_id=shift.id,
-            dining_table_id=order.dining_table_id,
-            dining_session_id=order.dining_session_id,
-            customer_order_id=order.id,
-            user_id=cashier.id,
-            user_name=cashier.name,
-            customer_name=order.customer_name,
+        sale = build_sale(
+            db,
+            lines=order_sale_lines(db, order.id),
+            shift=shift,
+            cashier=cashier,
+            payments=data.payments,
             discount=data.discount, tax=data.tax, tip=data.tip,
-            status="issued",
+            customer_name=order.customer_name,
+            dining_table_id=order.dining_table_id,
+            table_session_id=order.table_session_id,
+            participant_id=order.participant_id,
+            customer_order_id=order.id,
         )
-        db.add(sale)
-        db.flush()
-
-        items = db.execute(
-            select(OrderItem)
-            .options(selectinload(OrderItem.options))
-            .where(OrderItem.order_id == order.id, OrderItem.estado_cocina != "anulado")
-        ).scalars().all()
-        if not items:
-            raise HTTPException(status.HTTP_409_CONFLICT, "La orden no tiene ítems cobrables")
-
-        subtotal = Decimal("0")
-        for it in items:
-            variant = db.get(ProductVariant, it.product_variant_id)
-            product = db.get(Product, variant.product_id) if variant else None
-            description = f"{product.name} - {variant.name}" if product else (variant.name if variant else "")
-            options_snapshot: list[dict] = []
-            for opt in _item_options(db, it):
-                options_snapshot.append({
-                    "option_id": str(opt.id), "name": opt.name,
-                    "extra_price": str(opt.extra_price),
-                })
-            line_total = Decimal(it.unit_price) * it.quantity
-            subtotal += line_total
-            db.add(SaleItem(
-                sale_id=sale.id, product_variant_id=it.product_variant_id,
-                description=description, options=options_snapshot,
-                quantity=it.quantity, unit_price=it.unit_price, line_total=line_total,
-            ))
-
-        total = subtotal - Decimal(data.discount) + Decimal(data.tax) + Decimal(data.tip)
-        if total < 0:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "El total no puede ser negativo")
-
-        paid = Decimal("0")
-        for p in data.payments:
-            get_or_404(db, PaymentMethod, p.payment_method_id, "Payment method not found")
-            db.add(Payment(
-                sale_id=sale.id, payment_method_id=p.payment_method_id,
-                amount=p.amount, reference=p.reference,
-            ))
-            paid += Decimal(p.amount)
-        if paid < total:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"El pago ({paid}) no cubre el total ({total})",
-            )
-
-        sale.subtotal = subtotal
-        sale.total = total
-        sale.status = "paid"
         order.status = "pagada"
-        # NO se llama deduct_sale: el inventario ya se descontó en la consolidación.
+        # NO se descuenta inventario aquí: ya se hizo al confirmar el pedido.
 
         db.commit()
     except HTTPException:
@@ -258,9 +270,83 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
     ).scalar_one()
 
 
+# --------------------------------------------------------------- Confirmación
+
+def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
+    """`recibida` → `abierta`: el staff acepta el pedido que envió el comensal y
+    **aquí es donde se compromete el inventario**.
+
+    Es el único punto de descuento de los pedidos por QR. La validación de stock es
+    la real (con lock por fila, en orden canónico de id para no deadlockear); el
+    chequeo del carrito era solo preventivo y pudo quedar obsoleto. Si falta stock
+    de un solo insumo, la transacción entera hace rollback y el pedido sigue
+    `recibida`, listo para reintentar o cancelar."""
+    order = db.execute(
+        select(CustomerOrder)
+        .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
+        .where(CustomerOrder.id == order_id)
+        .with_for_update(of=CustomerOrder)
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    if order.status != "recibida":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Solo se confirman pedidos en 'recibida' (status={order.status})",
+        )
+
+    try:
+        entries = [
+            (it, _item_options(db, it))
+            for it in order.items
+            if it.estado_cocina != "anulado"
+        ]
+        if not entries:
+            raise HTTPException(status.HTTP_409_CONFLICT, "El pedido no tiene ítems")
+
+        deduct_order_items(db, entries, user.id, reference_id=order.id)
+
+        order.status = "abierta"
+        order.version += 1
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Error confirmando el pedido")
+        raise
+
+    return _reload_order(db, order_id)
+
+
 # ------------------------------------------------------------------ Cancelación
 
-def cancel_order(db: Session, order_id: UUID, data: CancelIn, user: User) -> CustomerOrder:
+def cancel_order(
+    db: Session,
+    order_id: UUID,
+    data: CancelIn,
+    user: User | None,
+    participant: SessionParticipant | None = None,
+) -> CustomerOrder:
+    """Cancela un pedido y ajusta el inventario **según lo que cocina alcanzó a
+    consumir**, no como una reversa simétrica:
+
+    - orden aún sin confirmar (`recibida`): nunca se descontó → cero movimientos;
+    - ítem `pendiente`: descontado pero no preparado → entrada real ('in');
+    - ítem `en_preparacion`/`listo`/`entregado`: el insumo ya se combinó → **no
+      vuelve al stock**. El 'out' de la confirmación ya es esa pérdida; escribir
+      otro movimiento la descontaría dos veces. Se traza en `audit_logs`;
+    - ítem `anulado`: ya lo resolvió `void_item`.
+
+    Devolver todo al stock (comportamiento anterior) sobrestimaba el inventario en
+    silencio hasta el conteo físico.
+
+    El actor es `user` (staff) **o** `participant` (el propio comensal desde el QR,
+    que no es un usuario del sistema). Quién puede cancelar en qué estado lo decide
+    quien llama: aquí no hay restricción de estado más allá de los terminales,
+    porque el staff sí puede cancelar en cualquier momento.
+    """
     order = db.execute(
         select(CustomerOrder)
         .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
@@ -273,17 +359,64 @@ def cancel_order(db: Session, order_id: UUID, data: CancelIn, user: User) -> Cus
             status.HTTP_409_CONFLICT, f"La orden ya es terminal (status={order.status})"
         )
 
+    deducted = order.status not in _NOT_DEDUCTED
+
     try:
+        a_revertir: list[tuple[OrderItem, list[Option]]] = []
+        perdidos: list[dict] = []
+
         for it in order.items:
             if it.estado_cocina == "anulado":
+                # Ya se resolvió al anular el ítem (void_item revirtió si procedía).
                 continue
-            reverse_order_item(db, it, _item_options(db, it), user.id, reference_id=order.id)
+            if not deducted:
+                # La orden nunca llegó a descontar stock: no hay nada que revertir.
+                continue
+            if it.estado_cocina in _CONSUMED_KITCHEN:
+                # Insumo ya consumido: no vuelve a stock. Se registra como pérdida.
+                perdidos.append({
+                    "order_item_id": str(it.id),
+                    "product_variant_id": str(it.product_variant_id),
+                    "quantity": it.quantity,
+                    "estado_cocina": it.estado_cocina,
+                })
+                continue
+            a_revertir.append((it, _item_options(db, it)))
+
+        actor_id = user.id if user is not None else None
+        reverse_order_items(db, a_revertir, actor_id, reference_id=order.id)
+        revertidos = [str(it.id) for it, _ in a_revertir]
 
         order.status = "cancelada"
         db.add(OrderCancelLog(
             order_id=order.id, motivo=data.motivo,
-            user_id=user.id, user_name=user.name,
+            user_id=actor_id,
+            user_name=user.name if user is not None else None,
+            participant_id=participant.id if participant is not None else None,
         ))
+
+        if perdidos:
+            # La pérdida no genera movimiento de inventario (ya está descontada);
+            # queda trazada en auditoría para el reporte de mermas.
+            logger.warning(
+                "Cancelación de orden %s con %d ítem(s) ya consumidos: pérdida sin reversa",
+                order.id, len(perdidos),
+            )
+            record_audit(
+                db,
+                action="order.cancel.loss",
+                entity="customer_orders",
+                entity_id=order.id,
+                user=user,
+                payload={
+                    "motivo": data.motivo,
+                    "items_perdidos": perdidos,
+                    "items_revertidos": revertidos,
+                    "cancelado_por_comensal": participant.id is not None
+                    if participant is not None else False,
+                },
+            )
+
         db.commit()
     except HTTPException:
         db.rollback()
@@ -298,7 +431,57 @@ def cancel_order(db: Session, order_id: UUID, data: CancelIn, user: User) -> Cus
 
 # ------------------------------------------------------------- Liberar mesa
 
-def release_table(db: Session, table_id: UUID) -> DiningTable:
+def close_table_sessions(
+    db: Session, table_id: UUID, *, closed_by: User | None = None
+) -> list[TableSession]:
+    """Cierra en cascada las sesiones `active` de una mesa: la sesión de mesa, sus
+    comensales y los carritos que quedaran abiertos.
+
+    No hace commit (se une a la transacción del caller) ni valida órdenes
+    pendientes — eso es responsabilidad de quien llama (`release_table`, el cierre
+    con `billing_mode`, o el job de sesiones huérfanas, que pasa `closed_by=None`).
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    sessions = db.execute(
+        select(TableSession).where(
+            TableSession.dining_table_id == table_id,
+            TableSession.status == "active",
+        )
+    ).scalars().all()
+
+    for ts in sessions:
+        ts.status = "closed"
+        if ts.closed_at is None:
+            ts.closed_at = now
+        if closed_by is not None:
+            ts.closed_by_user_id = closed_by.id
+            ts.closed_by_user_name = closed_by.name
+
+        participants = db.execute(
+            select(SessionParticipant).where(
+                SessionParticipant.table_session_id == ts.id,
+                SessionParticipant.status == "open",
+            )
+        ).scalars().all()
+        for p in participants:
+            p.status = "closed"
+            if p.closed_at is None:
+                p.closed_at = now
+            for cart in db.execute(
+                select(Cart).where(
+                    Cart.participant_id == p.id, Cart.status == "abierto"
+                )
+            ).scalars():
+                cart.status = "abandonado"
+
+    return sessions
+
+
+
+def release_table(
+    db: Session, table_id: UUID, *, closed_by: User | None = None
+) -> DiningTable:
     table = get_or_404(db, DiningTable, table_id, "Table not found")
 
     blocking = db.execute(
@@ -327,22 +510,7 @@ def release_table(db: Session, table_id: UUID) -> DiningTable:
 
     try:
         table.status = "libre"
-        sessions = db.execute(
-            select(DiningSession).where(
-                DiningSession.dining_table_id == table.id,
-                DiningSession.status == "open",
-            )
-        ).scalars().all()
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        for s in sessions:
-            s.status = "closed"
-            if s.closed_at is None:
-                s.closed_at = now
-            for cart in db.execute(
-                select(Cart).where(Cart.session_id == s.id, Cart.status == "abierto")
-            ).scalars():
-                cart.status = "abandonado"
+        close_table_sessions(db, table.id, closed_by=closed_by)
         db.commit()
     except Exception:
         db.rollback()

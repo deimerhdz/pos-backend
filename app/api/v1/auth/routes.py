@@ -1,18 +1,17 @@
 import logging
+import uuid
 
 from fastapi import APIRouter, HTTPException, Request, status,Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 from sqlalchemy.exc import SQLAlchemyError, OperationalError
-from datetime import datetime
 from sqlalchemy.orm import Session
 from app.core.db import with_db
 from app.core.models import User, Tenant
 from app.core.utils import verify_password, create_access_token, generate_passwd_hash
 from app.core.dependencies import RefreshTokenBearer,AccessTokenBearer, get_authenticated_user
 from app.core.dependencies import get_shared_db
-from app.core.exceptions import InvalidToken
 from app.api.v1.auth.schemas import LoginRequest, ChangePasswordRequest
 from app.core.redis import add_jti_to_blocklist
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
@@ -110,21 +109,51 @@ def change_password(
 
 
 @auth_router.get("/refresh-token")
-async def get_new_access_token(token_details: dict = Depends(RefreshTokenBearer())):
-    expiry_timestamp = token_details["exp"]
+async def get_new_access_token(
+    token_details: dict = Depends(RefreshTokenBearer()),
+    db: Session = Depends(get_shared_db),
+):
+    # La expiración ya la validó PyJWT dentro de `decode_token`; si el token
+    # estuviera vencido, RefreshTokenBearer habría respondido 401 antes de llegar aquí.
+    uid = (token_details.get("user") or {}).get("uid")
+    try:
+        user_id = uuid.UUID(str(uid))
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload"
+        )
 
-    if datetime.fromtimestamp(expiry_timestamp) > datetime.now():
-        new_access_token = create_access_token(user_data=token_details["user"])
+    # Se relee el usuario en vez de reciclar los claims del refresh: si no,
+    # una cuenta desactivada o con el rol cambiado seguiría emitiendo access
+    # tokens válidos con datos obsoletos durante toda la vida del refresh.
+    user = db.execute(
+        select(User)
+        .options(joinedload(User.role))
+        .where(User.id == user_id, User.active == True)
+    ).scalar_one_or_none()
 
-        return JSONResponse(content={"access_token": new_access_token})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+        )
 
-    raise InvalidToken
+    user_data = {
+        "email": user.email,
+        "uid": str(user.id),
+        "tenant_id": user.tenant_id,
+        "is_super_admin": user.tenant_id is None,
+        "role": user.role.name if user.role else None,
+        "must_change_password": user.must_change_password,
+    }
+
+    return JSONResponse(content={"access_token": create_access_token(user_data)})
 
 @auth_router.get("/logout")
 async def revoke_token(token_details: dict = Depends(AccessTokenBearer())):
     jti = token_details["jti"]
 
-    await add_jti_to_blocklist(jti)
+    await add_jti_to_blocklist(jti, token_details.get("exp"))
 
     return JSONResponse(
         content={"message": "Logged Out Successfully"}, status_code=status.HTTP_200_OK

@@ -10,15 +10,16 @@ if TYPE_CHECKING:
 
 
 class Cart(UUIDPrimaryKeyMixin, Base):
-    """Carrito por comensal (1 por sesión de mesa). El comensal agrega ítems
-    mientras la sesión está activa; al consolidar (Fase 4) sus líneas se copian
-    a `order_items`. Un carrito 'abandonado' (sesión expirada) nunca se
-    consolida y no toca inventario."""
+    """Carrito borrador de un comensal (1 abierto por participante). El comensal
+    agrega ítems mientras su sesión está activa; al enviar el pedido sus líneas se
+    copian a `order_items` y el carrito pasa a 'confirmado' (puede abrir otro para
+    la siguiente ronda). Un carrito 'abandonado' (sesión expirada) nunca se envía
+    y no toca inventario."""
 
     __tablename__ = "carts"
 
-    session_id: Mapped[UUID] = mapped_column(
-        ForeignKey("dining_sessions.id"), nullable=False, index=True
+    participant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("session_participants.id"), nullable=False, index=True
     )
 
     status: Mapped[str] = mapped_column(String(12), nullable=False, server_default="abierto")
@@ -35,10 +36,10 @@ class Cart(UUIDPrimaryKeyMixin, Base):
         CheckConstraint(
             "status IN ('abierto', 'confirmado', 'abandonado')", name="ck_cart_status"
         ),
-        # Solo un carrito 'abierto' por sesión a la vez.
+        # Solo un carrito 'abierto' por comensal a la vez.
         Index(
-            "idx_open_cart_per_session",
-            "session_id",
+            "idx_open_cart_per_participant",
+            "participant_id",
             unique=True,
             postgresql_where=text("status = 'abierto'"),
         ),

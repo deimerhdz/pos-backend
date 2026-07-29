@@ -61,6 +61,7 @@ python-dotenv==1.2.2
 python-multipart==0.0.29
 PyYAML==6.0.3
 redis==8.0.0
+APScheduler==3.11.3
 regex==2026.5.9
 requests==2.34.2
 resend==2.30.1

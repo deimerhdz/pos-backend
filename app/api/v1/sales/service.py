@@ -19,34 +19,27 @@ from app.models.cash_shift import CashShift
 from app.models.payment import Payment, PaymentMethod
 from app.models.sale import Sale, SaleItem
 from app.api.v1.sales.consumption import deduct_sale
+from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
 from app.api.v1.sales.schemas import SaleCreate
 from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
 
 
-def checkout(db: Session, data: SaleCreate, cashier: User) -> Sale:
-    shift = get_or_404(db, CashShift, data.cash_shift_id, "Shift not found")
-    if shift.status != "open":
-        raise HTTPException(status.HTTP_409_CONFLICT, "El turno de caja está cerrado")
+def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: str = "") -> Sale:
+    """Venta de mostrador: arma la venta, descuenta inventario y emite factura.
+
+    Usa `build_sale` —el mismo constructor que el cobro de mesa— para no volver a
+    tener dos implementaciones divergentes de lo mismo. Lo propio de este camino y
+    que no vive en el builder: las **promociones** (que ajustan el descuento antes
+    de construir) y el **descuento de inventario**, porque aquí no hubo un paso de
+    confirmación previo que ya lo hiciera.
+    """
+    shift = ensure_open_shift(db, data.cash_shift_id)
 
     try:
-        sale = Sale(
-            cash_shift_id=shift.id,
-            dining_session_id=data.dining_session_id,
-            dining_table_id=data.dining_table_id,
-            user_id=cashier.id,
-            user_name=cashier.name,
-            customer_name=data.customer_name,
-            discount=data.discount,
-            tax=data.tax,
-            tip=data.tip,
-            status="issued",
-        )
-        db.add(sale)
-        db.flush()
-
-        subtotal = Decimal("0")
+        # 1. Resolver y valorar las líneas (snapshot de precio: variante + opciones).
+        lines: list[SaleLine] = []
         promo_lines: list[dict] = []
         for line in data.items:
             variant = get_or_404(db, ProductVariant, line.product_variant_id, "Variant not found")
@@ -64,62 +57,47 @@ def checkout(db: Session, data: SaleCreate, cashier: User) -> Sale:
                     "extra_price": str(option.extra_price),
                 })
 
-            line_total = unit_price * Decimal(line.quantity)
-            subtotal += line_total
-            promo_lines.append({
-                "product_id": variant.product_id,
-                "category_id": product.category_id if product else None,
-                "quantity": line.quantity,
-                "line_total": line_total,
-            })
-            db.add(SaleItem(
-                sale_id=sale.id,
+            lines.append(SaleLine(
                 product_variant_id=variant.id,
                 description=description,
                 options=options_snapshot,
                 quantity=line.quantity,
                 unit_price=unit_price,
-                line_total=line_total,
             ))
+            promo_lines.append({
+                "product_id": variant.product_id,
+                "category_id": product.category_id if product else None,
+                "quantity": line.quantity,
+                "line_total": unit_price * Decimal(line.quantity),
+            })
 
-        # Descuento automático por promociones (RF-012); se suma al descuento manual.
+        # 2. Descuento automático por promociones (RF-012), sumado al manual.
         promo_discount, promo_id = promotions.evaluate(
             db, promo_lines, datetime.now(timezone.utc)
         )
-        effective_discount = Decimal(data.discount) + promo_discount
 
-        total = subtotal - effective_discount + Decimal(data.tax) + Decimal(data.tip)
-        if total < 0:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "El total no puede ser negativo")
-
-        paid = Decimal("0")
-        for p in data.payments:
-            get_or_404(db, PaymentMethod, p.payment_method_id, "Payment method not found")
-            db.add(Payment(
-                sale_id=sale.id, payment_method_id=p.payment_method_id,
-                amount=p.amount, reference=p.reference,
-            ))
-            paid += Decimal(p.amount)
-
-        if paid < total:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"El pago ({paid}) no cubre el total ({total})",
-            )
-
-        sale.subtotal = subtotal
-        sale.discount = effective_discount
-        sale.promotion_id = promo_id
-        sale.total = total
-        sale.paid_amount = paid
-        sale.change_given = paid - total  # RF-029: cambio a devolver
-        sale.status = "paid"
+        sale = build_sale(
+            db,
+            lines=lines,
+            shift=shift,
+            cashier=cashier,
+            payments=data.payments,
+            discount=Decimal(data.discount) + promo_discount,
+            tax=data.tax,
+            tip=data.tip,
+            customer_name=data.customer_name,
+            dining_table_id=data.dining_table_id,
+            participant_id=data.participant_id,
+            promotion_id=promo_id,
+            invoice_prefix=invoice_prefix,
+        )
 
         # La sesión tiene autoflush=False; forzamos el flush para que deduct_sale
         # vea los sale_items recién insertados.
         db.flush()
 
-        # Descontar inventario (receta + opciones). Puede lanzar InsufficientStockError.
+        # 3. Inventario: aquí sí descuenta (mesa ya lo hizo al confirmar).
+        #    Puede lanzar InsufficientStockError y tumbar toda la transacción.
         deduct_sale(db, sale, user_id=cashier.id)
 
         db.commit()

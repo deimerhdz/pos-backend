@@ -1,5 +1,14 @@
-"""Facturación (Fase 8): genera una factura interna (snapshot inmutable) por
-cada order pagada. Consecutivo serializado con lock. DIAN fuera de v1."""
+"""Facturación: una factura interna (snapshot inmutable) por **venta**.
+
+La unidad es la venta, no el pedido: `Invoice.sale_id` es único, y tras el cobro
+por sesión un cierre `split` emite N ventas mientras que una venta de mostrador no
+cuelga de ningún pedido. Facturar por pedido dejaba fuera esos casos.
+
+La emisión ocurre dentro de la transacción del cobro (`build_sale`), así que
+`issue_for_sale` **no hace commit**: una factura sin su venta, o al revés, sería
+peor que no tener factura.
+
+Consecutivo serializado con lock del contador. DIAN fuera de v1."""
 import logging
 from uuid import UUID
 
@@ -33,80 +42,38 @@ def _next_number(db: Session, prefix: str) -> int:
     return n
 
 
-def _paid_sale_for_order(db: Session, order_id: UUID) -> Sale:
-    sale = db.execute(
-        select(Sale).where(
-            Sale.customer_order_id == order_id, Sale.status == "paid"
-        )
-    ).scalar_one_or_none()
-    if sale is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "La orden no tiene una venta pagada asociada"
-        )
-    return sale
+def issue_for_sale(db: Session, sale: Sale, *, user: User, prefix: str = "") -> Invoice:
+    """Emite la factura de una venta. **No hace commit** (se une a la transacción
+    del cobro) y es idempotente: si la venta ya tiene factura, devuelve la existente
+    en vez de chocar con la constraint única de `sale_id`.
 
-
-def generate_for_order(db: Session, order_id: UUID, user: User, prefix: str = "") -> Invoice:
-    """Idempotente: si la venta de la order ya tiene factura, la devuelve."""
-    order = get_or_404(db, CustomerOrder, order_id, "Order not found")
-    if order.status != "pagada":
-        raise HTTPException(status.HTTP_409_CONFLICT, "La orden no está pagada")
-
-    sale = _paid_sale_for_order(db, order.id)
-
+    El lock del contador serializa las ventas del mismo prefijo mientras dura la
+    transacción. Es el precio de un consecutivo sin huecos: si esto hiciera rollback,
+    el número se libera y no queda salto.
+    """
     existing = db.execute(
         select(Invoice).where(Invoice.sale_id == sale.id)
     ).scalar_one_or_none()
     if existing is not None:
         return existing
 
-    try:
-        number = _next_number(db, prefix)
-        invoice = Invoice(
-            sale_id=sale.id,
-            customer_order_id=order.id,
-            prefix=prefix,
-            number=number,
-            customer_name=sale.customer_name,
-            subtotal=sale.subtotal,
-            discount=sale.discount,
-            tax=sale.tax,
-            tip=sale.tip,
-            total=sale.total,
-            status="issued",
-            user_id=user.id,
-            user_name=user.name,
-        )
-        db.add(invoice)
-        db.commit()
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception:
-        db.rollback()
-        logger.exception("Error generando la factura")
-        raise
-
-    db.refresh(invoice)
+    invoice = Invoice(
+        sale_id=sale.id,
+        customer_order_id=sale.customer_order_id,
+        prefix=prefix or "",
+        number=_next_number(db, prefix or ""),
+        customer_name=sale.customer_name,
+        subtotal=sale.subtotal,
+        discount=sale.discount,
+        tax=sale.tax,
+        tip=sale.tip,
+        total=sale.total,
+        status="issued",
+        user_id=user.id,
+        user_name=user.name,
+    )
+    db.add(invoice)
     return invoice
-
-
-def generate_all_for_table(db: Session, table_id: UUID, user: User, prefix: str = "") -> list[Invoice]:
-    """Cierre de mesa: una factura por cada order pagada de la mesa (salta las ya
-    facturadas)."""
-    table = get_or_404(db, DiningTable, table_id, "Table not found")
-    orders = db.execute(
-        select(CustomerOrder).where(
-            CustomerOrder.dining_table_id == table.id,
-            CustomerOrder.status == "pagada",
-        ).order_by(CustomerOrder.created_at)
-    ).scalars().all()
-
-    invoices: list[Invoice] = []
-    for order in orders:
-        # generate_for_order es idempotente y dueño de su transacción.
-        invoices.append(generate_for_order(db, order.id, user, prefix=prefix))
-    return invoices
 
 
 def serialize_invoice(db: Session, invoice: Invoice) -> InvoiceResponse:
