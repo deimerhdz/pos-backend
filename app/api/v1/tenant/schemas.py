@@ -7,6 +7,7 @@ class TenantInfoResponse(BaseModel):
     host: str
     plan: str
     logo_url: str | None = None
+    receipt_message: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -14,3 +15,6 @@ class TenantInfoResponse(BaseModel):
 class TenantUpdate(BaseModel):
     # URL pública del logo ya subido a R2 (vía POST /uploads/presign folder="logo").
     logo_url: str | None = Field(None, max_length=500)
+    # Mensaje que cierra la factura impresa. Cadena vacía = borrarlo (queda NULL);
+    # omitirlo = dejarlo como está.
+    receipt_message: str | None = Field(None, max_length=255)

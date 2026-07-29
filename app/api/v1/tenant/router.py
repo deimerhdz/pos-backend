@@ -39,7 +39,7 @@ def get_tenant_info(
 @router.patch(
     "",
     response_model=TenantInfoResponse,
-    summary="Actualizar la información del negocio (logo)",
+    summary="Actualizar la información del negocio (logo, mensaje del recibo)",
     responses={
         401: {"description": "No autenticado o token inválido."},
         403: {"description": "El usuario no es administrador del tenant."},
@@ -60,6 +60,10 @@ def update_tenant(
             old_key = key_from_public_url(old_logo_url)
             if old_key:
                 delete_object(old_key)
+
+    if body.receipt_message is not None:
+        # Vaciar el campo es la forma de quitar el mensaje del recibo.
+        row.receipt_message = body.receipt_message.strip() or None
 
     db.commit()
     db.refresh(row)

@@ -55,6 +55,10 @@ class Tenant(Base,TimestampMixin):
 
     logo_url:Mapped[Optional[str]] = mapped_column("logo_url", String(500), nullable=True)
 
+    # Mensaje de agradecimiento que cierra la factura impresa. NULL = el front usa
+    # su texto por defecto.
+    receipt_message:Mapped[Optional[str]] = mapped_column("receipt_message", String(255), nullable=True)
+
     users: Mapped[list["User"]] = relationship(
             back_populates="tenant",
             cascade="all, delete-orphan"
