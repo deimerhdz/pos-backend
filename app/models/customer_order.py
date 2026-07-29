@@ -1,6 +1,6 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy import String, Integer, ForeignKey, DateTime, func, CheckConstraint, Index, text
+from sqlalchemy import String, Integer, ForeignKey, DateTime, func, CheckConstraint
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import Optional, List
 from datetime import datetime
@@ -12,16 +12,31 @@ if TYPE_CHECKING:
 
 
 class CustomerOrder(UUIDPrimaryKeyMixin, Base):
-    """Orden de mesa (spec `orders`). Una o más por mesa a lo largo de su ciclo
-    de vida, pero **solo una `abierta` por mesa a la vez** (índice parcial). El
-    `status` es el ciclo de pago; el estado de cocina vive por ítem
-    (`order_items.estado_cocina`). `user_id` es null cuando el cliente pidió por
-    QR."""
+    """Pedido. Varios por mesa y por comensal a lo largo de una `table_session`.
+
+    `status` es el ciclo del pedido, **no** el de cocina (ese vive por ítem, en
+    `order_items.estado_cocina`):
+
+        recibida → abierta → bloqueada → pagada
+                 ↘  cancelada (terminal, desde cualquier estado no terminal)
+
+    - `recibida`: el comensal la envió desde el QR pero **aún no descuenta stock**;
+    - `abierta`: confirmada por staff — aquí y solo aquí se descontó el inventario;
+    - `bloqueada`: congelada para cobro (lock optimista por `version`);
+    - `pagada` / `cancelada`: terminales.
+
+    `user_id` es null cuando el pedido lo envió el cliente por QR."""
 
     __tablename__ = "customer_orders"
 
-    dining_session_id: Mapped[Optional[UUID]] = mapped_column(
-        ForeignKey("dining_sessions.id"), nullable=True, index=True
+    # Sesión de mesa a la que pertenece el pedido (null en mostrador).
+    table_session_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("table_sessions.id"), nullable=True, index=True
+    )
+
+    # Comensal que lo envió (null si lo creó el staff).
+    participant_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("session_participants.id"), nullable=True, index=True
     )
 
     dining_table_id: Mapped[Optional[UUID]] = mapped_column(
@@ -64,16 +79,11 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
             "channel IN ('qr', 'counter', 'waiter')", name="ck_customer_order_channel"
         ),
         CheckConstraint(
-            "status IN ('abierta', 'bloqueada', 'pagada', 'cancelada')",
+            "status IN ('recibida', 'abierta', 'bloqueada', 'pagada', 'cancelada')",
             name="ck_customer_order_status",
         ),
-        # Solo una orden 'abierta' por mesa a la vez (decisión #5 del spec).
-        # Los dining_table_id NULL (mostrador) no colisionan entre sí.
-        Index(
-            "idx_open_order_per_table",
-            "dining_table_id",
-            unique=True,
-            postgresql_where=text("status = 'abierta'"),
-        ),
+        # Ya NO hay índice único de "una orden abierta por mesa": la mesa puede
+        # tener varios pedidos simultáneos (uno por comensal, o varias rondas del
+        # mismo). La agrupación para cobrar la da `table_session_id`.
         {"schema": "tenant"},
     )

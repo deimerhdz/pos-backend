@@ -52,7 +52,12 @@ class QrClaims:
 class SessionClaims:
     tenant_id: int
     table_id: UUID
-    session_id: UUID
+    #: Id del `session_participants` (el comensal). Es el identificador real,
+    #: no el `display_name`.
+    participant_id: UUID
+    #: Id de la `table_sessions` activa cuando se emitió el token. Permite
+    #: rechazar el reingreso a una sesión de mesa ya cerrada sin una query extra.
+    table_session_id: UUID
     expires_at: datetime
 
 
@@ -93,17 +98,23 @@ def verify_qr_token(token: str) -> QrClaims:
 def mint_session_token(
     tenant_id: int,
     table_id: UUID,
-    session_id: UUID,
+    participant_id: UUID,
+    table_session_id: UUID,
     ttl_minutes: int | None = None,
 ) -> str:
-    """Firma el token de sesión de un comensal con ``exp`` = ahora + TTL."""
+    """Firma el token del comensal con ``exp`` = ahora + TTL.
+
+    Lleva la sesión de mesa (``ts``) además del participante (``s``) para que la
+    validación de reingreso pueda comprobar que la mesa sigue en la misma sesión
+    sin consultar la BD."""
     ttl = settings.SESSION_TTL_MINUTES if ttl_minutes is None else ttl_minutes
     exp = datetime.now(timezone.utc) + timedelta(minutes=ttl)
     payload = {
         "typ": SESSION_TYP,
         "t": int(tenant_id),
         "tb": str(table_id),
-        "s": str(session_id),
+        "s": str(participant_id),
+        "ts": str(table_session_id),
         "exp": exp,
     }
     return jwt.encode(payload, _secret(), algorithm=settings.JWT_ALGORITHM)
@@ -113,8 +124,8 @@ def verify_session_token(token: str) -> SessionClaims:
     """Verifica firma + ``typ`` + ``exp``. Lanza ``SessionExpiredError`` si la
     firma es válida pero expiró, ``SessionInvalidError`` en cualquier otro caso.
 
-    Stateless: no consulta la fila de sesión (estado open/closed) — esa
-    validación y el refresco deslizante persistido llegan en Fase 3."""
+    Stateless: no consulta la BD. Que el participante siga `open` y que su
+    sesión de mesa siga `active` lo valida `open_session_context`."""
     try:
         payload = jwt.decode(token, _secret(), algorithms=[settings.JWT_ALGORITHM])
     except jwt.ExpiredSignatureError as e:
@@ -129,7 +140,8 @@ def verify_session_token(token: str) -> SessionClaims:
         return SessionClaims(
             tenant_id=int(payload["t"]),
             table_id=UUID(payload["tb"]),
-            session_id=UUID(payload["s"]),
+            participant_id=UUID(payload["s"]),
+            table_session_id=UUID(payload["ts"]),
             expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
         )
     except (ValueError, KeyError, TypeError) as e:

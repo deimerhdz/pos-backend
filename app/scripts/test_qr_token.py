@@ -1,4 +1,4 @@
-"""Test del contrato de tokens de QR/sesión (Fase 0).
+"""Test del contrato de tokens de QR/sesión.
 
 No hay pytest en el proyecto, así que es un script autoejecutable:
 
@@ -45,12 +45,13 @@ def test_qr_roundtrip():
 
 
 def test_session_roundtrip():
-    tid, tbl, sid = 7, uuid4(), uuid4()
-    claims = verify_session_token(mint_session_token(tid, tbl, sid))
+    tid, tbl, pid, tsid = 7, uuid4(), uuid4(), uuid4()
+    claims = verify_session_token(mint_session_token(tid, tbl, pid, tsid))
     assert claims.tenant_id == tid, claims
     assert claims.table_id == tbl, claims
-    assert claims.session_id == sid, claims
-    print("  ok  · sesión roundtrip (tenant + mesa + session_id)")
+    assert claims.participant_id == pid, claims
+    assert claims.table_session_id == tsid, claims
+    print("  ok  · sesión roundtrip (tenant + mesa + participante + sesión de mesa)")
 
 
 def test_tamper_detection():
@@ -65,8 +66,8 @@ def test_tamper_detection():
 
 
 def test_session_expiry():
-    tid, tbl, sid = 1, uuid4(), uuid4()
-    expired = mint_session_token(tid, tbl, sid, ttl_minutes=-1)
+    tid, tbl, pid, tsid = 1, uuid4(), uuid4(), uuid4()
+    expired = mint_session_token(tid, tbl, pid, tsid, ttl_minutes=-1)
     _expect(SessionExpiredError, lambda: verify_session_token(expired), "sesión expirada → SessionExpiredError")
 
 
@@ -79,12 +80,12 @@ def test_type_isolation():
     # Un token de QR no puede pasar como token de sesión y viceversa.
     qr = mint_qr_token(1, uuid4())
     _expect(SessionInvalidError, lambda: verify_session_token(qr), "QR token → verify_session_token lo rechaza")
-    sess = mint_session_token(1, uuid4(), uuid4())
+    sess = mint_session_token(1, uuid4(), uuid4(), uuid4())
     _expect(QrTokenError, lambda: verify_qr_token(sess), "sesión token → verify_qr_token lo rechaza")
 
 
 def main():
-    print("Fase 0 · contrato de tokens de QR/sesión")
+    print("Contrato de tokens de QR/sesión")
     test_qr_roundtrip()
     test_session_roundtrip()
     test_tamper_detection()

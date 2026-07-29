@@ -7,10 +7,14 @@ class Settings(BaseSettings):
     DATABASE_URL:str = Field(...,env="DATABASE_URL")
     JWT_SECRET:str = Field(...,env="JWT_SECRET")
     JWT_ALGORITHM:str = Field(default="HS256",env="JWT_ALGORITHM")
+    # Vida del access token, en minutos. Default 24h.
     ACCESS_TOKEN_EXPIRY:int = Field(default=60*24,env="ACCESS_TOKEN_EXPIRY")
+    # Vida del refresh token, en minutos. Debe ser mayor que ACCESS_TOKEN_EXPIRY;
+    # si no, el refresh muere junto al access y no sirve para renovar. Default 7 días.
+    REFRESH_TOKEN_EXPIRY_MINUTES:int = Field(default=60*24*7,env="REFRESH_TOKEN_EXPIRY_MINUTES")
 
     # QR / sesión de comensal (flujo público de mesas).
-    # Ventana deslizante de la sesión (dining_sessions.expires_at).
+    # Ventana deslizante del comensal (session_participants.expires_at).
     SESSION_TTL_MINUTES:int = Field(default=240,env="SESSION_TTL_MINUTES")
     # Tope absoluto del token de sesión (exp del JWT). La sesión se desliza en DB
     # sin re-emitir token; el JWT muere en este tope. Default 24h.
@@ -18,6 +22,25 @@ class Settings(BaseSettings):
     # Secreto dedicado para firmar tokens de QR/sesión. Si es None, el helper
     # cae a JWT_SECRET (permite rotación aislada sin obligar cambio de .env).
     QR_TOKEN_SECRET:Optional[str] = Field(default=None,env="QR_TOKEN_SECRET")
+
+    # Sesión de mesa: máximo que puede seguir abierta sin que el staff la cierre.
+    # Pasado ese tiempo la cierra el barrido programado, porque si no la mesa
+    # queda 'ocupada' para siempre.
+    TABLE_SESSION_MAX_HOURS:int = Field(default=6,env="TABLE_SESSION_MAX_HOURS")
+    # Inactividad tras la que se libera una mesa **sin ningún pedido**: alguien
+    # escaneó y se fue sin pedir. Es mucho más corto que TABLE_SESSION_MAX_HOURS
+    # porque el riesgo es el opuesto: soltar una mesa que nadie usó no cuesta nada,
+    # dejarla bloqueada media tarde sí. Con pedidos vivos manda el tope de 6h.
+    EMPTY_SESSION_TTL_MINUTES:int = Field(default=30,env="EMPTY_SESSION_TTL_MINUTES")
+    # Cada cuánto corre ese barrido.
+    SESSION_SWEEP_INTERVAL_MINUTES:int = Field(default=15,env="SESSION_SWEEP_INTERVAL_MINUTES")
+
+    # Rate limiting de las rutas públicas del QR (ventana deslizante en Redis).
+    RATE_LIMIT_ENABLED:bool = Field(default=True,env="RATE_LIMIT_ENABLED")
+    # Peticiones permitidas por IP y por mesa dentro de la ventana.
+    RATE_LIMIT_PER_IP:int = Field(default=60,env="RATE_LIMIT_PER_IP")
+    RATE_LIMIT_PER_TABLE:int = Field(default=120,env="RATE_LIMIT_PER_TABLE")
+    RATE_LIMIT_WINDOW_SECONDS:int = Field(default=60,env="RATE_LIMIT_WINDOW_SECONDS")
 
     PROJECT_NAME:str ="pos"
     # Ambiente de ejecución: "prod" o "dev". Afecta, p. ej., la URL de login del correo.

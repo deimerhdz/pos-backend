@@ -1,6 +1,14 @@
-"""Service de comandas: crea una `customer_order` con sus líneas y opciones,
-tomando un snapshot del precio (variante + extra de opciones). No consume
-inventario: eso ocurre al cobrar la venta (módulo sales)."""
+"""Service de comandas del staff (mostrador/mesero): crea una `customer_order`
+con sus líneas y opciones, tomando un snapshot del precio.
+
+**Consume inventario al crear.** La comanda nace en `abierta`, o sea ya
+confirmada: no vuelve a pasar por `confirm_order`, así que si no descontara aquí
+no descontaría nunca —cobrarla tampoco lo hace— y el stock quedaría sobrestimado
+en silencio. Es el mismo punto de descuento que la confirmación, por la otra
+puerta.
+
+El pedido anónimo por QR **no** entra por aquí: llega como `recibida` vía
+`/cart/submit` y lo descuenta el staff al confirmarlo."""
 import logging
 from decimal import Decimal
 from uuid import UUID
@@ -12,10 +20,12 @@ from sqlalchemy.orm import Session
 from app.core.crud import get_or_404
 from app.models.product_variant import ProductVariant
 from app.models.option import Option
-from app.models.dining_session import DiningSession
+from app.models.session_participant import SessionParticipant
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
+from app.api.v1.orders.consolidation import get_or_create_table_session_id
+from app.api.v1.orders.consumption import deduct_order_items
 from app.api.v1.orders.schemas import OrderCreate
 
 logger = logging.getLogger(__name__)
@@ -25,20 +35,29 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
     customer_name = data.customer_name
     table_id = data.dining_table_id
 
-    session = None
-    if data.dining_session_id is not None:
-        session = get_or_404(db, DiningSession, data.dining_session_id, "Session not found")
-        if session.status != "open":
-            raise HTTPException(status.HTTP_409_CONFLICT, "La sesión está cerrada")
-        table_id = session.dining_table_id
-        customer_name = customer_name or session.customer_name
+    participant = None
+    if data.participant_id is not None:
+        participant = get_or_404(
+            db, SessionParticipant, data.participant_id, "Participant not found"
+        )
+        if participant.status != "open":
+            raise HTTPException(status.HTTP_409_CONFLICT, "El comensal ya no está en la mesa")
+        table_id = participant.dining_table_id
+        customer_name = customer_name or participant.display_label or participant.display_name
 
-    if table_id is not None and session is None:
+    if table_id is not None and participant is None:
         get_or_404(db, DiningTable, table_id, "Table not found")
 
     try:
         order = CustomerOrder(
-            dining_session_id=data.dining_session_id,
+            participant_id=data.participant_id,
+            # Un pedido de mesa sin sesión no entra en ninguna cuenta y no se
+            # podría cobrar, así que se abre la sesión si aún no existe.
+            table_session_id=(
+                participant.table_session_id if participant is not None
+                else get_or_create_table_session_id(db, table_id) if table_id is not None
+                else None
+            ),
             dining_table_id=table_id,
             customer_name=customer_name,
             channel=data.channel.value,
@@ -49,6 +68,7 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
         db.add(order)
         db.flush()
 
+        entries: list[tuple[OrderItem, list[Option]]] = []
         for line in data.items:
             variant = get_or_404(db, ProductVariant, line.product_variant_id, "Variant not found")
             if not variant.active:
@@ -57,7 +77,7 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             unit_price = Decimal(variant.price)
             item = OrderItem(
                 order_id=order.id,
-                session_id=data.dining_session_id,
+                participant_id=data.participant_id,
                 product_variant_id=variant.id,
                 quantity=line.quantity,
                 notes=line.notes,
@@ -75,6 +95,13 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
                 seen.add(opt_id)
 
             item.unit_price = unit_price
+            entries.append((item, [db.get(Option, oid) for oid in seen]))
+
+        # Nace confirmada, así que compromete stock aquí y ahora. Si falta un
+        # insumo (o alguna variante no tiene receta) revienta la transacción
+        # entera y no se crea la comanda: mejor no venderla que venderla sin
+        # descontar.
+        deduct_order_items(db, entries, user_id, reference_id=order.id)
 
         db.commit()
     except HTTPException:

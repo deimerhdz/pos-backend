@@ -18,8 +18,15 @@ class Sale(UUIDPrimaryKeyMixin, Base):
 
     __tablename__ = "sales"
 
-    dining_session_id: Mapped[Optional[UUID]] = mapped_column(
-        ForeignKey("dining_sessions.id"), nullable=True
+    # Comensal cobrado. Poblado en el cierre con billing_mode='split' (una venta
+    # por comensal); null en 'unified' y en mostrador.
+    participant_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("session_participants.id"), nullable=True
+    )
+
+    # Sesión de mesa cobrada (cualquiera de los dos billing_mode).
+    table_session_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("table_sessions.id"), nullable=True, index=True
     )
 
     dining_table_id: Mapped[Optional[UUID]] = mapped_column(

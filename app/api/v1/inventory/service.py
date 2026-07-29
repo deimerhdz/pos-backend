@@ -16,6 +16,7 @@ from app.models.supplier import Supplier
 from app.models.purchase import Purchase, PurchaseItem
 from app.api.v1.inventory.stock import record_movement
 from app.api.v1.inventory.schemas import PurchaseCreate, PurchaseReceiveIn
+from app.core import inventory_reasons as reasons
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ def create_purchase(db: Session, data: PurchaseCreate, user_id: UUID | None) -> 
             # Alta de stock + kardex + actualización del costo unitario.
             record_movement(
                 db, it.inventory_item_id, type="in", quantity=it.quantity,
-                reason="Compra", reference_type="purchase", reference_id=purchase.id,
+                reason=reasons.COMPRA, reference_type=reasons.REF_PURCHASE, reference_id=purchase.id,
                 user_id=user_id,
             )
             item.unit_cost = it.unit_cost
@@ -141,7 +142,7 @@ def receive_purchase(db: Session, purchase_id: UUID, data: PurchaseReceiveIn,
                 )
             record_movement(
                 db, pi.inventory_item_id, type="in", quantity=r.quantity,
-                reason="Recepción de compra", reference_type="purchase",
+                reason=reasons.COMPRA, reference_type=reasons.REF_PURCHASE,
                 reference_id=purchase.id, user_id=user_id,
             )
             pi.received_quantity = Decimal(pi.received_quantity) + r.quantity

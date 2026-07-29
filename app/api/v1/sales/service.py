@@ -33,7 +33,7 @@ def checkout(db: Session, data: SaleCreate, cashier: User) -> Sale:
     try:
         sale = Sale(
             cash_shift_id=shift.id,
-            dining_session_id=data.dining_session_id,
+            participant_id=data.participant_id,
             dining_table_id=data.dining_table_id,
             user_id=cashier.id,
             user_name=cashier.name,

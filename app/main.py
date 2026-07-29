@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.redis import token_blocklist
+from app.core.scheduler import start_scheduler
 from app.core.db import initialize_database
 from app.api.v1.admin.router import router as admin_router
 from app.api.v1.auth.routes import auth_router
@@ -22,6 +23,7 @@ from app.api.v1.cash.router import router as cash_router
 from app.api.v1.sales.router import router as sales_router
 from app.api.v1.uploads.router import router as uploads_router
 from app.api.v1.cart.router import router as cart_router
+from app.api.v1.table_sessions.router import router as table_sessions_router
 from app.api.v1.invoices.router import router as invoices_router
 from app.api.v1.health.router import router as health_router
 from app.api.v1.tenant.router import router as tenant_router
@@ -42,10 +44,14 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 🚀 STARTUP
+    scheduler = None
     try:
         initialize_database()  # mejor aquí
         await token_blocklist.ping()
         print("✅ Redis conectado correctamente")
+        # Cierra las sesiones de mesa abandonadas; sin esto una mesa que nadie
+        # cobra queda 'ocupada' para siempre (el TTL del comensal es perezoso).
+        scheduler = start_scheduler()
     except Exception as e:
         print("❌ Error en startup:", e)
         raise e  # opcional: detiene la app si falla Redis
@@ -53,6 +59,11 @@ async def lifespan(app: FastAPI):
     yield  # 👉 la app corre aquí
 
     # 🛑 SHUTDOWN
+    if scheduler is not None:
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception as e:
+            print("❌ Error deteniendo el scheduler:", e)
     try:
         await token_blocklist.close()
         print("🔌 Redis cerrado")
@@ -87,6 +98,7 @@ def create_app()->FastAPI:
     app.include_router(sales_router, prefix="/api/v1")
     app.include_router(uploads_router, prefix="/api/v1")
     app.include_router(cart_router, prefix="/api/v1")
+    app.include_router(table_sessions_router, prefix="/api/v1")
     app.include_router(invoices_router, prefix="/api/v1")
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(tenant_router, prefix="/api/v1")

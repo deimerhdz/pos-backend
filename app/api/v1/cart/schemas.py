@@ -7,8 +7,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # ---------- Apertura de sesión (por QR token) ----------
 class SessionOpenIn(BaseModel):
-    qr_token: str = Field(..., description="Token de QR firmado de la mesa (Fase 0).")
-    customer_name: str = Field(..., min_length=1, max_length=255, examples=["Ana Pérez"])
+    qr_token: str = Field(..., description="Token de QR firmado de la mesa.")
+    display_name: str = Field(
+        ..., min_length=1, max_length=255, examples=["Ana Pérez"],
+        description="Nombre que el comensal escribe. No es único ni identifica: "
+                    "el identificador real va firmado en el token de sesión.",
+    )
 
 
 class SessionTableInfo(BaseModel):
@@ -20,8 +24,11 @@ class SessionTableInfo(BaseModel):
 
 
 class SessionOpenResponse(BaseModel):
-    session_id: UUID
-    customer_name: str
+    participant_id: UUID
+    table_session_id: UUID
+    display_name: str
+    # Nombre desambiguado que ven cocina y staff ("Ana (2)" si ya había una Ana).
+    display_label: str | None = None
     expires_at: datetime | None = None
     table: SessionTableInfo
     cart_id: UUID
@@ -64,9 +71,19 @@ class CartItemResponse(BaseModel):
 
 class CartResponse(BaseModel):
     id: UUID
-    session_id: UUID
+    participant_id: UUID
+    # Nombre del comensal dueño del carrito. Viaja aquí porque el `session_token`
+    # no lleva el nombre: es lo que permite repintar el saludo tras una recarga.
+    display_name: str
+    display_label: str | None = None
     status: str
     total: Decimal
     items: list[CartItemResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Pedidos del comensal ----------
+class MyOrderCancelIn(BaseModel):
+    motivo: str = Field(..., min_length=1, max_length=500,
+                        examples=["Me equivoqué de sabor"])

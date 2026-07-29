@@ -3,7 +3,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy.exc import IntegrityError
 
 from app.core.db import get_db, get_tenant
 from app.core.crud import get_or_404
@@ -11,7 +10,6 @@ from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User, Tenant
 from app.core.qr_token import mint_qr_token
 from app.models.dining_table import DiningTable
-from app.models.dining_session import DiningSession
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem
 from app.api.v1.orders import service
@@ -24,8 +22,7 @@ from app.api.v1.invoices.schemas import InvoiceResponse
 from app.api.v1.sales.schemas import SaleResponse
 from app.api.v1.orders.schemas import (
     TableCreate, TableUpdate, TableResponse, TableQrTokenResponse,
-    SessionOpen, SessionResponse,
-    OrderCreate, OrderStatusUpdate, OrderResponse, OrderItemIn,
+    OrderCreate, OrderResponse, OrderItemIn,
     OrderItemResponse, KdsOrderResponse, KitchenTransitionIn, VoidItemIn,
     BlockIn, CancelIn, PayIn, BillResponse,
     TableStatusUpdate, MoveOrderIn, MergeOrdersIn, MergeResponse, GroupBillResponse,
@@ -135,38 +132,30 @@ def issue_table_qr_token(
     )
 
 
-# ============================ Sesiones (público, QR) ============================
-# NOTA: la apertura pública de sesión de comensal (con token de sesión + carrito
-# + expires_at) vive ahora en `POST /cart/sessions` (Fase 3). Este endpoint
-# legacy (qr_token UUID, sin token/cart) se mantiene por compatibilidad; el
-# `POST /sessions/{id}/close` sigue vigente para staff.
-@router.post("/sessions", response_model=SessionResponse, status_code=status.HTTP_201_CREATED, summary="[legacy] Abrir sesión de mesa por QR UUID")
-def open_session(body: SessionOpen, db: Session = Depends(get_db)):
-    table = db.execute(
-        select(DiningTable).where(DiningTable.qr_token == body.qr_token, DiningTable.active.is_(True))
-    ).scalar_one_or_none()
-    if table is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Mesa no encontrada o inactiva")
-    session = DiningSession(dining_table_id=table.id, customer_name=body.customer_name, status="open")
-    db.add(session)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "La mesa ya tiene una sesión abierta")
-    db.refresh(session)
-    return session
+# NOTA: los endpoints legacy de sesión de mesa se eliminaron.
+# - `POST /sessions` (qr_token UUID plano + header x-tenant-host) → `POST /cart/sessions`,
+#   que autentica con el token de QR firmado y devuelve token de sesión + carrito.
+#   Además su manejo de 409 era código muerto: esperaba un IntegrityError que
+#   ninguna constraint producía.
+# - `POST /sessions/{id}/close` → el cierre ahora es de la sesión de **mesa**
+#   completa, en el router de `table_sessions`.
 
 
-@router.post("/sessions/{session_id}/close", response_model=SessionResponse, summary="Cerrar sesión de mesa")
-def close_session(session_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    from datetime import datetime
-    session = get_or_404(db, DiningSession, session_id, "Session not found")
-    session.status = "closed"
-    session.closed_at = datetime.utcnow()
-    db.commit()
-    db.refresh(session)
-    return session
+# ============================ Confirmación (staff) ============================
+@router.post(
+    "/{order_id}/confirm",
+    response_model=OrderResponse,
+    summary="Confirmar un pedido recibido del QR (descuenta inventario)",
+)
+def confirm_order(
+    order_id: UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """`recibida` → `abierta`. Es el único punto donde el pedido del comensal
+    compromete stock; hasta aquí no había tocado inventario."""
+    checkout.confirm_order(db, order_id, user)
+    return _load_order(db, order_id)
 
 
 # ============================ Consolidación (mesero) ============================
@@ -271,12 +260,14 @@ def pay_order(
 @router.post(
     "/{order_id}/cancel",
     response_model=OrderResponse,
-    summary="Cancelar orden (reversa de inventario + auditoría)",
+    summary="Cancelar pedido (reversa parcial de inventario + auditoría)",
 )
 def cancel_order(
     order_id: UUID, body: CancelIn,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ):
+    """El staff puede cancelar en cualquier estado no terminal. Solo vuelve al stock
+    lo que cocina no llegó a preparar; lo ya consumido se registra como pérdida."""
     order = checkout.cancel_order(db, order_id, body, user)
     return _load_order(db, order.id)
 
@@ -286,8 +277,12 @@ def cancel_order(
     response_model=TableResponse,
     summary="Liberar mesa (regla dura: cero órdenes no-terminales)",
 )
-def release_table(table_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    return checkout.release_table(db, table_id)
+def release_table(
+    table_id: UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return checkout.release_table(db, table_id, closed_by=user)
 
 
 # ============================ Facturación (Fase 8) ============================
@@ -316,9 +311,19 @@ def invoice_table(
 
 
 # ============================ Comandas ============================
-@router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED, summary="Crear comanda (QR/mostrador)")
-def create_order(body: OrderCreate, db: Session = Depends(get_db)):
-    order = service.create_order(db, body, user_id=None)
+@router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED, summary="Crear comanda (staff)")
+def create_order(
+    body: OrderCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Alta de comanda por staff (mostrador/mesero). **No es una ruta pública**:
+    el pedido anónimo por QR entra por el carrito del comensal, no por aquí.
+
+    Antes era anónima (solo header `x-tenant-host`, falsificable) y además no
+    descontaba inventario, así que una comanda creada aquí y cobrada con
+    `pay_order` nunca descontaba stock."""
+    order = service.create_order(db, body, user_id=user.id)
     return _load_order(db, order.id)
 
 
@@ -341,12 +346,13 @@ def get_order(order_id: UUID, db: Session = Depends(get_db), _: User = Depends(g
     return _load_order(db, order_id)
 
 
-@router.patch("/{order_id}/status", response_model=OrderResponse, summary="Cambiar estado de la comanda")
-def update_status(
-    order_id: UUID, body: OrderStatusUpdate,
-    db: Session = Depends(get_db), _: User = Depends(get_current_user),
-):
-    order = get_or_404(db, CustomerOrder, order_id, "Order not found")
-    order.status = body.status.value
-    db.commit()
-    return _load_order(db, order_id)
+# `PATCH /{order_id}/status` se eliminó a propósito: asignaba cualquier estado sin
+# validar la transición y sin tocar inventario, así que permitía pasar un pedido de
+# 'recibida' a 'abierta' esquivando `confirm_order` —el único punto que descuenta
+# stock— y dejaba el inventario sobrestimado sin que nadie se enterara.
+#
+# Cada transición legítima tiene su endpoint, con sus reglas:
+#   recibida → abierta    POST /orders/{id}/confirm      (descuenta inventario)
+#   abierta  → bloqueada  POST /orders/{id}/block        (valida cocina)
+#   → pagada              POST /table-sessions/{id}/close (cobra y libera la mesa)
+#   → cancelada           POST /orders/{id}/cancel       (revierte lo no preparado)

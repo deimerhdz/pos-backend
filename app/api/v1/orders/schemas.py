@@ -16,7 +16,10 @@ class OrderChannel(str, Enum):
 
 
 class OrderStatus(str, Enum):
-    """Ciclo de pago de la orden (spec). El estado de cocina es por ítem."""
+    """Ciclo del pedido. El estado de cocina es por ítem (`estado_cocina`)."""
+    #: Enviada por el comensal desde el QR; todavía no descuenta inventario.
+    RECIBIDA = "recibida"
+    #: Confirmada por staff: aquí se descontó el stock.
     ABIERTA = "abierta"
     BLOQUEADA = "bloqueada"
     PAGADA = "pagada"
@@ -94,23 +97,6 @@ class TableQrTokenResponse(BaseModel):
     menu_path: str
 
 
-# ---------- Sesiones ----------
-class SessionOpen(BaseModel):
-    qr_token: UUID = Field(..., description="Token QR de la mesa escaneada.")
-    customer_name: str = Field(..., min_length=1, max_length=255, examples=["Ana Pérez"])
-
-
-class SessionResponse(BaseModel):
-    id: UUID
-    dining_table_id: UUID
-    customer_name: str
-    status: str
-    opened_at: datetime
-    closed_at: datetime | None = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
 # ---------- Comandas ----------
 class OrderItemIn(BaseModel):
     product_variant_id: UUID
@@ -120,16 +106,12 @@ class OrderItemIn(BaseModel):
 
 
 class OrderCreate(BaseModel):
-    channel: OrderChannel = OrderChannel.QR
-    dining_session_id: UUID | None = None
+    channel: OrderChannel = OrderChannel.COUNTER
+    participant_id: UUID | None = None
     dining_table_id: UUID | None = None
     customer_name: str | None = Field(None, max_length=255)
     notes: str | None = Field(None, max_length=500)
     items: list[OrderItemIn] = Field(..., min_length=1)
-
-
-class OrderStatusUpdate(BaseModel):
-    status: OrderStatus
 
 
 class OrderItemOptionResponse(BaseModel):
@@ -142,7 +124,7 @@ class OrderItemOptionResponse(BaseModel):
 class OrderItemResponse(BaseModel):
     id: UUID
     product_variant_id: UUID
-    session_id: UUID | None = None
+    participant_id: UUID | None = None
     quantity: int
     unit_price: Decimal
     estado_cocina: str
@@ -158,7 +140,8 @@ class OrderResponse(BaseModel):
     channel: str
     status: str
     version: int
-    dining_session_id: UUID | None = None
+    table_session_id: UUID | None = None
+    participant_id: UUID | None = None
     dining_table_id: UUID | None = None
     customer_name: str | None = None
     notes: str | None = None
@@ -218,7 +201,7 @@ class PayIn(BaseModel):
 class BillItemLine(BaseModel):
     order_item_id: UUID
     product_variant_id: UUID
-    session_id: UUID | None = None
+    participant_id: UUID | None = None
     quantity: int
     unit_price: Decimal
     line_total: Decimal
@@ -233,8 +216,8 @@ class BillOrderLine(BaseModel):
 
 
 class BillSessionLine(BaseModel):
-    session_id: UUID | None = None
-    customer_name: str | None = None
+    participant_id: UUID | None = None
+    display_label: str | None = None
     subtotal: Decimal
 
 

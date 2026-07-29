@@ -1,6 +1,10 @@
-"""Consolidación por mesero (Fase 4): agrupa los carritos abiertos de una mesa
-en su única `order` abierta, generando `order_items` trazables por `session_id`
-y descontando inventario por ítem insertado. Todo en una transacción."""
+"""Consolidación por mesero: agrupa los carritos abiertos de una mesa en la `order`
+del mesero, generando `order_items` trazables por `participant_id` y descontando
+inventario en bloque. Todo en una transacción.
+
+Es la vía del mesero, alternativa a que el comensal envíe su propio pedido desde
+el QR (`POST /cart/submit` → `POST /orders/{id}/confirm`). A diferencia de esa,
+aquí la línea nace ya confirmada: el staff la mete y el stock se descuenta."""
 import logging
 from uuid import UUID
 
@@ -11,38 +15,89 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.crud import get_or_404
 from app.core.models import User
 from app.models.dining_table import DiningTable
-from app.models.dining_session import DiningSession
+from app.models.table_session import TableSession
+from app.models.session_participant import SessionParticipant
 from app.models.cart import Cart
 from app.models.cart_item import CartItem
 from app.models.option import Option
 from app.models.product_variant import ProductVariant
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
-from app.api.v1.orders.consumption import deduct_order_item
+from app.api.v1.orders.consumption import deduct_order_items
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 
 logger = logging.getLogger(__name__)
 
 
-def get_or_create_open_order(db: Session, table_id: UUID, user_id: UUID) -> CustomerOrder:
-    """Regla de routing (decisión #6): la mesa tiene a lo sumo una order 'abierta'
-    (índice parcial único). Si existe, se inserta ahí; si no (p.ej. la única está
-    'bloqueada' en cobro), se crea una nueva 'abierta' (orden-hija)."""
-    order = db.execute(
-        select(CustomerOrder).where(
-            CustomerOrder.dining_table_id == table_id,
-            CustomerOrder.status == "abierta",
+def active_table_session_id(db: Session, table_id: UUID) -> UUID | None:
+    """Id de la `table_session` activa de la mesa, si la hay. Los pedidos que el
+    mesero crea sobre una mesa ocupada cuelgan de la misma sesión que los del QR,
+    para que la cuenta salga completa."""
+    return db.execute(
+        select(TableSession.id).where(
+            TableSession.dining_table_id == table_id,
+            TableSession.status == "active",
         )
     ).scalar_one_or_none()
+
+
+def get_or_create_table_session_id(db: Session, table_id: UUID) -> UUID:
+    """Sesión activa de la mesa, abriéndola si no la hay.
+
+    La unidad de cobro es la `table_session`: un pedido sin ella no entra en
+    ninguna cuenta y no se puede cobrar nunca. Hasta ahora la sesión solo nacía
+    cuando un comensal escaneaba el QR, así que las mesas que atiende el mesero
+    quedaban descolgadas. El índice parcial `idx_active_session_per_table`
+    garantiza que no haya dos activas aunque dos meseros pidan a la vez."""
+    existing = active_table_session_id(db, table_id)
+    if existing is not None:
+        return existing
+
+    ts = TableSession(dining_table_id=table_id, status="active")
+    db.add(ts)
+    db.flush()
+
+    table = db.get(DiningTable, table_id)
+    if table is not None and table.status != "ocupada":
+        # Simetría con el cierre de sesión, que devuelve la mesa a 'libre'.
+        table.status = "ocupada"
+    return ts.id
+
+
+def get_or_create_open_order(db: Session, table_id: UUID, user_id: UUID) -> CustomerOrder:
+    """Pedido `abierta` de la mesa donde acumular las líneas del mesero, creándolo
+    si no hay ninguno (p.ej. porque el único está `bloqueada` en cobro).
+
+    Ya no existe el índice único de "una orden abierta por mesa": la mesa puede
+    tener varios pedidos a la vez (uno por comensal). Este helper solo agrupa las
+    líneas que **añade el staff**; los pedidos del QR llegan por su propia vía y
+    se agrupan por `table_session_id`. La consulta ordena por `created_at` para
+    ser determinista si hubiera más de uno."""
+    order = db.execute(
+        select(CustomerOrder)
+        .where(
+            CustomerOrder.dining_table_id == table_id,
+            CustomerOrder.status == "abierta",
+            CustomerOrder.channel == "waiter",
+        )
+        .order_by(CustomerOrder.created_at)
+        .limit(1)
+    ).scalar_one_or_none()
+    session_id = get_or_create_table_session_id(db, table_id)
     if order is None:
         order = CustomerOrder(
             dining_table_id=table_id,
+            table_session_id=session_id,
             channel="waiter",
             status="abierta",
             user_id=user_id,
         )
         db.add(order)
         db.flush()
+    elif order.table_session_id is None:
+        # Orden creada cuando la mesa aún no tenía sesión: sin esto seguiría fuera
+        # de la cuenta y no habría forma de cobrarla.
+        order.table_session_id = session_id
     return order
 
 
@@ -51,11 +106,11 @@ def consolidate_table(db: Session, table_id: UUID, user: User) -> CustomerOrder:
 
     carts = db.execute(
         select(Cart)
-        .join(DiningSession, Cart.session_id == DiningSession.id)
+        .join(SessionParticipant, Cart.participant_id == SessionParticipant.id)
         .options(selectinload(Cart.items).selectinload(CartItem.options))
         .where(
-            DiningSession.dining_table_id == table.id,
-            DiningSession.status == "open",
+            SessionParticipant.dining_table_id == table.id,
+            SessionParticipant.status == "open",
             Cart.status == "abierto",
         )
     ).scalars().all()
@@ -69,11 +124,15 @@ def consolidate_table(db: Session, table_id: UUID, user: User) -> CustomerOrder:
     try:
         order = get_or_create_open_order(db, table.id, user.id)
 
+        # Se insertan todas las líneas primero y el inventario se descuenta en
+        # bloque al final: así los locks de insumo se toman en orden canónico y
+        # dos consolidaciones concurrentes no pueden deadlockear.
+        entries: list[tuple[OrderItem, list[Option]]] = []
         for cart in carts_with_items:
             for ci in cart.items:
                 item = OrderItem(
                     order_id=order.id,
-                    session_id=cart.session_id,
+                    participant_id=cart.participant_id,
                     product_variant_id=ci.product_variant_id,
                     quantity=ci.quantity,
                     unit_price=ci.unit_price,  # snapshot copiado del carrito
@@ -90,9 +149,11 @@ def consolidate_table(db: Session, table_id: UUID, user: User) -> CustomerOrder:
                 for opt in options:
                     db.add(OrderItemOption(order_item_id=item.id, option_id=opt.id))
 
-                deduct_order_item(db, item, options, user.id, reference_id=order.id)
+                entries.append((item, options))
 
             cart.status = "confirmado"
+
+        deduct_order_items(db, entries, user.id, reference_id=order.id)
 
         db.commit()
     except HTTPException:
@@ -130,7 +191,7 @@ def add_item_to_table(db: Session, table_id: UUID, data, user: User) -> Customer
 
         item = OrderItem(
             order_id=order.id,
-            session_id=None,  # ítem agregado por el mesero, sin sesión de comensal
+            participant_id=None,  # ítem agregado por el mesero, sin comensal asignado
             product_variant_id=variant.id,
             quantity=data.quantity,
             unit_price=compute_line_price(variant, options),
@@ -142,7 +203,7 @@ def add_item_to_table(db: Session, table_id: UUID, data, user: User) -> Customer
         for opt in options:
             db.add(OrderItemOption(order_item_id=item.id, option_id=opt.id))
 
-        deduct_order_item(db, item, options, user.id, reference_id=order.id)
+        deduct_order_items(db, [(item, options)], user.id, reference_id=order.id)
 
         db.commit()
     except HTTPException:

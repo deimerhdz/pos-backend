@@ -130,8 +130,13 @@ def get_tenant_specific_metadata():
 
 
 def get_tenant(req: Request) -> Tenant:
-    logger.info(f"Obteniendo tenant para host: {req.headers['host']}")
-    host_without_port = req.headers["x-tenant-host"].split(":", 1)[0]
+    tenant_host = req.headers.get("x-tenant-host")
+    logger.info(f"Obteniendo tenant para x-tenant-host: {tenant_host}")
+    if not tenant_host:
+        raise HTTPException(
+            status_code=400, detail="Falta la cabecera 'x-tenant-host'"
+        )
+    host_without_port = tenant_host.split(":", 1)[0]
 
     with with_db(None) as db:
         tenant = db.query(Tenant).filter(Tenant.host == host_without_port).one_or_none()

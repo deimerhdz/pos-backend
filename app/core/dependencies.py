@@ -37,20 +37,19 @@ class TokenBearer(HTTPBearer):
     async def __call__(self, request: Request) -> HTTPAuthorizationCredentials | None:
         creds = await super().__call__(request)
 
-        token = creds.credentials
+        token_data = decode_token(creds.credentials)
 
-        token_data = decode_token(token)
-
-        if not self.token_valid(token):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN ,detail="Invalid or expired token")
+        # 401 y no 403: un token caducado o inválido se resuelve re-logueándose,
+        # no es una cuestión de permisos. El resto de dependencias ya usa 401.
+        if token_data is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
         # Un token de QR/sesión (claim `typ`) nunca es un token de usuario.
-        if token_data and token_data.get("typ"):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid or expired token")
+        if token_data.get("typ"):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
-       
-        if await token_in_blocklist(token_data["jti"]):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+        if await token_in_blocklist(token_data.get("jti") or ""):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                                 detail={
                                     "error": "Token has been revoked",
                                     "resolution": "Please log in again to obtain a new token"
@@ -60,42 +59,53 @@ class TokenBearer(HTTPBearer):
 
         return token_data
 
-    def token_valid(self, token: str) -> bool:
-        token_data = decode_token(token)
-        print(f"Token data: {token_data}")
-        return token_data is not None
-
     def verify_token_data(self, token_data):
         raise NotImplementedError("Please Override this method in child classes")
 
 
 class AccessTokenBearer(TokenBearer):
     def verify_token_data(self, token_data: dict) -> None:
-        if token_data and token_data["refresh"]:
+        if token_data.get("refresh"):
             raise AccessTokenRequired()
 
 
 class RefreshTokenBearer(TokenBearer):
     def verify_token_data(self, token_data: dict) -> None:
-        if token_data and not token_data["refresh"]:
+        if not token_data.get("refresh"):
             raise RefreshTokenRequired()
 
 
-
-
-def get_current_user(
+async def get_valid_token_data(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-    db: Session = Depends(get_db),
-    tenant: Tenant = Depends(get_tenant),
-) -> User:
+) -> dict:
+    """Valida un access token de usuario: firma/expiración, que no sea un refresh
+    ni un token de QR/sesión, y que su jti no esté revocado.
+
+    Se declara `async` (a diferencia de las dependencias que la consumen) para
+    poder consultar el blocklist en Redis sin volver `async` a `get_current_user`,
+    cuyo `db.execute()` bloqueante debe seguir corriendo en el threadpool.
+    """
     token_data = decode_token(credentials.credentials)
-    logger.info(f"Token data decodificado: {token_data}")
     if not token_data or token_data.get("refresh") or token_data.get("typ"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
         )
 
+    if await token_in_blocklist(token_data.get("jti") or ""):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+        )
+
+    return token_data
+
+
+def get_current_user(
+    token_data: dict = Depends(get_valid_token_data),
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+) -> User:
     user = db.execute(
         select(User).where(
             User.email == token_data["user"]["email"],
@@ -121,18 +131,11 @@ def get_shared_db():
 
 
 def get_authenticated_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    token_data: dict = Depends(get_valid_token_data),
     db: Session = Depends(get_shared_db),
 ) -> User:
     """Usuario autenticado por JWT contra el schema shared. Vale para super admin
     (tenant_id NULL) y usuarios de tenant, sin necesitar x-tenant-host."""
-    token_data = decode_token(credentials.credentials)
-    if not token_data or token_data.get("refresh") or token_data.get("typ"):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        )
-
     uid = (token_data.get("user") or {}).get("uid")
     try:
         user_id = uuid.UUID(str(uid))
@@ -155,17 +158,10 @@ def get_authenticated_user(
 
 
 def get_current_super_admin(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    token_data: dict = Depends(get_valid_token_data),
     db: Session = Depends(get_shared_db),
 ) -> User:
     """Autentica al super admin global por JWT (sin requerir x-tenant-host)."""
-    token_data = decode_token(credentials.credentials)
-    if not token_data or token_data.get("refresh") or token_data.get("typ"):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        )
-
     payload = token_data.get("user") or {}
     if not payload.get("is_super_admin"):
         raise HTTPException(
