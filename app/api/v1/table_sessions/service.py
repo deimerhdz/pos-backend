@@ -246,6 +246,41 @@ def close_session(
     )
 
 
+def _participantes_con_consumo(orders: list[CustomerOrder]) -> set:
+    """Comensales con algo que cobrar. `None` agrupa lo que añadió el mesero."""
+    return {
+        it.participant_id
+        for o in orders for it in o.items
+        if it.estado_cocina != "anulado"
+    }
+
+
+def _nombre_cuenta(
+    db: Session, ts: TableSession, orders: list[CustomerOrder], data: CloseSessionIn
+) -> str | None:
+    """A nombre de quién se emite la factura de una cuenta unificada.
+
+    Manda lo que escriba el cajero —puede ser una empresa que pide la factura a
+    su nombre—; si no escribe nada se usan los comensales de la sesión, y si
+    tampoco hay (mesa atendida solo por el mesero) la propia mesa. Una factura
+    sin nombre no le sirve a nadie."""
+    escrito = (data.customer_name or "").strip()
+    if escrito:
+        return escrito[:255]
+
+    con_consumo = _participantes_con_consumo(orders)
+    nombres = [
+        p.display_label or p.display_name
+        for p in ts.participants
+        if p.id in con_consumo
+    ]
+    if nombres:
+        return ", ".join(sorted(nombres))[:255]
+
+    table = db.get(DiningTable, ts.dining_table_id)
+    return f"Mesa {table.number}" if table is not None else None
+
+
 def _close_unified(
     db: Session, ts: TableSession, orders: list[CustomerOrder],
     data: CloseSessionIn, shift, cashier: User, invoice_prefix: str = "",
@@ -268,6 +303,7 @@ def _close_unified(
         cashier=cashier,
         payments=data.payments,
         discount=data.discount, tax=data.tax, tip=data.tip,
+        customer_name=_nombre_cuenta(db, ts, orders, data),
         dining_table_id=ts.dining_table_id,
         table_session_id=ts.id,
         # Una venta unificada cubre a varios comensales: no cuelga de ninguno.
@@ -288,11 +324,7 @@ def _close_split(
             "billing_mode='split' requiere 'splits'",
         )
 
-    con_consumo = {
-        it.participant_id
-        for o in orders for it in o.items
-        if it.estado_cocina != "anulado"
-    }
+    con_consumo = _participantes_con_consumo(orders)
     cubiertos = {s.participant_id for s in data.splits}
     faltan = con_consumo - cubiertos
     if faltan:

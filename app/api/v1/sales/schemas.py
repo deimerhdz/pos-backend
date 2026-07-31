@@ -79,6 +79,23 @@ class PaymentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class SaleInvoiceRef(BaseModel):
+    """Consecutivo fiscal de la venta. Es lo que debe imprimirse en el ticket."""
+    prefix: str
+    number: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SaleTableRef(BaseModel):
+    """Mesa cobrada. Null en ventas de mostrador."""
+    id: UUID
+    number: int
+    name: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class SaleResponse(BaseModel):
     id: UUID
     cash_shift_id: UUID
@@ -96,5 +113,8 @@ class SaleResponse(BaseModel):
     sold_at: datetime
     items: list[SaleItemResponse] = Field(default_factory=list)
     payments: list[PaymentResponse] = Field(default_factory=list)
+    # Para reconstruir el ticket completo fuera del momento del cobro.
+    invoice: SaleInvoiceRef | None = None
+    dining_table: SaleTableRef | None = None
 
     model_config = ConfigDict(from_attributes=True)

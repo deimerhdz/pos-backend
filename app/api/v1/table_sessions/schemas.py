@@ -83,6 +83,13 @@ class CloseSessionIn(BaseModel):
     discount: Decimal = Decimal("0")
     tax: Decimal = Decimal("0")
     tip: Decimal = Decimal("0")
+    customer_name: str | None = Field(
+        None,
+        max_length=255,
+        description="Solo en billing_mode='unified': a nombre de quién va la factura. "
+                    "Si se omite se usan los comensales de la sesión, y si no hay, la mesa. "
+                    "En 'split' cada venta va a nombre de su comensal.",
+    )
 
     # --- split ---
     splits: list[SplitPaymentIn] = Field(
