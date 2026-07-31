@@ -93,19 +93,40 @@ def reconcile(db: Session, shift: CashShift) -> dict:
         .group_by(PaymentMethod.id, PaymentMethod.name, PaymentMethod.type)
     ).all()
 
-    sales_by_method = []
+    vendido: dict[UUID, dict] = {}
     by_type: dict[str, Decimal] = {"cash": Decimal(0), "card": Decimal(0), "transfer": Decimal(0)}
     for method_id, method_name, method_type, total, count in rows:
         total = Decimal(total)
-        sales_by_method.append({
+        vendido[method_id] = {
             "method_id": method_id,
             "method_name": method_name,
             "method_type": method_type,
             "total": total,
             "count": count,
-        })
+        }
         if method_type in by_type:
             by_type[method_type] += total
+
+    # Los métodos sin ventas también salen, en cero: el arqueo tiene que enseñar
+    # todos los medios de cobro del negocio, no solo los que se usaron hoy. Con el
+    # INNER JOIN de arriba, "Tarjeta" sin ventas simplemente no existía.
+    activos = db.execute(
+        select(PaymentMethod).where(PaymentMethod.active.is_(True))
+    ).scalars().all()
+    for method in activos:
+        vendido.setdefault(method.id, {
+            "method_id": method.id,
+            "method_name": method.name,
+            "method_type": method.type,
+            "total": Decimal(0),
+            "count": 0,
+        })
+
+    # El efectivo primero (es el único que afecta al cajón), el resto por nombre.
+    sales_by_method = sorted(
+        vendido.values(),
+        key=lambda m: (m["method_type"] != "cash", m["method_name"].lower()),
+    )
 
     # El cambio (RF-029) sale del cajón, así que el efectivo neto de ventas es
     # Σ pagos en efectivo − Σ cambio entregado.
@@ -145,6 +166,10 @@ def reconcile(db: Session, shift: CashShift) -> dict:
         "ventas_efectivo": ventas_efectivo,
         "ventas_tarjeta": ventas_tarjeta,
         "ventas_transferencia": ventas_transferencia,
+        # Va aparte para que el desglose cuadre a la vista: las filas de
+        # `sales_by_method` son brutas y `ventas_efectivo` ya lleva el cambio
+        # descontado.
+        "cambio_entregado": Decimal(change_total),
         "sales_by_method": sales_by_method,
         "ingresos": ingresos,
         "egresos": egresos,

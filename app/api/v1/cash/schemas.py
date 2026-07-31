@@ -96,6 +96,11 @@ class ReconciliationResponse(BaseModel):
     ventas_efectivo: Decimal       # ÚNICA que suma a expected
     ventas_tarjeta: Decimal        # informativa
     ventas_transferencia: Decimal  # informativa
+    # Cambio entregado del cajón. `ventas_efectivo` ya lo lleva restado, pero las
+    # filas de `sales_by_method` son brutas: se expone aparte para que el desglose
+    # por método cuadre con `expected` a la vista.
+    cambio_entregado: Decimal
+    # Una fila por método de pago activo, aunque no haya vendido nada en el turno.
     sales_by_method: list[SalesByMethod]
     # Movimientos manuales por kind.
     ingresos: Decimal
