@@ -131,6 +131,12 @@ class OrderItemResponse(BaseModel):
     void_de: UUID | None = None
     notes: str | None = None
     options: list[OrderItemOptionResponse] = Field(default_factory=list)
+    #: Versión del evento de tiempo real que emitió esta escritura. Solo lo
+    #: rellena `PATCH /orders/items/{id}/kitchen`; el KDS lo usa para descartar
+    #: eventos en vuelo que revertirían su parche optimista. `None` si el evento
+    #: no llegó a publicarse (Redis caído): el cliente sigue funcionando, solo
+    #: pierde el desempate y se apoya en el guard `busy`.
+    rt_v: int | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -77,5 +77,7 @@ def close_session(
     """Cierra en cascada: cobra, marca los pedidos `pagada`, cierra a los
     comensales, abandona sus carritos y libera la mesa. Todo en una transacción."""
     return service.close_session(
-        db, table_session_id, body, user, invoice_prefix=tenant.invoice_prefix or ""
+        db, table_session_id, body, user,
+        invoice_prefix=tenant.invoice_prefix or "",
+        tenant_id=tenant.id,
     )

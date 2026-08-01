@@ -1,11 +1,14 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import TypeAdapter
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core import events
 from app.core.db import get_db, get_tenant
 from app.core.crud import get_or_404
+from app.core.http_cache import json_or_304
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User, Tenant
 from app.core.qr_token import mint_qr_token
@@ -27,6 +30,10 @@ from app.api.v1.orders.schemas import (
 )
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+
+# A nivel de módulo a propósito: `TypeAdapter` compila el esquema, y construirlo
+# por request tiraría por tierra el ahorro que persigue el ETag.
+_ORDERS_ADAPTER = TypeAdapter(list[OrderResponse])
 
 
 def _load_order(db: Session, order_id: UUID) -> CustomerOrder:
@@ -77,8 +84,13 @@ def update_table(
 def set_table_status(
     table_id: UUID, body: TableStatusUpdate,
     db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
 ):
-    return tables_advanced.set_table_status(db, table_id, body.status)
+    table = tables_advanced.set_table_status(db, table_id, body.status)
+    events.table_status_changed(
+        tenant.id, dining_table_id=table.id, table_number=table.number, status=table.status,
+    )
+    return table
 
 
 @router.post("/{order_id}/move", response_model=OrderResponse,
@@ -86,9 +98,19 @@ def set_table_status(
 def move_order(
     order_id: UUID, body: MoveOrderIn,
     db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
 ):
     tables_advanced.move_order(db, order_id, body.dining_table_id)
-    return _load_order(db, order_id)
+    order = _load_order(db, order_id)
+    # Cambian las dos mesas: la que suelta el pedido y la que lo recibe.
+    for table in db.execute(
+        select(DiningTable).where(DiningTable.id == body.dining_table_id)
+    ).scalars():
+        events.table_status_changed(
+            tenant.id, dining_table_id=table.id, table_number=table.number,
+            status=table.status,
+        )
+    return order
 
 
 @router.post("/merge", response_model=MergeResponse,
@@ -149,11 +171,17 @@ def confirm_order(
     order_id: UUID,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
 ):
     """`recibida` → `abierta`. Es el único punto donde el pedido del comensal
     compromete stock; hasta aquí no había tocado inventario."""
     checkout.confirm_order(db, order_id, user)
-    return _load_order(db, order_id)
+    order = _load_order(db, order_id)
+    events.order_confirmed(
+        tenant.id, order_id=order.id, table_session_id=order.table_session_id
+    )
+    events.bill_changed(tenant.id, table_session_id=order.table_session_id)
+    return order
 
 
 # ============================ Consolidación (mesero) ============================
@@ -202,8 +230,27 @@ def kds_board(db: Session = Depends(get_db), _: User = Depends(get_current_user)
 def kitchen_transition(
     item_id: UUID, body: KitchenTransitionIn,
     db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
 ):
-    return kitchen.transition_kitchen(db, item_id, body)
+    """Devuelve `rt_v`: la versión del evento que acaba de emitir esta escritura.
+
+    El KDS parchea el ítem localmente tras el PATCH (escritura optimista). Sin
+    `rt_v` no tendría con qué descartar un evento en vuelo de otra pantalla que
+    llegara justo después y revirtiera visualmente lo que el cocinero ya vio.
+    """
+    item = kitchen.transition_kitchen(db, item_id, body)
+    order = db.get(CustomerOrder, item.order_id)
+    entry_id = events.item_kitchen_changed(
+        tenant.id,
+        order_id=item.order_id,
+        table_session_id=order.table_session_id if order else None,
+        item_id=item.id,
+        estado_cocina=item.estado_cocina,
+    )
+    out = OrderItemResponse.model_validate(item)
+    if entry_id is not None:
+        out.rt_v = events.version_of(entry_id)
+    return out
 
 
 @router.post(
@@ -214,8 +261,19 @@ def kitchen_transition(
 def void_item(
     item_id: UUID, body: VoidItemIn,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
 ):
     order = kitchen.void_item(db, item_id, body, user)
+    reemplazo = next((i for i in order.items if i.void_de == item_id), None)
+    events.item_voided(
+        tenant.id,
+        order_id=order.id,
+        table_session_id=order.table_session_id,
+        item_id=item_id,
+        motivo=body.motivo,
+        replacement_item_id=reemplazo.id if reemplazo else None,
+    )
+    events.bill_changed(tenant.id, table_session_id=order.table_session_id)
     return _load_order(db, order.id)
 
 
@@ -251,8 +309,20 @@ def block_order(
 def pay_order(
     order_id: UUID, body: PayIn,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
 ):
-    return checkout.pay_order(db, order_id, body, user)
+    sale = checkout.pay_order(db, order_id, body, user)
+    order = db.get(CustomerOrder, order_id)
+    events.payment_completed(
+        tenant.id,
+        sale_id=sale.id,
+        table_session_id=order.table_session_id if order else None,
+        total=sale.total,
+        customer_name=order.customer_name if order else None,
+        # Cobro pedido a pedido desde el mostrador, no cierre de sesión de mesa.
+        billing_mode="counter",
+    )
+    return sale
 
 
 @router.post(
@@ -263,10 +333,16 @@ def pay_order(
 def cancel_order(
     order_id: UUID, body: CancelIn,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
 ):
     """El staff puede cancelar en cualquier estado no terminal. Solo vuelve al stock
     lo que cocina no llegó a preparar; lo ya consumido se registra como pérdida."""
     order = checkout.cancel_order(db, order_id, body, user)
+    events.order_cancelled(
+        tenant.id, order_id=order.id, table_session_id=order.table_session_id,
+        motivo=body.motivo,
+    )
+    events.bill_changed(tenant.id, table_session_id=order.table_session_id)
     return _load_order(db, order.id)
 
 
@@ -279,8 +355,13 @@ def release_table(
     table_id: UUID,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
 ):
-    return checkout.release_table(db, table_id, closed_by=user)
+    table = checkout.release_table(db, table_id, closed_by=user)
+    events.table_status_changed(
+        tenant.id, dining_table_id=table.id, table_number=table.number, status=table.status,
+    )
+    return table
 
 
 # ============================ Facturación ============================
@@ -314,16 +395,19 @@ def create_order(
 
 @router.get("", response_model=list[OrderResponse], summary="Listar comandas (staff)")
 def list_orders(
+    request: Request,
     status_filter: str | None = Query(None, alias="status"),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
+    """La terminal y el KDS sondean esto, así que responde con `ETag`: mientras
+    nada cambie el navegador revalida y recibe un 304, sin cuerpo ni re-render."""
     q = select(CustomerOrder).options(
         selectinload(CustomerOrder.items).selectinload(OrderItem.options)
     ).order_by(CustomerOrder.created_at.desc())
     if status_filter is not None:
         q = q.where(CustomerOrder.status == status_filter)
-    return db.execute(q).scalars().all()
+    return json_or_304(request, _ORDERS_ADAPTER, db.execute(q).scalars().all())
 
 
 @router.get("/{order_id}", response_model=OrderResponse, summary="Obtener una comanda")
