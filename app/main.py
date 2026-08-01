@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.redis import token_blocklist
+from app.core.event_bus import event_bus
 from app.core.scheduler import start_scheduler
 from app.core.db import initialize_database
 from app.api.v1.admin.router import router as admin_router
@@ -49,6 +50,10 @@ async def lifespan(app: FastAPI):
         initialize_database()  # mejor aquí
         await token_blocklist.ping()
         print("✅ Redis conectado correctamente")
+        # Bus de tiempo real: abre su propia conexión Redis (un XREAD BLOCK
+        # monopoliza la suya, y el pool del blocklist se usa en cada request).
+        await event_bus.start()
+        print("✅ Bus de eventos listo")
         # Cierra las sesiones de mesa abandonadas; sin esto una mesa que nadie
         # cobra queda 'ocupada' para siempre (el TTL del comensal es perezoso).
         scheduler = start_scheduler()
@@ -64,6 +69,11 @@ async def lifespan(app: FastAPI):
             scheduler.shutdown(wait=False)
         except Exception as e:
             print("❌ Error deteniendo el scheduler:", e)
+    try:
+        # Antes que el blocklist: corta los lectores y suelta sus conexiones.
+        await event_bus.aclose()
+    except Exception as e:
+        print("❌ Error cerrando el bus de eventos:", e)
     try:
         await token_blocklist.close()
         print("🔌 Redis cerrado")

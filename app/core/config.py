@@ -52,6 +52,40 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_TABLE:int = Field(default=120,env="RATE_LIMIT_PER_TABLE")
     RATE_LIMIT_WINDOW_SECONDS:int = Field(default=60,env="RATE_LIMIT_WINDOW_SECONDS")
 
+    # ---------------- Tiempo real (SSE + Redis Streams) ----------------
+    # Interruptor de pánico: en false el publicador es un no-op y el endpoint
+    # responde 503, así los clientes caen al sondeo sin desplegar frontend.
+    REALTIME_ENABLED:bool = Field(default=True,env="REALTIME_ENABLED")
+    # Retención del stream por tenant (XADD MAXLEN ~). Cubre horas de operación;
+    # más allá, el cliente recibe `resync` y recarga por REST.
+    REALTIME_STREAM_MAXLEN:int = Field(default=1000,env="REALTIME_STREAM_MAXLEN")
+    # Comentario `: ping` para mantener vivo el túnel y detectar el otro extremo
+    # muerto. Debe ser MENOR que el proxy_read_timeout de nginx.
+    REALTIME_HEARTBEAT_SECONDS:int = Field(default=20,env="REALTIME_HEARTBEAT_SECONDS")
+    # Vida máxima de una conexión. Al vencer se cierra limpio y EventSource
+    # reconecta revalidando el token: evita sockets inmortales con credenciales
+    # viejas, que es el punto débil clásico de los JWT en conexiones largas.
+    REALTIME_MAX_CONNECTION_SECONDS:int = Field(default=1800,env="REALTIME_MAX_CONNECTION_SECONDS")
+    # `retry:` que se envía al navegador; fija su backoff de reconexión.
+    REALTIME_RETRY_MS:int = Field(default=3000,env="REALTIME_RETRY_MS")
+    # Cola por suscriptor. Si se llena se descarta al cliente con `resync` en vez
+    # de acumular memoria sin techo.
+    REALTIME_QUEUE_SIZE:int = Field(default=100,env="REALTIME_QUEUE_SIZE")
+    # Tope de eventos a repetir tras un Last-Event-ID. Más que esto es `resync`.
+    REALTIME_REPLAY_MAX:int = Field(default=200,env="REALTIME_REPLAY_MAX")
+    # Cuánto bloquea cada XREAD del lector por tenant.
+    REALTIME_READER_BLOCK_MS:int = Field(default=15000,env="REALTIME_READER_BLOCK_MS")
+    # Margen antes de parar el lector de un tenant sin suscriptores; sin esto un
+    # F5 del cajero destruye y recrea task + conexión Redis.
+    REALTIME_READER_LINGER_SECONDS:int = Field(default=30,env="REALTIME_READER_LINGER_SECONDS")
+    # Vida del ticket de un solo uso del staff (se consume con GETDEL).
+    REALTIME_TICKET_TTL_SECONDS:int = Field(default=30,env="REALTIME_TICKET_TTL_SECONDS")
+    # Conexiones simultáneas por sesión de mesa: una mesa no tiene 50 comensales.
+    REALTIME_MAX_CONN_PER_SESSION:int = Field(default=8,env="REALTIME_MAX_CONN_PER_SESSION")
+    # Timeout del XADD. Publicar no puede colgar una operación de negocio ya
+    # comprometida, así que se acota fuerte y se falla en abierto.
+    REALTIME_PUBLISH_TIMEOUT_SECONDS:float = Field(default=0.25,env="REALTIME_PUBLISH_TIMEOUT_SECONDS")
+
     PROJECT_NAME:str ="pos"
     # Ambiente de ejecución: "prod" o "dev". Afecta, p. ej., la URL de login del correo.
     ENVIRONMENT:str = Field(default="dev",env="ENVIRONMENT")
