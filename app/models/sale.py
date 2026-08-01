@@ -10,6 +10,8 @@ from datetime import datetime
 
 if TYPE_CHECKING:
     from .payment import Payment
+    from .invoice import Invoice
+    from .dining_table import DiningTable
 
 
 class Sale(UUIDPrimaryKeyMixin, Base):
@@ -78,6 +80,13 @@ class Sale(UUIDPrimaryKeyMixin, Base):
     payments: Mapped[List["Payment"]] = relationship(
         back_populates="sale", cascade="all, delete-orphan"
     )
+
+    # Solo lectura: la factura la emite `invoices.service.issue_for_sale` dentro
+    # de la transacción del cobro, y la mesa la fija el cierre de la sesión. Se
+    # exponen para poder reimprimir el ticket completo desde el detalle de venta.
+    invoice: Mapped[Optional["Invoice"]] = relationship(uselist=False, viewonly=True)
+
+    dining_table: Mapped[Optional["DiningTable"]] = relationship(viewonly=True)
 
     __table_args__ = (
         CheckConstraint(

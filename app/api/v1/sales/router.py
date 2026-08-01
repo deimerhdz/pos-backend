@@ -56,7 +56,12 @@ def create_sale(
 def list_sales(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     return db.execute(
         select(Sale)
-        .options(selectinload(Sale.items), selectinload(Sale.payments))
+        .options(
+            selectinload(Sale.items),
+            selectinload(Sale.payments),
+            selectinload(Sale.invoice),
+            selectinload(Sale.dining_table),
+        )
         .order_by(Sale.sold_at.desc())
     ).scalars().all()
 
@@ -69,7 +74,12 @@ def get_sale(sale_id: UUID, db: Session = Depends(get_db), _: User = Depends(get
 def _load_sale(db: Session, sale_id: UUID) -> Sale:
     sale = db.execute(
         select(Sale)
-        .options(selectinload(Sale.items), selectinload(Sale.payments))
+        .options(
+            selectinload(Sale.items),
+            selectinload(Sale.payments),
+            selectinload(Sale.invoice),
+            selectinload(Sale.dining_table),
+        )
         .where(Sale.id == sale_id)
     ).scalar_one_or_none()
     if sale is None:

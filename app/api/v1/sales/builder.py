@@ -132,17 +132,30 @@ def build_sale(
         )
 
     paid = Decimal("0")
+    no_efectivo = Decimal("0")
     for p in payments:
-        get_or_404(db, PaymentMethod, p.payment_method_id, "Payment method not found")
+        method = get_or_404(db, PaymentMethod, p.payment_method_id, "Payment method not found")
         db.add(Payment(
             sale_id=sale.id, payment_method_id=p.payment_method_id,
             amount=p.amount, reference=p.reference,
         ))
         paid += Decimal(p.amount)
+        if not method.is_cash:
+            no_efectivo += Decimal(p.amount)
     if paid < total:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             f"El pago ({paid}) no cubre el total ({total})",
+        )
+    # Con pago mixto el exceso solo puede venir del efectivo: `change_given` se
+    # calcula abajo como `paid - total` sin mirar el método, y `reconcile` se lo
+    # descuenta al efectivo. Un cobro electrónico por encima del total dejaría un
+    # faltante fantasma en el cajón que nadie podría explicar al cerrar el turno.
+    if no_efectivo > total:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Los pagos que no son en efectivo ({no_efectivo}) no pueden superar el "
+            f"total ({total}): el vuelto solo sale del efectivo.",
         )
 
     sale.subtotal = subtotal
