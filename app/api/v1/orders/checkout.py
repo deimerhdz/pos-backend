@@ -431,6 +431,35 @@ def cancel_order(
 
 # ------------------------------------------------------------- Liberar mesa
 
+def close_participants(db: Session, ts: TableSession) -> int:
+    """Echa a los comensales de una sesión y abandona sus carritos, **sin tocar la
+    sesión**. Devuelve cuántos cerró.
+
+    Se usa suelta cuando una sesión lleva demasiado abierta pero todavía tiene algo
+    que cobrar: no interesa que nadie siga pidiendo con un token viejo, pero cerrar
+    la sesión dejaría la mesa sin forma de cobrarse.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    participants = db.execute(
+        select(SessionParticipant).where(
+            SessionParticipant.table_session_id == ts.id,
+            SessionParticipant.status == "open",
+        )
+    ).scalars().all()
+
+    for p in participants:
+        p.status = "closed"
+        if p.closed_at is None:
+            p.closed_at = now
+        for cart in db.execute(
+            select(Cart).where(Cart.participant_id == p.id, Cart.status == "abierto")
+        ).scalars():
+            cart.status = "abandonado"
+
+    return len(participants)
+
+
 def close_table_sessions(
     db: Session, table_id: UUID, *, closed_by: User | None = None
 ) -> list[TableSession]:
@@ -458,22 +487,7 @@ def close_table_sessions(
             ts.closed_by_user_id = closed_by.id
             ts.closed_by_user_name = closed_by.name
 
-        participants = db.execute(
-            select(SessionParticipant).where(
-                SessionParticipant.table_session_id == ts.id,
-                SessionParticipant.status == "open",
-            )
-        ).scalars().all()
-        for p in participants:
-            p.status = "closed"
-            if p.closed_at is None:
-                p.closed_at = now
-            for cart in db.execute(
-                select(Cart).where(
-                    Cart.participant_id == p.id, Cart.status == "abierto"
-                )
-            ).scalars():
-                cart.status = "abandonado"
+        close_participants(db, ts)
 
     return sessions
 
