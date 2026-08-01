@@ -4,12 +4,14 @@
 operaciones por el token de sesión (`x-session-token`) vía get_session_context.
 El tenant y la mesa salen siempre del token firmado, nunca de un id del body.
 """
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import TypeAdapter
 from sqlalchemy import select
 
+from app.core import events
 from app.core.http_cache import json_or_304
 from app.core.qr_context import (
     open_qr_context,
@@ -30,6 +32,16 @@ router = APIRouter(prefix="/cart", tags=["cart"])
 
 # A nivel de módulo: compilar el esquema por request anularía el ahorro.
 _ORDERS_ADAPTER = TypeAdapter(list[OrderResponse])
+
+
+def _table_number(db, dining_table_id) -> int | None:
+    """El número de mesa para pintar el aviso del staff sin que tenga que
+    resolver el id contra su catálogo."""
+    if dining_table_id is None:
+        return None
+    return db.execute(
+        select(DiningTable.number).where(DiningTable.id == dining_table_id)
+    ).scalar_one_or_none()
 
 
 @router.post(
@@ -131,7 +143,20 @@ async def submit_cart(
     """El pedido queda pendiente de que el staff lo confirme; hasta entonces no
     compromete inventario y el comensal puede cancelarlo sin coste."""
     await rate_limit(request, "cart_submit", table_id=ctx.table_id)
-    return service.submit_cart(ctx.db, ctx.participant)
+    order = service.submit_cart(ctx.db, ctx.participant)
+    # Después del COMMIT del servicio, nunca dentro: si la transacción fallara no
+    # puede haber salido un evento anunciando un pedido que no existe.
+    events.order_created(
+        ctx.tenant.id,
+        order_id=order.id,
+        table_session_id=order.table_session_id,
+        dining_table_id=order.dining_table_id,
+        table_number=_table_number(ctx.db, order.dining_table_id),
+        customer_name=order.customer_name,
+        items_count=len(order.items),
+        total=sum((i.unit_price * i.quantity for i in order.items), start=Decimal(0)),
+    )
+    return order
 
 
 @router.get(
@@ -157,4 +182,12 @@ def cancel_my_order(
     body: MyOrderCancelIn,
     ctx: SessionContext = Depends(get_session_context),
 ):
-    return service.cancel_my_order(ctx.db, ctx.participant, order_id, body.motivo)
+    order = service.cancel_my_order(ctx.db, ctx.participant, order_id, body.motivo)
+    events.order_cancelled(
+        ctx.tenant.id,
+        order_id=order.id,
+        table_session_id=order.table_session_id,
+        motivo=body.motivo,
+    )
+    events.bill_changed(ctx.tenant.id, table_session_id=order.table_session_id)
+    return order

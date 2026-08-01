@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, text
 
+from app.core import events
 from app.core.config import settings
 from app.core.db import with_db
 from app.core.redis import token_blocklist as redis
@@ -83,7 +84,7 @@ def _abandonadas_sin_pedir(db, now: datetime) -> list:
     return [ts for ts in candidatas if not has_billable_orders(db, ts.id)]
 
 
-def _sweep_schema(schema: str, corte: datetime) -> int:
+def _sweep_schema(schema: str, corte: datetime, tenant_id: int | None = None) -> int:
     """Suelta las sesiones vencidas de un tenant. Devuelve cuántas tocó."""
     from app.models.customer_order import CustomerOrder
     from app.models.dining_table import DiningTable
@@ -94,6 +95,9 @@ def _sweep_schema(schema: str, corte: datetime) -> int:
     from app.api.v1.table_sessions.service import has_billable_orders
 
     tocadas = 0
+    #: (table_session_id, dining_table_id, número de mesa, ¿quedó libre?) de las
+    #: sesiones realmente cerradas, para publicar los eventos tras el COMMIT.
+    cerradas: list[tuple] = []
     with with_db(schema) as db:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -144,7 +148,11 @@ def _sweep_schema(schema: str, corte: datetime) -> int:
                 ).limit(1)
             ).scalar()
             table = db.get(DiningTable, table_id)
-            if table is not None and pendientes is None:
+            quedo_libre = table is not None and pendientes is None
+            cerradas.append(
+                (ts.id, table_id, table.number if table is not None else None, quedo_libre)
+            )
+            if quedo_libre:
                 table.status = "libre"
             elif pendientes is not None:
                 logger.warning(
@@ -156,6 +164,20 @@ def _sweep_schema(schema: str, corte: datetime) -> int:
 
         if tocadas:
             db.commit()
+            # Tras el COMMIT: el cajero ve el tablero moverse solo, y el comensal
+            # cuya mesa se barrió recibe el aviso en vez de quedarse mirando una
+            # pantalla congelada.
+            if tenant_id is not None:
+                for ts_id, table_id, table_num, libre in cerradas:
+                    events.session_closed(
+                        tenant_id, table_session_id=ts_id,
+                        dining_table_id=table_id, reason="swept",
+                    )
+                    if libre:
+                        events.table_status_changed(
+                            tenant_id, dining_table_id=table_id,
+                            table_number=table_num, status="libre",
+                        )
     return tocadas
 
 
@@ -166,13 +188,15 @@ def sweep_orphan_sessions() -> int:
     )
     total = 0
     with with_db(None) as db:
-        schemas = [r[0] for r in db.execute(
-            text("SELECT schema FROM shared.tenants")
+        # También el `id`: hace falta para publicar los eventos de tiempo real,
+        # que van a un stream por tenant.
+        tenants = [(r[0], r[1]) for r in db.execute(
+            text("SELECT id, schema FROM shared.tenants")
         ).fetchall()]
 
-    for schema in schemas:
+    for tenant_id, schema in tenants:
         try:
-            total += _sweep_schema(schema, corte)
+            total += _sweep_schema(schema, corte, tenant_id)
         except Exception:
             # Un tenant roto no debe impedir el barrido de los demás.
             logger.exception("Error barriendo sesiones del schema %s", schema)

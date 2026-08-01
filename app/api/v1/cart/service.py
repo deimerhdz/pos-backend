@@ -12,6 +12,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core import events
 from app.core.config import settings
 from app.core.crud import get_or_404
 from app.core.qr_context import close_participant
@@ -109,7 +110,8 @@ def open_session(
         cart = Cart(participant_id=participant.id, status="abierto")
         db.add(cart)
 
-        if table.status != "ocupada":
+        paso_a_ocupada = table.status != "ocupada"
+        if paso_a_ocupada:
             table.status = "ocupada"
 
         db.commit()
@@ -117,6 +119,15 @@ def open_session(
         db.rollback()
         logger.exception("Error abriendo sesión de comensal")
         raise
+
+    # Tras el COMMIT. Publica el servicio y no el router porque el router no sabe
+    # si la mesa ya estaba ocupada, y repetir el evento con cada comensal que se
+    # une haría parpadear el tablero del cajero sin motivo.
+    if paso_a_ocupada:
+        events.table_status_changed(
+            tenant_id, dining_table_id=table.id, table_number=table.number,
+            status="ocupada",
+        )
 
     db.refresh(participant)
     db.refresh(cart)
