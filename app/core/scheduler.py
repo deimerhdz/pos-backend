@@ -84,13 +84,16 @@ def _abandonadas_sin_pedir(db, now: datetime) -> list:
 
 
 def _sweep_schema(schema: str, corte: datetime) -> int:
-    """Cierra las sesiones vencidas de un tenant. Devuelve cuántas cerró."""
+    """Suelta las sesiones vencidas de un tenant. Devuelve cuántas tocó."""
     from app.models.customer_order import CustomerOrder
     from app.models.dining_table import DiningTable
     from app.models.table_session import TableSession
-    from app.api.v1.orders.checkout import TERMINAL, close_table_sessions
+    from app.api.v1.orders.checkout import (
+        TERMINAL, close_participants, close_table_sessions,
+    )
+    from app.api.v1.table_sessions.service import has_billable_orders
 
-    cerradas = 0
+    tocadas = 0
     with with_db(schema) as db:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -112,12 +115,28 @@ def _sweep_schema(schema: str, corte: datetime) -> int:
 
         for ts in vencidas:
             table_id = ts.dining_table_id
+
+            # Con consumo sin cobrar la sesión **no se cierra**: cerrarla dejaba la
+            # mesa sin cuenta que cargar —`GET /table-sessions` solo lista las
+            # activas— y por tanto imposible de cobrar desde la terminal. Se echa a
+            # los comensales, que es lo que interesa del vencimiento, y la mesa
+            # queda esperando al cajero.
+            if has_billable_orders(db, ts.id):
+                echados = close_participants(db, ts)
+                logger.info(
+                    "Sesión %s (schema %s) vencida con pedidos sin cobrar: se "
+                    "cierran %d comensal(es) y la mesa queda pendiente de cobro",
+                    ts.id, schema, echados,
+                )
+                tocadas += 1
+                continue
+
             # `closed_by=None`: no la cerró un humano, la cerró el barrido.
             close_table_sessions(db, table_id, closed_by=None)
 
-            # La mesa solo vuelve a 'libre' si no queda nada sin cobrar; si hay
-            # pedidos vivos es un problema real que debe ver el staff, no algo
-            # que el job deba tapar.
+            # Segunda red: la mesa solo vuelve a 'libre' si tampoco le quedan
+            # pedidos vivos **fuera** de esta sesión (los que quedaron sin
+            # `table_session_id` en su día). Liberarla los volvería incobrables.
             pendientes = db.execute(
                 select(CustomerOrder.id).where(
                     CustomerOrder.dining_table_id == table_id,
@@ -129,15 +148,15 @@ def _sweep_schema(schema: str, corte: datetime) -> int:
                 table.status = "libre"
             elif pendientes is not None:
                 logger.warning(
-                    "Sesión huérfana %s (schema %s) cerrada, pero la mesa sigue "
-                    "ocupada: tiene pedidos sin cobrar",
-                    ts.id, schema,
+                    "Mesa %s (schema %s) sigue ocupada: tiene pedidos sin cobrar "
+                    "que no cuelgan de la sesión cerrada",
+                    table_id, schema,
                 )
-            cerradas += 1
+            tocadas += 1
 
-        if cerradas:
+        if tocadas:
             db.commit()
-    return cerradas
+    return tocadas
 
 
 def sweep_orphan_sessions() -> int:
