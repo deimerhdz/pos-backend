@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     # cae a JWT_SECRET (permite rotación aislada sin obligar cambio de .env).
     QR_TOKEN_SECRET:Optional[str] = Field(default=None,env="QR_TOKEN_SECRET")
 
+    # Holgura del refresco deslizante: `expires_at` solo se reescribe cuando lleva
+    # más de estos minutos sin moverse. Sin esto cada lectura del comensal era un
+    # UPDATE+COMMIT (~360/h por sondeo); con 10 min son ~6/h.
+    #
+    # **Invariante: debe ser MENOR que EMPTY_SESSION_TTL_MINUTES.** El barrido
+    # deriva la última actividad como `expires_at - SESSION_TTL_MINUTES`
+    # (scheduler.py:64), así que esta holgura es también el error máximo de esa
+    # derivación. Si la supera, el barrido cierra mesas **activas** sin pedidos.
+    SESSION_TTL_REFRESH_SLACK_MINUTES:int = Field(default=10,env="SESSION_TTL_REFRESH_SLACK_MINUTES")
+
     # Sesión de mesa: máximo que puede seguir abierta sin que el staff la cierre.
     # Pasado ese tiempo la cierra el barrido programado, porque si no la mesa
     # queda 'ocupada' para siempre.
@@ -45,6 +55,10 @@ class Settings(BaseSettings):
     PROJECT_NAME:str ="pos"
     # Ambiente de ejecución: "prod" o "dev". Afecta, p. ej., la URL de login del correo.
     ENVIRONMENT:str = Field(default="dev",env="ENVIRONMENT")
+    # Volcado de cada SQL al log. `None` = deriva del entorno (dev sí, prod no).
+    # En producción cada sondeo serializaba ~6 sentencias a texto y las escribía:
+    # era el mayor coste por request.
+    SQL_ECHO:Optional[bool] = Field(default=None,env="SQL_ECHO")
     REDIS_URL:str =  Field(env="REDIS_URL")
     # URL base del servicio de email; el envío hace POST a EMAIL_API_URL + /api/email/send.
     EMAIL_API_URL:str = Field(...,env="EMAIL_API_URL")

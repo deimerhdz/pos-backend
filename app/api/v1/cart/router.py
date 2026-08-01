@@ -7,8 +7,10 @@ El tenant y la mesa salen siempre del token firmado, nunca de un id del body.
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from pydantic import TypeAdapter
 from sqlalchemy import select
 
+from app.core.http_cache import json_or_304
 from app.core.qr_context import (
     open_qr_context,
     open_session_context,
@@ -25,6 +27,9 @@ from app.api.v1.cart.schemas import (
 )
 
 router = APIRouter(prefix="/cart", tags=["cart"])
+
+# A nivel de módulo: compilar el esquema por request anularía el ahorro.
+_ORDERS_ADAPTER = TypeAdapter(list[OrderResponse])
 
 
 @router.post(
@@ -134,8 +139,12 @@ async def submit_cart(
     response_model=list[OrderResponse],
     summary="Mis pedidos en esta sesión (para restaurar la UI al reingresar)",
 )
-def my_orders(ctx: SessionContext = Depends(get_session_context)):
-    return service.list_my_orders(ctx.db, ctx.participant.id)
+def my_orders(request: Request, ctx: SessionContext = Depends(get_session_context)):
+    """El endpoint más sondeado del sistema, así que responde con `ETag`: el
+    comensal recibe un 304 mientras cocina no mueva nada."""
+    return json_or_304(
+        request, _ORDERS_ADAPTER, service.list_my_orders(ctx.db, ctx.participant.id)
+    )
 
 
 @router.post(

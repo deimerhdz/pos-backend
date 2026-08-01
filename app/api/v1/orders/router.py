@@ -1,11 +1,13 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import TypeAdapter
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.db import get_db, get_tenant
 from app.core.crud import get_or_404
+from app.core.http_cache import json_or_304
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User, Tenant
 from app.core.qr_token import mint_qr_token
@@ -27,6 +29,10 @@ from app.api.v1.orders.schemas import (
 )
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+
+# A nivel de módulo a propósito: `TypeAdapter` compila el esquema, y construirlo
+# por request tiraría por tierra el ahorro que persigue el ETag.
+_ORDERS_ADAPTER = TypeAdapter(list[OrderResponse])
 
 
 def _load_order(db: Session, order_id: UUID) -> CustomerOrder:
@@ -314,16 +320,19 @@ def create_order(
 
 @router.get("", response_model=list[OrderResponse], summary="Listar comandas (staff)")
 def list_orders(
+    request: Request,
     status_filter: str | None = Query(None, alias="status"),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
+    """La terminal y el KDS sondean esto, así que responde con `ETag`: mientras
+    nada cambie el navegador revalida y recibe un 304, sin cuerpo ni re-render."""
     q = select(CustomerOrder).options(
         selectinload(CustomerOrder.items).selectinload(OrderItem.options)
     ).order_by(CustomerOrder.created_at.desc())
     if status_filter is not None:
         q = q.where(CustomerOrder.status == status_filter)
-    return db.execute(q).scalars().all()
+    return json_or_304(request, _ORDERS_ADAPTER, db.execute(q).scalars().all())
 
 
 @router.get("/{order_id}", response_model=OrderResponse, summary="Obtener una comanda")

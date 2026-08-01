@@ -101,9 +101,35 @@ def _abandon_expired(db: Session, participant) -> None:
     db.commit()
 
 
+def _should_refresh(participant, now: datetime) -> bool:
+    """¿Toca reescribir `expires_at`, o la ventana sigue lo bastante fresca?
+
+    Sin esta comprobación **cada lectura** del comensal era un UPDATE + COMMIT en
+    Postgres. Con el menú QR sondeando cada 10 s eso son ~360 escrituras/h por
+    comensal que no aportan nada al negocio; con la holgura, ~6.
+
+    El umbral **no** es "la mitad de la ventana": el barrido de sesiones huérfanas
+    recupera la última actividad revirtiendo el desplazamiento
+    (`expires_at - SESSION_TTL_MINUTES`, `scheduler.py:64`), así que el desfase que
+    permitamos aquí es también el error máximo de esa derivación. Con una holgura
+    mayor que `EMPTY_SESSION_TTL_MINUTES` el barrido cerraría mesas **activas** sin
+    pedidos, creyéndolas abandonadas.
+    """
+    if participant.expires_at is None:
+        return True
+    ventana = timedelta(minutes=settings.SESSION_TTL_MINUTES)
+    holgura = timedelta(minutes=settings.SESSION_TTL_REFRESH_SLACK_MINUTES)
+    return (participant.expires_at - now) <= ventana - holgura
+
+
 @contextmanager
-def open_session_context(token: str) -> Iterator[SessionContext]:
+def open_session_context(token: str, *, touch: bool = True) -> Iterator[SessionContext]:
     """Autentica al comensal por su token y devuelve el contexto de reingreso.
+
+    `touch=False` valida igual pero **no corre la ventana deslizante**. Lo usa el
+    handshake del stream SSE: si una conexión abierta refrescara el TTL, una
+    pestaña olvidada mantendría la mesa viva indefinidamente. El TTL lo siguen
+    moviendo las llamadas REST reales (pedir, cancelar).
 
     Cadena de validación (todo antes de exponer datos):
 
@@ -166,9 +192,11 @@ def open_session_context(token: str) -> Iterator[SessionContext]:
                 detail="La sesión de la mesa superó su duración máxima. Vuelve a escanear el QR.",
             )
 
-        # Refresco deslizante: cada actividad corre la ventana del comensal.
-        participant.expires_at = now + timedelta(minutes=settings.SESSION_TTL_MINUTES)
-        db.commit()
+        # Refresco deslizante: la actividad corre la ventana del comensal, pero
+        # solo cuando de verdad hace falta (ver `_should_refresh`).
+        if touch and _should_refresh(participant, now):
+            participant.expires_at = now + timedelta(minutes=settings.SESSION_TTL_MINUTES)
+            db.commit()
 
         yield SessionContext(
             db=db,

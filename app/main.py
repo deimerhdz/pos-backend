@@ -79,6 +79,10 @@ def create_app()->FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Con `allow_credentials=True` el comodín no vale aquí: hay que listar cada
+        # cabecera que el JS del navegador pueda leer. `ETag` es la de la
+        # revalidación condicional; `Retry-After` la que acompaña a los 429.
+        expose_headers=["ETag", "Retry-After"],
     )
 
     initialize_database()
