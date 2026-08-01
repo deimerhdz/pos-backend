@@ -23,7 +23,10 @@ from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
 
 alembic_config = Config("alembic.ini")
-engine = create_engine(settings.DATABASE_URL,echo=True,future=True)
+# En prod el echo se apaga: serializar cada SELECT a texto y escribirlo era el
+# mayor coste por request. `SQL_ECHO` en el .env fuerza cualquiera de los dos.
+_echo = settings.SQL_ECHO if settings.SQL_ECHO is not None else settings.ENVIRONMENT != "prod"
+engine = create_engine(settings.DATABASE_URL,echo=_echo,future=True)
 logger = logging.getLogger(__name__)
 
 @contextmanager

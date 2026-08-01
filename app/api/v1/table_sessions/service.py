@@ -14,6 +14,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core import events
 from app.core.crud import get_or_404
 from app.core.models import User
 from app.models.customer_order import CustomerOrder
@@ -189,7 +190,7 @@ def _assert_closable(db: Session, orders: list[CustomerOrder]) -> None:
 
 def close_session(
     db: Session, table_session_id: UUID, data: CloseSessionIn, cashier: User,
-    *, invoice_prefix: str = "",
+    *, invoice_prefix: str = "", tenant_id: int | None = None,
 ) -> CloseSessionResponse:
     """Cobra y cierra la sesión de mesa. Solo staff (el comensal anónimo no puede).
 
@@ -239,6 +240,36 @@ def close_session(
         db.rollback()
         logger.exception("Error cerrando la sesión de mesa")
         raise
+
+    # Publica el servicio y no el router porque la cascada necesita los objetos
+    # `Sale` con su factura, que solo existen dentro de esta función. Siempre
+    # después del COMMIT: es un único commit para toda la cascada, así que hasta
+    # aquí nada de esto era definitivo.
+    if tenant_id is not None:
+        for sale in sales:
+            events.payment_completed(
+                tenant_id,
+                sale_id=sale.id,
+                table_session_id=ts.id,
+                total=sale.total,
+                customer_name=getattr(sale, "customer_name", None),
+                billing_mode=data.billing_mode.value,
+                invoice=(
+                    {"prefix": sale.invoice.prefix, "number": sale.invoice.number}
+                    if getattr(sale, "invoice", None) else None
+                ),
+            )
+        events.session_closed(
+            tenant_id,
+            table_session_id=ts.id,
+            dining_table_id=ts.dining_table_id,
+            reason="paid",
+        )
+        if table is not None:
+            events.table_status_changed(
+                tenant_id, dining_table_id=table.id, table_number=table.number,
+                status="libre",
+            )
 
     return CloseSessionResponse(
         table_session=TableSessionResponse.model_validate(_load(db, table_session_id)),

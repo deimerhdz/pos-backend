@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.redis import token_blocklist
+from app.core.event_bus import event_bus
 from app.core.scheduler import start_scheduler
 from app.core.db import initialize_database
 from app.api.v1.admin.router import router as admin_router
@@ -31,6 +32,7 @@ from app.api.v1.reports.router import router as reports_router
 from app.api.v1.promotions.router import router as promotions_router
 from app.api.v1.business_hours.router import router as business_hours_router
 from app.api.v1.audit.router import router as audit_router
+from app.api.v1.realtime.router import router as realtime_router
 load_dotenv()
 
 logging.basicConfig(
@@ -49,6 +51,10 @@ async def lifespan(app: FastAPI):
         initialize_database()  # mejor aquí
         await token_blocklist.ping()
         print("✅ Redis conectado correctamente")
+        # Bus de tiempo real: abre su propia conexión Redis (un XREAD BLOCK
+        # monopoliza la suya, y el pool del blocklist se usa en cada request).
+        await event_bus.start()
+        print("✅ Bus de eventos listo")
         # Cierra las sesiones de mesa abandonadas; sin esto una mesa que nadie
         # cobra queda 'ocupada' para siempre (el TTL del comensal es perezoso).
         scheduler = start_scheduler()
@@ -65,6 +71,11 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print("❌ Error deteniendo el scheduler:", e)
     try:
+        # Antes que el blocklist: corta los lectores y suelta sus conexiones.
+        await event_bus.aclose()
+    except Exception as e:
+        print("❌ Error cerrando el bus de eventos:", e)
+    try:
         await token_blocklist.close()
         print("🔌 Redis cerrado")
     except Exception as e:
@@ -79,6 +90,10 @@ def create_app()->FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Con `allow_credentials=True` el comodín no vale aquí: hay que listar cada
+        # cabecera que el JS del navegador pueda leer. `ETag` es la de la
+        # revalidación condicional; `Retry-After` la que acompaña a los 429.
+        expose_headers=["ETag", "Retry-After"],
     )
 
     initialize_database()
@@ -106,6 +121,7 @@ def create_app()->FastAPI:
     app.include_router(promotions_router, prefix="/api/v1")
     app.include_router(business_hours_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
+    app.include_router(realtime_router, prefix="/api/v1")
     return app
 
 app = create_app()
