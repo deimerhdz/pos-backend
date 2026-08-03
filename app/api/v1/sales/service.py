@@ -2,16 +2,18 @@
 la liga al turno de caja y descuenta inventario (receta + opciones). Dueño de la
 transacción."""
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import cast, func, select, String
+from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql import Select
 
 from app.core.crud import get_or_404
 from app.core.models import User
+from app.models.invoice import Invoice
 from app.models.product_variant import ProductVariant
 from app.models.product import Product
 from app.models.option import Option
@@ -110,3 +112,36 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
         raise
 
     return db.execute(select(Sale).where(Sale.id == sale.id)).scalar_one()
+
+
+def list_sales_query(
+    status: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    invoice_reference: str | None = None,
+) -> Select:
+    """Construye el `Select` de ventas para el listado paginado (GET /sales)."""
+    stmt = (
+        select(Sale)
+        .options(
+            selectinload(Sale.items),
+            selectinload(Sale.payments),
+            selectinload(Sale.invoice),
+            selectinload(Sale.dining_table),
+        )
+        .order_by(Sale.sold_at.desc())
+    )
+    if status:
+        stmt = stmt.where(Sale.status == status)
+    if date_from:
+        stmt = stmt.where(Sale.sold_at >= date_from)
+    if date_to:
+        stmt = stmt.where(Sale.sold_at < date_to + timedelta(days=1))
+    if invoice_reference:
+        # No hay columna "referencia": se reconstruye prefix + número (6 dígitos)
+        # tal como se imprime en el ticket (ver Invoice.full_number).
+        full_number = func.concat(Invoice.prefix, func.lpad(cast(Invoice.number, String), 6, "0"))
+        stmt = stmt.join(Invoice, Invoice.sale_id == Sale.id).where(
+            full_number.ilike(f"%{invoice_reference.strip()}%")
+        )
+    return stmt
