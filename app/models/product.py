@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Optional, List
 if TYPE_CHECKING:
     from .category import Category
     from .product_variant import ProductVariant
-    from .product_option_group import ProductOptionGroup
 
 
 class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -39,11 +38,9 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Boolean, nullable=False, default=True, server_default="true"
     )
 
+    # Los grupos de opciones cuelgan de la VARIANTE (`variant_option_groups`), no de
+    # aquí: cuántos sabores se eligen y cuánto descuenta cada uno cambian con el tamaño.
     variants: Mapped[List["ProductVariant"]] = relationship(
-        back_populates="product", cascade="all, delete-orphan"
-    )
-
-    option_groups: Mapped[List["ProductOptionGroup"]] = relationship(
         back_populates="product", cascade="all, delete-orphan"
     )
 

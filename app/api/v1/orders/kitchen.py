@@ -123,7 +123,9 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {repl_variant.id}"
             )
-        repl_options = load_valid_options(db, data.replacement.option_ids)
+        repl_options = load_valid_options(
+            db, data.replacement.option_ids, variant=repl_variant
+        )
 
     try:
         item.estado_cocina = "anulado"

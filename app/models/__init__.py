@@ -6,7 +6,7 @@ from .product import Product
 from .product_variant import ProductVariant
 from .option_group import OptionGroup
 from .option import Option
-from .product_option_group import ProductOptionGroup
+from .variant_option_group import VariantOptionGroup
 from .recipe_item import RecipeItem
 
 # Inventario (stock único, sin lotes)

@@ -20,6 +20,7 @@ from app.models.option import Option
 from app.models.cash_shift import CashShift
 from app.models.payment import Payment, PaymentMethod
 from app.models.sale import Sale, SaleItem
+from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.sales.consumption import deduct_sale
 from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
 from app.api.v1.sales.schemas import SaleCreate
@@ -48,16 +49,19 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
             product = db.get(Product, variant.product_id)
             description = f"{product.name} - {variant.name}" if product else variant.name
 
-            unit_price = Decimal(variant.price)
-            options_snapshot: list[dict] = []
-            for opt_id in line.option_ids:
-                option = get_or_404(db, Option, opt_id, f"Option {opt_id} not found")
-                unit_price += Decimal(option.extra_price)
-                options_snapshot.append({
+            # Deduplica, exige que estén activas y valida la selección contra los
+            # grupos del producto. Antes este bucle cargaba las opciones a mano y se
+            # saltaba las tres cosas.
+            options = load_valid_options(db, line.option_ids, variant=variant)
+            unit_price = compute_line_price(variant, options)
+            options_snapshot: list[dict] = [
+                {
                     "option_id": str(option.id),
                     "name": option.name,
                     "extra_price": str(option.extra_price),
-                })
+                }
+                for option in options
+            ]
 
             lines.append(SaleLine(
                 product_variant_id=variant.id,

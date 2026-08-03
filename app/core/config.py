@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # Cada cuánto corre ese barrido.
     SESSION_SWEEP_INTERVAL_MINUTES:int = Field(default=15,env="SESSION_SWEEP_INTERVAL_MINUTES")
 
+    # Rechazar con 422 las selecciones de opciones que violen min/max_select o que
+    # usen un grupo no asignado al producto. Arranca en False porque el catálogo
+    # histórico nunca se validó (correr `python -m app.scripts.opciones_fuera_de_grupo`
+    # antes de activarlo); mientras está en False solo se loguea un WARNING.
+    #
+    # **Los grupos que la variante consume por slot de receta se validan siempre**,
+    # aun con el flag apagado: ahí la cardinalidad decide cuánto inventario se
+    # descuenta, así que tolerarla descuadra el stock.
+    STRICT_OPTION_SELECTION:bool = Field(default=False,env="STRICT_OPTION_SELECTION")
+
     # Rate limiting de las rutas públicas del QR (ventana deslizante en Redis).
     RATE_LIMIT_ENABLED:bool = Field(default=True,env="RATE_LIMIT_ENABLED")
     # Peticiones permitidas por IP y por mesa dentro de la ventana.

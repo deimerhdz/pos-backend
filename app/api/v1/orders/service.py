@@ -24,6 +24,7 @@ from app.models.session_participant import SessionParticipant
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
+from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.orders.consolidation import get_or_create_table_session_id
 from app.api.v1.orders.consumption import deduct_order_items
 from app.api.v1.orders.schemas import OrderCreate
@@ -74,7 +75,11 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             if not variant.active:
                 raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
 
-            unit_price = Decimal(variant.price)
+            # Deduplica, exige que estén activas y valida la selección contra los
+            # grupos del producto. Antes este bucle cargaba las opciones a mano y se
+            # saltaba las tres cosas.
+            options = load_valid_options(db, line.option_ids, variant=variant)
+
             item = OrderItem(
                 order_id=order.id,
                 participant_id=data.participant_id,
@@ -85,17 +90,11 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             db.add(item)
             db.flush()
 
-            seen: set[UUID] = set()
-            for opt_id in line.option_ids:
-                if opt_id in seen:
-                    continue
-                option = get_or_404(db, Option, opt_id, f"Option {opt_id} not found")
-                unit_price += Decimal(option.extra_price)
-                db.add(OrderItemOption(order_item_id=item.id, option_id=opt_id))
-                seen.add(opt_id)
+            for option in options:
+                db.add(OrderItemOption(order_item_id=item.id, option_id=option.id))
 
-            item.unit_price = unit_price
-            entries.append((item, [db.get(Option, oid) for oid in seen]))
+            item.unit_price = compute_line_price(variant, options)
+            entries.append((item, options))
 
         # Nace confirmada, así que compromete stock aquí y ahora. Si falta un
         # insumo (o alguna variante no tiene receta) revienta la transacción

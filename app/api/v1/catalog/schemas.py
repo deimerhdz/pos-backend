@@ -1,7 +1,7 @@
 from uuid import UUID
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------- Variantes ----------
@@ -29,8 +29,11 @@ class VariantResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ---------- Receta (BOM) ----------
+# ---------- Receta (BOM): insumos fijos ----------
 class RecipeItemIn(BaseModel):
+    """Un insumo que la variante consume siempre (200 g de fruta). Lo que el cliente
+    elige va en `variant_option_groups`, no aquí."""
+
     inventory_item_id: UUID
     quantity: Decimal = Field(..., gt=0, max_digits=12, decimal_places=3)
 
@@ -43,6 +46,43 @@ class RecipeItemResponse(BaseModel):
     id: UUID
     inventory_item_id: UUID
     quantity: Decimal
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Grupos de opciones por variante ----------
+class VariantOptionGroupIn(BaseModel):
+    """Un grupo que ofrece esta variante: cuántas opciones elige el cliente y cuánto
+    descuenta **cada una** de ellas.
+
+    `quantity_per_option` es por opción elegida, no el total del grupo: dos sabores con
+    120 descuentan 120 de cada uno. En 0 el grupo se ofrece pero no descuenta por sí
+    mismo (el consumo, si lo hay, sale de `options.item_quantity`).
+    """
+
+    option_group_id: UUID
+    min_select: int = Field(0, ge=0)
+    max_select: int = Field(1, ge=1)
+    quantity_per_option: Decimal = Field(0, ge=0, max_digits=12, decimal_places=3)
+
+    @model_validator(mode="after")
+    def _max_ge_min(self) -> "VariantOptionGroupIn":
+        if self.max_select < self.min_select:
+            raise ValueError("max_select no puede ser menor que min_select")
+        return self
+
+
+class VariantOptionGroupSet(BaseModel):
+    groups: list[VariantOptionGroupIn] = Field(default_factory=list)
+
+
+class VariantOptionGroupResponse(BaseModel):
+    id: UUID
+    product_variant_id: UUID
+    option_group_id: UUID
+    min_select: int
+    max_select: int
+    quantity_per_option: Decimal
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -104,18 +144,6 @@ class OptionGroupResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ---------- Asignación grupo<->producto ----------
-class ProductOptionGroupCreate(BaseModel):
-    option_group_id: UUID
-    min_select: int = Field(0, ge=0)
-    max_select: int = Field(1, ge=1)
-
-
-class ProductOptionGroupResponse(BaseModel):
-    id: UUID
-    product_id: UUID
-    option_group_id: UUID
-    min_select: int
-    max_select: int
-
-    model_config = ConfigDict(from_attributes=True)
+# La asignación grupo<->producto desapareció: los grupos cuelgan de la VARIANTE
+# (`VariantOptionGroupIn` arriba), porque cuántas opciones se eligen y cuánto descuenta
+# cada una cambian con el tamaño.

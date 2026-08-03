@@ -8,6 +8,9 @@ class MenuOptionResponse(BaseModel):
     id: UUID
     name: str
     extra_price: Decimal
+    # Hay stock del insumo que consume esta opción. Solo el booleano: el comensal es
+    # anónimo y no debe ver ni los insumos ni las existencias del negocio.
+    available: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -24,6 +27,10 @@ class MenuVariantResponse(BaseModel):
     id: UUID
     name: str
     price: Decimal
+    # Los grupos cuelgan de la presentación: cuántas opciones se eligen cambia con el
+    # tamaño (la ensalada pequeña 1 sabor, la mediana 2). Esta es la fuente autoritativa.
+    option_groups: list[MenuOptionGroupResponse] = Field(default_factory=list)
+    available: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -34,7 +41,14 @@ class MenuProductResponse(BaseModel):
     description: str | None = None
     image_url: str | None = None
     variants: list[MenuVariantResponse] = Field(default_factory=list)
+    # Unión de los grupos de todas las presentaciones. **Solo sirve para resolver
+    # nombres y precios de una opción** (tickets, comandas, carrito): su `min/max_select`
+    # es el de la primera presentación que lo ofrece y no significa nada. Para saber
+    # qué puede elegir el cliente hay que mirar `variants[].option_groups`.
     option_groups: list[MenuOptionGroupResponse] = Field(default_factory=list)
+    # False si ninguna presentación se puede pedir (todas tienen algún grupo
+    # obligatorio sin opciones con stock).
+    available: bool = True
 
 
 class MenuCategoryResponse(BaseModel):
