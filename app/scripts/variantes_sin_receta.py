@@ -23,17 +23,45 @@ def _schemas() -> list[str]:
 
 
 def _sin_receta(schema: str) -> list[dict]:
-    """Variantes activas, de productos activos, que no consumen ningún insumo."""
+    """Variantes activas, de productos activos, que no consumirían ningún insumo.
+
+    Una variante descuenta si tiene insumos fijos en la receta **o** si ofrece un grupo
+    que descuenta — sea porque la presentación define `quantity_per_option`, sea porque
+    alguna opción activa del grupo trae `item_quantity` propio. Mirar solo `recipe_items`
+    marcaría como rotas variantes que sí descuentan por el sabor elegido.
+
+    `min_select = 0` se marca aparte: el grupo descuenta, pero el cliente puede no elegir
+    nada, y entonces la venta no mueve stock (la guarda la rechaza en ese momento).
+    """
     with with_db(schema) as db:
         return [dict(r) for r in db.execute(text(f'''
             SELECT p.name AS producto, pv.name AS variante,
-                   p.preparation_type, pv.price, pv.id
+                   p.preparation_type, pv.price, pv.id,
+                   EXISTS (
+                       SELECT 1 FROM "{schema}".variant_option_groups vog
+                       WHERE vog.product_variant_id = pv.id AND vog.min_select = 0
+                         AND (vog.quantity_per_option > 0 OR EXISTS (
+                             SELECT 1 FROM "{schema}".options o
+                             WHERE o.option_group_id = vog.option_group_id
+                               AND o.active AND o.inventory_item_id IS NOT NULL
+                               AND o.item_quantity > 0))
+                   ) AS opcional
             FROM "{schema}".product_variants pv
             JOIN "{schema}".products p ON p.id = pv.product_id
             WHERE pv.active AND p.active
               AND NOT EXISTS (
                   SELECT 1 FROM "{schema}".recipe_items ri
                   WHERE ri.product_variant_id = pv.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM "{schema}".variant_option_groups vog
+                  WHERE vog.product_variant_id = pv.id
+                    AND vog.min_select > 0
+                    AND (vog.quantity_per_option > 0 OR EXISTS (
+                        SELECT 1 FROM "{schema}".options o
+                        WHERE o.option_group_id = vog.option_group_id
+                          AND o.active AND o.inventory_item_id IS NOT NULL
+                          AND o.item_quantity > 0))
               )
             ORDER BY p.name, pv.name
         ''')).mappings()]
@@ -63,8 +91,9 @@ def main() -> int:
         total += len(filas)
         print(f"\n{schema}: ⚠ {len(filas)} de {activas} variantes activas SIN RECETA")
         for f in filas:
+            nota = "  ← descuenta solo si el cliente elige (grupo opcional)" if f["opcional"] else ""
             print(f"    [{f['preparation_type']:9}] {f['producto']} · {f['variante']}"
-                  f"  (${f['price']})")
+                  f"  (${f['price']}){nota}")
 
     print()
     if total:

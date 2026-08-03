@@ -239,7 +239,7 @@ def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartRespons
     if not variant.active:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
 
-    options = load_valid_options(db, data.option_ids)
+    options = load_valid_options(db, data.option_ids, variant=variant)
 
     # Disponibilidad: consumo del carrito actual + la línea nueva.
     required = _cart_consumption(db, cart)
@@ -277,15 +277,17 @@ def update_item(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Línea de carrito no encontrada")
 
     new_qty = data.quantity if data.quantity is not None else item.quantity
+    variant = get_or_404(db, ProductVariant, item.product_variant_id, "Variant not found")
+
     if data.option_ids is not None:
-        options = load_valid_options(db, data.option_ids)
+        options = load_valid_options(db, data.option_ids, variant=variant)
     else:
+        # Selección ya guardada: no se revalida, o un cambio de min/max en el catálogo
+        # impediría hasta bajar la cantidad de una línea que ya estaba en el carrito.
         opt_ids = [o.option_id for o in item.options]
         options = db.execute(
             select(Option).where(Option.id.in_(opt_ids))
         ).scalars().all() if opt_ids else []
-
-    variant = get_or_404(db, ProductVariant, item.product_variant_id, "Variant not found")
 
     # Disponibilidad: resto del carrito (sin esta línea) + la línea editada.
     required = _cart_consumption(db, cart, exclude_item_id=item_id)

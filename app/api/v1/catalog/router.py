@@ -14,7 +14,7 @@ from app.models.recipe_item import RecipeItem
 from app.models.inventory_item import InventoryItem
 from app.models.option_group import OptionGroup
 from app.models.option import Option
-from app.models.product_option_group import ProductOptionGroup
+from app.models.variant_option_group import VariantOptionGroup
 from app.api.v1.catalog.service import ensure_default_variant, _unique_sku, _slug
 from app.api.v1.catalog.schemas import (
     VariantCreate,
@@ -28,8 +28,8 @@ from app.api.v1.catalog.schemas import (
     OptionCreate,
     OptionUpdate,
     OptionResponse,
-    ProductOptionGroupCreate,
-    ProductOptionGroupResponse,
+    VariantOptionGroupSet,
+    VariantOptionGroupResponse,
 )
 
 router = APIRouter(tags=["catalog"])
@@ -151,28 +151,135 @@ def set_recipe(
     _: User = Depends(require_tenant_admin),
 ):
     get_or_404(db, ProductVariant, variant_id, "Variant not found")
+
     # Reemplazo total (idempotente).
     db.execute(
         RecipeItem.__table__.delete().where(RecipeItem.product_variant_id == variant_id)
     )
-    seen: set[UUID] = set()
+    vistos: set[UUID] = set()
     for it in body.items:
-        if it.inventory_item_id in seen:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Insumo repetido en la receta")
+        if it.inventory_item_id in vistos:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, "Insumo repetido en la receta"
+            )
         get_or_404(db, InventoryItem, it.inventory_item_id, "Inventory item not found")
+        vistos.add(it.inventory_item_id)
         db.add(RecipeItem(
             product_variant_id=variant_id,
             inventory_item_id=it.inventory_item_id,
             quantity=it.quantity,
         ))
-        seen.add(it.inventory_item_id)
     db.commit()
     return db.execute(
         select(RecipeItem).where(RecipeItem.product_variant_id == variant_id)
     ).scalars().all()
 
 
+# ================= Grupos de opciones de una variante =================
+@router.get(
+    "/variants/{variant_id}/option-groups",
+    response_model=list[VariantOptionGroupResponse],
+    summary="Grupos de opciones que ofrece una variante",
+)
+def get_variant_option_groups(
+    variant_id: UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    get_or_404(db, ProductVariant, variant_id, "Variant not found")
+    return db.execute(
+        select(VariantOptionGroup).where(
+            VariantOptionGroup.product_variant_id == variant_id
+        )
+    ).scalars().all()
+
+
+@router.put(
+    "/variants/{variant_id}/option-groups",
+    response_model=list[VariantOptionGroupResponse],
+    summary="Definir/reemplazar los grupos de opciones de una variante",
+)
+def set_variant_option_groups(
+    variant_id: UUID,
+    body: VariantOptionGroupSet,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_tenant_admin),
+):
+    """Reemplazo total e idempotente, igual que la receta.
+
+    Cada fila dice «esta presentación ofrece este grupo: elige N–M, descuenta X de cada
+    opción elegida». Es lo que permite que la ensalada pequeña elija 1 sabor de 60 g y
+    la mediana 2 de 120 g sin duplicar el grupo ni el producto.
+    """
+    get_or_404(db, ProductVariant, variant_id, "Variant not found")
+
+    db.execute(
+        VariantOptionGroup.__table__.delete().where(
+            VariantOptionGroup.product_variant_id == variant_id
+        )
+    )
+    vistos: set[UUID] = set()
+    for g in body.groups:
+        if g.option_group_id in vistos:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Grupo de opciones repetido en esta presentación",
+            )
+        group = get_or_404(db, OptionGroup, g.option_group_id, "Option group not found")
+        if not group.active:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"El grupo «{group.name}» está inactivo",
+            )
+        vistos.add(g.option_group_id)
+        db.add(VariantOptionGroup(
+            product_variant_id=variant_id,
+            option_group_id=g.option_group_id,
+            min_select=g.min_select,
+            max_select=g.max_select,
+            quantity_per_option=g.quantity_per_option,
+        ))
+    db.commit()
+    return db.execute(
+        select(VariantOptionGroup).where(
+            VariantOptionGroup.product_variant_id == variant_id
+        )
+    ).scalars().all()
+
+
 # ============================ Grupos de opciones ============================
+def _variantes_que_lo_usan(db: Session, group_id: UUID) -> list[str]:
+    """Variantes que ofrecen este grupo, como 'Producto · Variante'.
+
+    Retirarlo las dejaría ofreciendo algo que el cliente ya no puede elegir, o —peor—
+    vendiendo sin descontar. Se bloquea en vez de borrar en cascada, que es exactamente
+    el tipo de fallo silencioso que costó caro antes."""
+    stmt = (
+        select(Product.name, ProductVariant.name)
+        .join(ProductVariant, ProductVariant.product_id == Product.id)
+        .join(VariantOptionGroup, VariantOptionGroup.product_variant_id == ProductVariant.id)
+        .where(VariantOptionGroup.option_group_id == group_id)
+    )
+    return [f"{p} · {v}" for p, v in db.execute(stmt).all()]
+
+
+def _bloquear_si_esta_en_uso(db: Session, group_id: UUID, accion: str) -> None:
+    variantes = _variantes_que_lo_usan(db, group_id)
+    if not variantes:
+        return
+    nombres = ", ".join(f"«{v}»" for v in dict.fromkeys(variantes))
+    raise HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail={
+            "error": (
+                f"No se puede {accion}: {nombres} lo ofrece a sus clientes. "
+                "Quítalo de esas presentaciones primero."
+            ),
+            "variantes_en_uso": list(dict.fromkeys(variantes)),
+        },
+    )
+
+
 @router.get(
     "/option-groups",
     response_model=list[OptionGroupResponse],
@@ -235,6 +342,8 @@ def update_option_group(
     group.min_select = min_select
     group.max_select = max_select
     if body.active is not None:
+        if not body.active and group.active:
+            _bloquear_si_esta_en_uso(db, group_id, "desactivar este grupo")
         group.active = body.active
     db.commit()
     db.refresh(group)
@@ -252,6 +361,7 @@ def delete_option_group(
     _: User = Depends(require_tenant_admin),
 ):
     group = get_or_404(db, OptionGroup, group_id, "Option group not found")
+    _bloquear_si_esta_en_uso(db, group_id, "desactivar este grupo")
     group.active = False
     db.commit()
     db.refresh(group)
@@ -350,61 +460,7 @@ def delete_option(
     return option
 
 
-# ============================ Asignación grupo<->producto ============================
-@router.post(
-    "/products/{product_id}/option-groups",
-    response_model=ProductOptionGroupResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Asignar un grupo de opciones a un producto",
-)
-def assign_option_group(
-    product_id: UUID,
-    body: ProductOptionGroupCreate,
-    db: Session = Depends(get_db),
-    _: User = Depends(require_tenant_admin),
-):
-    get_or_404(db, Product, product_id, "Product not found")
-    group = get_or_404(db, OptionGroup, body.option_group_id, "Option group not found")
-    if not group.active:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Option group is inactive")
-    dup = db.execute(
-        select(ProductOptionGroup).where(
-            ProductOptionGroup.product_id == product_id,
-            ProductOptionGroup.option_group_id == body.option_group_id,
-        )
-    ).scalar_one_or_none()
-    if dup is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Option group already assigned")
-    link = ProductOptionGroup(
-        product_id=product_id,
-        option_group_id=body.option_group_id,
-        min_select=body.min_select,
-        max_select=body.max_select,
-    )
-    db.add(link)
-    db.commit()
-    db.refresh(link)
-    return link
-
-
-@router.delete(
-    "/products/{product_id}/option-groups/{option_group_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Quitar un grupo de opciones de un producto",
-)
-def unassign_option_group(
-    product_id: UUID,
-    option_group_id: UUID,
-    db: Session = Depends(get_db),
-    _: User = Depends(require_tenant_admin),
-):
-    link = db.execute(
-        select(ProductOptionGroup).where(
-            ProductOptionGroup.product_id == product_id,
-            ProductOptionGroup.option_group_id == option_group_id,
-        )
-    ).scalar_one_or_none()
-    if link is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Option group not assigned to product")
-    db.delete(link)
-    db.commit()
+# La asignación grupo<->producto se retiró: los grupos cuelgan de la VARIANTE, vía
+# `GET`/`PUT /variants/{id}/option-groups` (más arriba). Un solo `PUT` idempotente por
+# presentación sustituye al par assign/unassign, y con él desaparece el orden obligado
+# que tenía que respetar el editor al guardar.
