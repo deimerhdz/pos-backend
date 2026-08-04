@@ -7,6 +7,7 @@ venta con todo lo consumido; `split` emite una venta por comensal, agrupando por
 es exacto aunque un pedido mezcle comensales.
 """
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -25,6 +26,7 @@ from app.models.session_participant import SessionParticipant
 from app.models.table_session import TableSession
 from app.api.v1.orders import checkout
 from app.api.v1.sales.builder import build_sale, ensure_open_shift
+from app.api.v1.promotions import service as promotions
 from app.api.v1.table_sessions.schemas import (
     BillingMode, CloseSessionIn, CloseSessionResponse,
     SessionBillLine, SessionBillResponse, TableSessionResponse,
@@ -129,34 +131,47 @@ def _billable_orders(db: Session, table_session_id: UUID) -> list[CustomerOrder]
 
 
 def compute_bill(db: Session, table_session_id: UUID) -> SessionBillResponse:
+    """Cuenta de la sesión, ya con descuentos automáticos (promociones/combos)
+    aplicados — mismo cálculo por comensal que usa `_close_split` al cobrar, para
+    que este preview coincida con lo que realmente se cobrará."""
     ts = _load(db, table_session_id)
     orders = _billable_orders(db, ts.id)
 
     labels = {p.id: (p.display_label or p.display_name) for p in ts.participants}
 
-    total = Decimal("0")
-    split: dict[UUID | None, Decimal] = {}
+    participant_ids: list[UUID | None] = []
+    seen: set[UUID | None] = set()
     for order in orders:
         for it in order.items:
-            if it.estado_cocina == "anulado":
+            if it.estado_cocina == "anulado" or it.participant_id in seen:
                 continue
-            line_total = Decimal(it.unit_price) * it.quantity
-            total += line_total
-            split[it.participant_id] = split.get(it.participant_id, Decimal("0")) + line_total
+            seen.add(it.participant_id)
+            participant_ids.append(it.participant_id)
+
+    now = datetime.now(timezone.utc)
+    total = Decimal("0")
+    split: list[SessionBillLine] = []
+    for pid in participant_ids:
+        lines = []
+        for order in orders:
+            lines.extend(checkout.order_sale_lines(db, order.id, participant_id=pid))
+        raw_subtotal = sum((line.line_total for line in lines), Decimal("0"))
+        promo_discount, _ = promotions.evaluate(db, checkout.promo_lines_for(db, lines), now)
+        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
+        subtotal = raw_subtotal - promo_discount - combo_discount
+        total += subtotal
+        split.append(SessionBillLine(
+            participant_id=pid,
+            display_label=labels.get(pid) if pid else None,
+            subtotal=subtotal,
+        ))
 
     return SessionBillResponse(
         table_session_id=ts.id,
         dining_table_id=ts.dining_table_id,
         total=total,
         order_ids=[o.id for o in orders],
-        split=[
-            SessionBillLine(
-                participant_id=pid,
-                display_label=labels.get(pid) if pid else None,
-                subtotal=monto,
-            )
-            for pid, monto in split.items()
-        ],
+        split=split,
     )
 
 
@@ -327,18 +342,26 @@ def _close_unified(
     for order in orders:
         lines.extend(checkout.order_sale_lines(db, order.id))
 
+    now = datetime.now(timezone.utc)
+    promo_discount, promo_id = promotions.evaluate(db, checkout.promo_lines_for(db, lines), now)
+    combo_discount = promotions.combo_discount_for_lines(db, lines, now)
+    combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
+    final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+
     return build_sale(
         db,
         lines=lines,
         shift=shift,
         cashier=cashier,
         payments=data.payments,
-        discount=data.discount, tax=data.tax, tip=data.tip,
+        discount=Decimal(data.discount) + promo_discount + combo_discount,
+        tax=data.tax, tip=data.tip,
         customer_name=_nombre_cuenta(db, ts, orders, data),
         dining_table_id=ts.dining_table_id,
         table_session_id=ts.id,
         # Una venta unificada cubre a varios comensales: no cuelga de ninguno.
         customer_order_id=orders[0].id if len(orders) == 1 else None,
+        promotion_id=final_promotion_id,
         invoice_prefix=invoice_prefix,
     )
 
@@ -378,6 +401,7 @@ def _close_split(
 
     labels = {p.id: (p.display_label or p.display_name) for p in ts.participants}
 
+    now = datetime.now(timezone.utc)
     sales: list[Sale] = []
     for bloque in data.splits:
         lines = []
@@ -385,17 +409,27 @@ def _close_split(
             lines.extend(checkout.order_sale_lines(
                 db, order.id, participant_id=bloque.participant_id
             ))
+
+        # Cada comensal evalúa promociones/combos sobre sus propias líneas: un
+        # combo agregado por un comensal no se mezcla con las de otro.
+        promo_discount, promo_id = promotions.evaluate(db, checkout.promo_lines_for(db, lines), now)
+        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
+        combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
+        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+
         sales.append(build_sale(
             db,
             lines=lines,
             shift=shift,
             cashier=cashier,
             payments=bloque.payments,
-            discount=bloque.discount, tax=bloque.tax, tip=bloque.tip,
+            discount=Decimal(bloque.discount) + promo_discount + combo_discount,
+            tax=bloque.tax, tip=bloque.tip,
             customer_name=labels.get(bloque.participant_id),
             dining_table_id=ts.dining_table_id,
             table_session_id=ts.id,
             participant_id=bloque.participant_id,
+            promotion_id=final_promotion_id,
             invoice_prefix=invoice_prefix,
         ))
     return sales

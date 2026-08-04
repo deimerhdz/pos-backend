@@ -2,7 +2,7 @@ from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------- Apertura de sesión (por QR token) ----------
@@ -38,10 +38,19 @@ class SessionOpenResponse(BaseModel):
 
 # ---------- Ítems de carrito ----------
 class CartItemIn(BaseModel):
-    product_variant_id: UUID
+    product_variant_id: UUID | None = None
+    combo_id: UUID | None = None
     quantity: int = Field(1, ge=1)
     option_ids: list[UUID] = Field(default_factory=list)
     notes: str | None = Field(None, max_length=500)
+
+    @model_validator(mode="after")
+    def _one_of(self):
+        if (self.product_variant_id is None) == (self.combo_id is None):
+            raise ValueError("Cada ítem requiere product_variant_id o combo_id (no ambos)")
+        if self.combo_id is not None and self.option_ids:
+            raise ValueError("Los combos no admiten option_ids en esta versión")
+        return self
 
 
 class CartItemUpdate(BaseModel):
@@ -64,6 +73,7 @@ class CartItemResponse(BaseModel):
     unit_price: Decimal
     line_total: Decimal
     notes: str | None = None
+    combo_id: UUID | None = None
     options: list[CartItemOptionResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

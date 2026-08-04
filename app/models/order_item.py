@@ -34,6 +34,13 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
         Numeric(12, 2), nullable=False, default=0, server_default="0"
     )
 
+    # Promoción de combo que generó esta línea (selección explícita, copiada
+    # tal cual desde el cart_item). Varias líneas comparten el mismo combo_id:
+    # son los componentes de un mismo combo.
+    combo_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("promotions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     # Ciclo de cocina (KDS), independiente del status de pago de la orden.
     # La fuente de verdad de las transiciones pendiente→...→entregado es el KDS
     # (Fase 6). 'anulado' se excluye de la validación de bloqueo de cobro.

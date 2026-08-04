@@ -38,7 +38,7 @@ from .sale import Sale, SaleItem
 from .payment import PaymentMethod, Payment
 
 # Promociones
-from .promotion import Promotion, PromotionTarget
+from .promotion import Promotion, PromotionTarget, PromotionComboItem
 
 # Administración (horarios, auditoría)
 from .business_hours import BusinessHours

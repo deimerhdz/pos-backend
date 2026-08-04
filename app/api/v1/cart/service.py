@@ -34,6 +34,7 @@ from app.api.v1.catalog.line_pricing import (
     required_consumption,
 )
 from app.api.v1.orders.schemas import CancelIn
+from app.api.v1.promotions import service as promotions
 from app.api.v1.cart.schemas import (
     CartItemIn,
     CartItemUpdate,
@@ -212,6 +213,7 @@ def serialize_cart(cart: Cart, participant: SessionParticipant) -> CartResponse:
             unit_price=it.unit_price,
             line_total=line_total,
             notes=it.notes,
+            combo_id=it.combo_id,
             options=[CartItemOptionResponse.model_validate(o) for o in it.options],
         ))
     return CartResponse(
@@ -234,6 +236,9 @@ def get_cart(db: Session, participant_id: UUID) -> CartResponse:
 
 def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartResponse:
     cart = _get_or_create_open_cart(db, participant_id)
+
+    if data.combo_id is not None:
+        return _add_combo(db, participant_id, cart, data)
 
     variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
     if not variant.active:
@@ -263,6 +268,42 @@ def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartRespons
     except Exception:
         db.rollback()
         logger.exception("Error agregando ítem al carrito")
+        raise
+
+    return get_cart(db, participant_id)
+
+
+def _add_combo(db: Session, participant_id: UUID, cart: Cart, data: CartItemIn) -> CartResponse:
+    """Selección explícita de un combo: se expande en una `CartItem` normal por
+    cada componente (precio normal, sin opciones); el ahorro se calcula recién
+    al cobrar (`combo_discount_for_lines`), igual que con el resto de promociones."""
+    components = promotions.expand_combo(
+        db, data.combo_id, data.quantity, datetime.now(timezone.utc)
+    )
+
+    required = _cart_consumption(db, cart)
+    for component in components:
+        for iid, need in required_consumption(
+            db, component.product_variant_id, component.quantity, []
+        ).items():
+            required[iid] += need
+    check_availability(db, required, extra_context="carrito")
+
+    try:
+        for component in components:
+            item = CartItem(
+                cart_id=cart.id,
+                product_variant_id=component.product_variant_id,
+                quantity=component.quantity,
+                unit_price=component.unit_price,
+                notes=data.notes,
+                combo_id=data.combo_id,
+            )
+            db.add(item)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error agregando combo al carrito")
         raise
 
     return get_cart(db, participant_id)
@@ -426,6 +467,7 @@ def submit_cart(db: Session, participant: SessionParticipant) -> CustomerOrder:
                 quantity=ci.quantity,
                 unit_price=ci.unit_price,  # snapshot copiado del carrito
                 notes=ci.notes,
+                combo_id=ci.combo_id,
                 estado_cocina="pendiente",
             )
             db.add(item)

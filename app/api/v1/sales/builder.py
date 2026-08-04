@@ -35,7 +35,7 @@ class SaleLine:
     de un sitio distinto."""
 
     __slots__ = ("product_variant_id", "description", "options", "quantity",
-                 "unit_price", "line_total")
+                 "unit_price", "line_total", "combo_id")
 
     def __init__(
         self,
@@ -45,6 +45,7 @@ class SaleLine:
         options: list[dict],
         quantity: int,
         unit_price: Decimal,
+        combo_id: UUID | None = None,
     ) -> None:
         self.product_variant_id = product_variant_id
         self.description = description
@@ -52,6 +53,8 @@ class SaleLine:
         self.quantity = quantity
         self.unit_price = Decimal(unit_price)
         self.line_total = self.unit_price * Decimal(quantity)
+        # Combo (selección explícita) al que pertenece esta línea, si aplica.
+        self.combo_id = combo_id
 
 
 def ensure_open_shift(db: Session, cash_shift_id: UUID) -> CashShift:
@@ -123,6 +126,7 @@ def build_sale(
             quantity=line.quantity,
             unit_price=line.unit_price,
             line_total=line.line_total,
+            combo_id=line.combo_id,
         ))
 
     total = subtotal - Decimal(discount) + Decimal(tax) + Decimal(tip)

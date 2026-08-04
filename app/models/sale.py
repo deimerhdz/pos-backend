@@ -123,6 +123,12 @@ class SaleItem(UUIDPrimaryKeyMixin, Base):
 
     line_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
 
+    # Promoción de combo que generó esta línea (selección explícita). Varias
+    # líneas comparten el mismo combo_id: son los componentes de un mismo combo.
+    combo_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("promotions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_sale_item_quantity_positive"),
         {"schema": "tenant"},

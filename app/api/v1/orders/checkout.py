@@ -35,6 +35,7 @@ from app.api.v1.orders.schemas import (
     BlockIn, CancelIn, PayIn,
     BillResponse, BillOrderLine, BillItemLine, BillSessionLine,
 )
+from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
 
@@ -224,8 +225,28 @@ def order_sale_lines(
             ],
             quantity=it.quantity,
             unit_price=Decimal(it.unit_price),
+            combo_id=it.combo_id,
         ))
     return lines
+
+
+def promo_lines_for(db: Session, lines: list[SaleLine]) -> list[dict]:
+    """`promo_lines` (product_id/category_id/quantity/line_total) para las
+    líneas que NO vienen de un combo — las de combo ya tienen su propio ahorro
+    vía `combo_discount_for_lines` y no se acumulan con percent/fixed."""
+    promo_lines: list[dict] = []
+    for line in lines:
+        if line.combo_id is not None:
+            continue
+        variant = db.get(ProductVariant, line.product_variant_id)
+        product = db.get(Product, variant.product_id) if variant else None
+        promo_lines.append({
+            "product_id": variant.product_id if variant else None,
+            "category_id": product.category_id if product else None,
+            "quantity": line.quantity,
+            "line_total": line.line_total,
+        })
+    return promo_lines
 
 
 def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
@@ -238,18 +259,31 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
     shift = ensure_open_shift(db, data.cash_shift_id)
 
     try:
+        now = datetime.now(timezone.utc)
+        lines = order_sale_lines(db, order.id)
+
+        # Descuento automático (RF-012): percent/fixed sobre las líneas sin
+        # combo, más el ahorro de los combos presentes. Antes esta orden no
+        # aplicaba ninguna promoción; ahora usa el mismo motor que mostrador.
+        promo_discount, promo_id = promotions.evaluate(db, promo_lines_for(db, lines), now)
+        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
+        combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
+        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+
         sale = build_sale(
             db,
-            lines=order_sale_lines(db, order.id),
+            lines=lines,
             shift=shift,
             cashier=cashier,
             payments=data.payments,
-            discount=data.discount, tax=data.tax, tip=data.tip,
+            discount=Decimal(data.discount) + promo_discount + combo_discount,
+            tax=data.tax, tip=data.tip,
             customer_name=order.customer_name,
             dining_table_id=order.dining_table_id,
             table_session_id=order.table_session_id,
             participant_id=order.participant_id,
             customer_order_id=order.id,
+            promotion_id=final_promotion_id,
         )
         order.status = "pagada"
         # NO se descuenta inventario aquí: ya se hizo al confirmar el pedido.

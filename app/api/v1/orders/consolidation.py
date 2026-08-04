@@ -6,6 +6,7 @@ Es la vía del mesero, alternativa a que el comensal envíe su propio pedido des
 el QR (`POST /cart/submit` → `POST /orders/{id}/confirm`). A diferencia de esa,
 aquí la línea nace ya confirmada: el staff la mete y el stock se descuenta."""
 import logging
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -25,6 +26,7 @@ from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
 from app.api.v1.orders.consumption import deduct_order_items
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
+from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
 
@@ -176,34 +178,49 @@ def _reload_order(db: Session, order_id: UUID) -> CustomerOrder:
 
 
 def add_item_to_table(db: Session, table_id: UUID, data, user: User) -> CustomerOrder:
-    """Inserta un solo order_item en la orden de la mesa (add directo del mesero,
-    Fase 5). Aplica la regla de routing (orden abierta o crea orden-hija) y el
-    mismo descuento de inventario por ítem que la consolidación."""
+    """Inserta uno o varios order_items en la orden de la mesa (add directo del
+    mesero, Fase 5). Aplica la regla de routing (orden abierta o crea orden-hija)
+    y el mismo descuento de inventario por ítem que la consolidación.
+
+    Un `combo_id` se expande en sus componentes reales a precio normal (igual
+    que `cart/service.py::_add_combo`); el ahorro del combo no se calcula aquí,
+    se realiza al cobrar (`pay_order`/`close_session`)."""
     table = get_or_404(db, DiningTable, table_id, "Table not found")
 
-    variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
-    if not variant.active:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
-    options = load_valid_options(db, data.option_ids, variant=variant)
+    if data.combo_id is not None:
+        components = promotions.expand_combo(
+            db, data.combo_id, data.quantity, datetime.now(timezone.utc)
+        )
+        lines = [(c.product_variant_id, c.quantity, [], c.unit_price, data.combo_id) for c in components]
+    else:
+        variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
+        if not variant.active:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
+        options = load_valid_options(db, data.option_ids)
+        lines = [(variant.id, data.quantity, options, compute_line_price(variant, options), None)]
 
     try:
         order = get_or_create_open_order(db, table.id, user.id)
 
-        item = OrderItem(
-            order_id=order.id,
-            participant_id=None,  # ítem agregado por el mesero, sin comensal asignado
-            product_variant_id=variant.id,
-            quantity=data.quantity,
-            unit_price=compute_line_price(variant, options),
-            notes=data.notes,
-            estado_cocina="pendiente",
-        )
-        db.add(item)
-        db.flush()
-        for opt in options:
-            db.add(OrderItemOption(order_item_id=item.id, option_id=opt.id))
+        entries: list[tuple[OrderItem, list[Option]]] = []
+        for product_variant_id, quantity, options, unit_price, combo_id in lines:
+            item = OrderItem(
+                order_id=order.id,
+                participant_id=None,  # ítem agregado por el mesero, sin comensal asignado
+                product_variant_id=product_variant_id,
+                quantity=quantity,
+                unit_price=unit_price,
+                notes=data.notes,
+                combo_id=combo_id,
+                estado_cocina="pendiente",
+            )
+            db.add(item)
+            db.flush()
+            for opt in options:
+                db.add(OrderItemOption(order_item_id=item.id, option_id=opt.id))
+            entries.append((item, options))
 
-        deduct_order_items(db, [(item, options)], user.id, reference_id=order.id)
+        deduct_order_items(db, entries, user.id, reference_id=order.id)
 
         db.commit()
     except HTTPException:
