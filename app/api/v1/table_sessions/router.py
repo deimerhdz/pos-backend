@@ -15,7 +15,8 @@ from app.core.dependencies import get_current_user
 from app.core.models import Tenant, User
 from app.api.v1.table_sessions import service
 from app.api.v1.table_sessions.schemas import (
-    CloseSessionIn, CloseSessionResponse, SessionBillResponse, TableSessionResponse,
+    AssignmentsIn, CloseSessionIn, CloseSessionResponse, ParticipantCreateIn,
+    ParticipantResponse, SessionBillResponse, TableSessionResponse,
 )
 
 router = APIRouter(prefix="/table-sessions", tags=["table-sessions"])
@@ -45,6 +46,60 @@ def get_session(
     _: User = Depends(get_current_user),
 ):
     return service.get_session(db, table_session_id)
+
+
+# ------------------------------------------- Reparto de la cuenta (staff)
+
+@router.post(
+    "/{table_session_id}/participants",
+    response_model=ParticipantResponse,
+    status_code=201,
+    summary="Agregar un comensal desde el POS (sin QR), para dividir la cuenta",
+)
+def add_participant(
+    table_session_id: UUID,
+    body: ParticipantCreateIn,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+    _: User = Depends(get_current_user),
+):
+    """Para el caso en que una sola persona pidió por todos: el staff crea a los demás
+    y luego les reparte los productos. No emite token: no puede pedir por el QR."""
+    return service.add_participant(db, table_session_id, body.display_name,
+                                   tenant_id=tenant.id)
+
+
+@router.delete(
+    "/{table_session_id}/participants/{participant_id}",
+    status_code=204,
+    summary="Quitar un comensal (solo si no tiene productos asignados)",
+)
+def remove_participant(
+    table_session_id: UUID,
+    participant_id: UUID,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+    _: User = Depends(get_current_user),
+):
+    service.remove_participant(db, table_session_id, participant_id, tenant_id=tenant.id)
+
+
+@router.put(
+    "/{table_session_id}/assignments",
+    response_model=SessionBillResponse,
+    summary="Repartir productos entre comensales (en lote)",
+)
+def set_assignments(
+    table_session_id: UUID,
+    body: AssignmentsIn,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+    _: User = Depends(get_current_user),
+):
+    """Devuelve la cuenta ya recalculada: el POS necesita el desglose nuevo justo
+    después de repartir, y pedirlo aparte abriría una ventana de inconsistencia."""
+    return service.set_assignments(db, table_session_id, body.assignments,
+                                   tenant_id=tenant.id)
 
 
 @router.get(

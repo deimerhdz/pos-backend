@@ -72,7 +72,7 @@ def _get_or_create_table_session(db: Session, table: DiningTable) -> TableSessio
     return ts
 
 
-def _unique_display_label(db: Session, table_session_id: UUID, display_name: str) -> str:
+def unique_display_label(db: Session, table_session_id: UUID, display_name: str) -> str:
     """Etiqueta desambiguada para cocina/staff. `display_name` no es único: si ya
     hay una "Ana" en la mesa, la siguiente se muestra como "Ana (2)"."""
     taken = set(db.execute(
@@ -100,7 +100,7 @@ def open_session(
             table_session_id=table_session.id,
             dining_table_id=table.id,
             display_name=display_name,
-            display_label=_unique_display_label(db, table_session.id, display_name),
+            display_label=unique_display_label(db, table_session.id, display_name),
             status="open",
             expires_at=_now() + timedelta(minutes=settings.SESSION_TTL_MINUTES),
         )
