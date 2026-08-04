@@ -41,6 +41,7 @@ from app.core.redis import token_blocklist as redis
 logger = logging.getLogger(__name__)
 
 _LOCK_KEY = "lock:sweep_table_sessions"
+_PROMO_LOCK_KEY = "lock:expire_promotions"
 
 
 def _abandonadas_sin_pedir(db, now: datetime) -> list:
@@ -206,6 +207,55 @@ def sweep_orphan_sessions() -> int:
     return total
 
 
+def expire_promotions() -> int:
+    """Marca `active=False` en promociones cuyo `ends_at` ya pasó, en todos los
+    tenants. Puramente informativo: `_valid_now()` (usado por `evaluate`,
+    `expand_combo`, etc.) ya compara `ends_at` contra `now` en cada evaluación,
+    así que esto nunca decide si una promoción aplica — solo mantiene el
+    listado de administración sin promociones vencidas marcadas como activas."""
+    from sqlalchemy import update
+    from app.models.promotion import Promotion
+
+    total = 0
+    with with_db(None) as db:
+        schemas = [r[0] for r in db.execute(text("SELECT schema FROM shared.tenants")).fetchall()]
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    for schema in schemas:
+        try:
+            with with_db(schema) as db:
+                # `update()` sobre el modelo (no SQL crudo): el `schema_translate_map`
+                # de `with_db` solo traduce sentencias ORM, no texto plano con nombres
+                # de tabla sin calificar.
+                result = db.execute(
+                    update(Promotion)
+                    .where(Promotion.active.is_(True), Promotion.ends_at.is_not(None), Promotion.ends_at < now)
+                    .values(active=False)
+                )
+                db.commit()
+                total += result.rowcount
+        except Exception:
+            logger.exception("Error expirando promociones del schema %s", schema)
+
+    if total:
+        logger.info("Expiración de promociones: %d promoción(es) marcada(s) inactiva(s)", total)
+    return total
+
+
+async def _run_expire_promotions_with_lock() -> None:
+    """Igual patrón que `_run_with_lock`: un solo worker corre el job por ciclo."""
+    try:
+        got = await redis.set(_PROMO_LOCK_KEY, "1", ex=3600, nx=True)
+    except Exception:
+        logger.warning("Redis no disponible; se omite la expiración de promociones", exc_info=True)
+        return
+    if not got:
+        return  # otro worker lo está haciendo
+
+    import anyio
+    await anyio.to_thread.run_sync(expire_promotions)
+
+
 async def _run_with_lock() -> None:
     """Un solo worker ejecuta el barrido por ciclo. El TTL del lock es la mitad
     del intervalo: si el proceso muere a medias, el siguiente ciclo lo retoma."""
@@ -228,6 +278,7 @@ def start_scheduler():
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.interval import IntervalTrigger
+        from apscheduler.triggers.cron import CronTrigger
     except ImportError:
         logger.warning(
             "APScheduler no está instalado: las sesiones de mesa huérfanas no se "
@@ -244,9 +295,17 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
     )
+    scheduler.add_job(
+        _run_expire_promotions_with_lock,
+        CronTrigger(hour=0, minute=0),
+        id="expire_promotions",
+        replace_existing=True,
+        max_instances=1,
+    )
     scheduler.start()
     logger.info(
         "Barrido de sesiones activo: cada %d min, cierra las de más de %d h",
         settings.SESSION_SWEEP_INTERVAL_MINUTES, settings.TABLE_SESSION_MAX_HOURS,
     )
+    logger.info("Expiración de promociones activa: a medianoche")
     return scheduler

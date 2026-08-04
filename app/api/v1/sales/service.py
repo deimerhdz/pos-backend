@@ -40,10 +40,29 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
     shift = ensure_open_shift(db, data.cash_shift_id)
 
     try:
+        now = datetime.now(timezone.utc)
+
         # 1. Resolver y valorar las líneas (snapshot de precio: variante + opciones).
+        #    Un ítem con combo_id se expande en sus componentes reales a precio
+        #    normal; su ahorro se calcula aparte y no entra a promo_lines (un
+        #    combo y un percent/fixed nunca se acumulan sobre la misma línea).
         lines: list[SaleLine] = []
         promo_lines: list[dict] = []
+        combo_ids_used: set[UUID] = set()
         for line in data.items:
+            if line.combo_id is not None:
+                combo_ids_used.add(line.combo_id)
+                for component in promotions.expand_combo(db, line.combo_id, line.quantity, now):
+                    lines.append(SaleLine(
+                        product_variant_id=component.product_variant_id,
+                        description=component.description,
+                        options=[],
+                        quantity=component.quantity,
+                        unit_price=component.unit_price,
+                        combo_id=line.combo_id,
+                    ))
+                continue
+
             variant = get_or_404(db, ProductVariant, line.product_variant_id, "Variant not found")
             product = db.get(Product, variant.product_id)
             description = f"{product.name} - {variant.name}" if product else variant.name
@@ -73,10 +92,12 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
                 "line_total": unit_price * Decimal(line.quantity),
             })
 
-        # 2. Descuento automático por promociones (RF-012), sumado al manual.
-        promo_discount, promo_id = promotions.evaluate(
-            db, promo_lines, datetime.now(timezone.utc)
-        )
+        # 2. Descuento automático: promociones percent/fixed (RF-012) sobre las
+        #    líneas normales, más el ahorro de los combos seleccionados. Ambos se
+        #    suman al descuento manual que haya escrito el cajero.
+        promo_discount, promo_id = promotions.evaluate(db, promo_lines, now)
+        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
+        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
 
         sale = build_sale(
             db,
@@ -84,13 +105,13 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
             shift=shift,
             cashier=cashier,
             payments=data.payments,
-            discount=Decimal(data.discount) + promo_discount,
+            discount=Decimal(data.discount) + promo_discount + combo_discount,
             tax=data.tax,
             tip=data.tip,
             customer_name=data.customer_name,
             dining_table_id=data.dining_table_id,
             participant_id=data.participant_id,
-            promotion_id=promo_id,
+            promotion_id=final_promotion_id,
             invoice_prefix=invoice_prefix,
         )
 
