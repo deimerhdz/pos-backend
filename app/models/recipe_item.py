@@ -10,8 +10,13 @@ if TYPE_CHECKING:
 
 
 class RecipeItem(UUIDPrimaryKeyMixin, Base):
-    """BOM: insumos que una variante consume al venderse. `quantity` está en la
-    unidad de medida del propio insumo (sin conversión)."""
+    """BOM: los insumos **fijos** que una variante consume al venderse. `quantity` está
+    en la unidad de medida del propio insumo (sin conversión).
+
+    Lo que el cliente elige (sabores) no se modela aquí: vive en
+    `variant_option_groups`, porque además de la cantidad necesita cuántas opciones se
+    pueden elegir, y mezclar ambas cosas en la receta la convertía en medio catálogo.
+    """
 
     __tablename__ = "recipe_items"
 

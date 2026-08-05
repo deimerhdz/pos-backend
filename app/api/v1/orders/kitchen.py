@@ -116,6 +116,12 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
     repl_variant = None
     repl_options: list[Option] = []
     if data.replacement is not None:
+        if data.replacement.combo_id is not None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "No se puede reemplazar un ítem anulado por un combo; "
+                "anula todos sus componentes y agrégalo de nuevo",
+            )
         repl_variant = get_or_404(
             db, ProductVariant, data.replacement.product_variant_id, "Variant not found"
         )
@@ -123,7 +129,9 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {repl_variant.id}"
             )
-        repl_options = load_valid_options(db, data.replacement.option_ids)
+        repl_options = load_valid_options(
+            db, data.replacement.option_ids, variant=repl_variant
+        )
 
     try:
         item.estado_cocina = "anulado"

@@ -1,30 +1,53 @@
 """Helpers de línea compartidos entre carrito (Fase 3) y consolidación (Fase 4):
-snapshot de precio y chequeo preventivo de disponibilidad contra stock único.
+snapshot de precio, validación de la selección de opciones y chequeo preventivo de
+disponibilidad contra stock único.
 
 El precio es un snapshot (variante + extras de opción). La disponibilidad NO
 reserva ni bloquea (a diferencia de `record_movement` en inventory/stock.py, que
 sí bloquea y descuenta en la venta/consolidación); es un chequeo best-effort de
 UX que puede quedar obsoleto para cuando se consolide.
+
+El cálculo de qué consume una línea vive en `consumption_plan.py`; aquí solo se
+reexporta `required_consumption` para no romper los imports existentes.
 """
 from __future__ import annotations
 
 from collections import defaultdict
 from decimal import Decimal
+from typing import Sequence
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.crud import get_or_404
 from app.models.option import Option
+from app.models.option_group import OptionGroup
 from app.models.product_variant import ProductVariant
-from app.models.recipe_item import RecipeItem
 from app.models.inventory_item import InventoryItem
+from app.api.v1.catalog.consumption_plan import (  # noqa: F401  (reexport)
+    ConsumptionLine,
+    load_variant_groups,
+    plan_line_consumption,
+    required_consumption,
+)
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-def load_valid_options(db: Session, option_ids: list[UUID]) -> list[Option]:
-    """Carga las opciones (dedup) validando existencia y que estén activas."""
+def load_valid_options(
+    db: Session, option_ids: list[UUID], *, variant: ProductVariant | None = None
+) -> list[Option]:
+    """Carga las opciones (dedup) validando existencia y que estén activas.
+
+    Pasar `variant` valida además la selección contra los grupos del producto (ver
+    `validate_option_selection`). Es opcional solo por compatibilidad con los pocos
+    llamadores que aún no tienen la variante a mano; **pasarla siempre que se pueda**.
+    """
     seen: set[UUID] = set()
     options: list[Option] = []
     for opt_id in option_ids:
@@ -37,7 +60,82 @@ def load_valid_options(db: Session, option_ids: list[UUID]) -> list[Option]:
                 status.HTTP_422_UNPROCESSABLE_ENTITY, f"Opción inactiva: {opt_id}"
             )
         options.append(option)
+    if variant is not None:
+        validate_option_selection(db, variant, options)
     return options
+
+
+def validate_option_selection(
+    db: Session, variant: ProductVariant, options: Sequence[Option]
+) -> None:
+    """Comprueba que la selección respeta los grupos que ofrece **esta variante** y sus
+    `min_select`/`max_select`.
+
+    Hasta hace poco esto no se validaba en ningún camino de pedido (solo el frontend), y
+    era un fallo de UX tolerable. **Con consumo por opción deja de serlo**: lo que se
+    descuenta es `nº de opciones elegidas × quantity_per_option`, así que aceptar cinco
+    opciones en un grupo `max_select=1` descuenta cinco veces el helado.
+
+    Por eso el rodaje es asimétrico: `STRICT_OPTION_SELECTION` gobierna el resto del
+    catálogo, pero **los grupos que descuentan se validan siempre**. Ahí no es
+    cosmético, es inventario.
+
+    Todo sale de la misma tabla y del mismo nivel (la variante). Antes los bounds venían
+    del producto y el consumo de la variante, así que un tamaño podía exigir un número
+    de sabores pensado para otro.
+    """
+    links = load_variant_groups(db, variant.id)
+    bounds = {l.option_group_id: (l.min_select, l.max_select) for l in links}
+    consumen = {l.option_group_id for l in links if l.quantity_per_option > 0}
+
+    chosen: dict[UUID, int] = defaultdict(int)
+    for option in options:
+        chosen[option.option_group_id] += 1
+
+    problems: list[tuple[UUID | None, str]] = []
+
+    for gid, count in chosen.items():
+        if gid not in bounds:
+            problems.append((gid, "no está disponible para esta presentación"))
+            continue
+        lo, hi = bounds[gid]
+        if count > hi:
+            problems.append((gid, f"admite como máximo {hi} opción(es), se enviaron {count}"))
+        elif count < lo:
+            problems.append((gid, f"exige al menos {lo} opción(es), se enviaron {count}"))
+
+    for gid, (lo, _hi) in bounds.items():
+        if lo > 0 and gid not in chosen:
+            problems.append((gid, f"es obligatorio: elige al menos {lo} opción(es)"))
+
+    if not problems:
+        return
+
+    # Un problema en un grupo que descuenta inventario es siempre bloqueante.
+    blocking = [p for p in problems if p[0] in consumen]
+    if not blocking and not settings.STRICT_OPTION_SELECTION:
+        logger.warning(
+            "Selección de opciones inválida (variante %s), tolerada por "
+            "STRICT_OPTION_SELECTION=False: %s",
+            variant.id, "; ".join(msg for _gid, msg in problems),
+        )
+        return
+
+    relevant = blocking or problems
+    names = {
+        gid: name for gid, name in db.execute(
+            select(OptionGroup.id, OptionGroup.name).where(
+                OptionGroup.id.in_([gid for gid, _ in relevant if gid is not None])
+            )
+        ).all()
+    }
+    detalle = "; ".join(
+        f"«{names.get(gid, 'grupo')}» {msg}" for gid, msg in relevant
+    )
+    raise HTTPException(
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={"error": f"Selección de opciones inválida: {detalle}", "grupos": detalle},
+    )
 
 
 def compute_line_price(variant: ProductVariant, options: list[Option]) -> Decimal:
@@ -46,27 +144,6 @@ def compute_line_price(variant: ProductVariant, options: list[Option]) -> Decima
     for option in options:
         price += Decimal(option.extra_price)
     return price
-
-
-def required_consumption(
-    db: Session, variant_id: UUID, quantity: int, options: list[Option]
-) -> dict[UUID, Decimal]:
-    """Consumo de inventario que implicaría una línea (receta×cantidad + insumos
-    de opciones×cantidad), agregado por `inventory_item_id`. Read-only."""
-    req: dict[UUID, Decimal] = defaultdict(Decimal)
-    qty = Decimal(quantity)
-
-    recipe = db.execute(
-        select(RecipeItem).where(RecipeItem.product_variant_id == variant_id)
-    ).scalars().all()
-    for ri in recipe:
-        req[ri.inventory_item_id] += Decimal(ri.quantity) * qty
-
-    for option in options:
-        if option.inventory_item_id is not None and Decimal(option.item_quantity) > 0:
-            req[option.inventory_item_id] += Decimal(option.item_quantity) * qty
-
-    return req
 
 
 def check_availability(

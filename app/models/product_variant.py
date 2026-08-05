@@ -8,6 +8,7 @@ from decimal import Decimal
 if TYPE_CHECKING:
     from .product import Product
     from .recipe_item import RecipeItem
+    from .variant_option_group import VariantOptionGroup
 
 
 class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -32,6 +33,10 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     recipe_items: Mapped[List["RecipeItem"]] = relationship(
+        back_populates="product_variant", cascade="all, delete-orphan"
+    )
+
+    option_groups: Mapped[List["VariantOptionGroup"]] = relationship(
         back_populates="product_variant", cascade="all, delete-orphan"
     )
 

@@ -23,7 +23,9 @@ router = APIRouter(prefix="/promotions", tags=["promotions"])
 @router.get("", response_model=list[PromotionResponse], summary="Listar promociones")
 def list_promotions(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     return db.execute(
-        select(Promotion).options(selectinload(Promotion.targets)).order_by(Promotion.name)
+        select(Promotion)
+        .options(selectinload(Promotion.targets), selectinload(Promotion.combo_items))
+        .order_by(Promotion.name)
     ).scalars().all()
 
 

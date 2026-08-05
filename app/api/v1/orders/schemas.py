@@ -4,7 +4,7 @@ from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.api.v1.sales.schemas import PaymentIn
 
@@ -99,10 +99,19 @@ class TableQrTokenResponse(BaseModel):
 
 # ---------- Comandas ----------
 class OrderItemIn(BaseModel):
-    product_variant_id: UUID
+    product_variant_id: UUID | None = None
+    combo_id: UUID | None = None
     quantity: int = Field(1, ge=1)
     option_ids: list[UUID] = Field(default_factory=list)
     notes: str | None = Field(None, max_length=500)
+
+    @model_validator(mode="after")
+    def _one_of(self):
+        if (self.product_variant_id is None) == (self.combo_id is None):
+            raise ValueError("Cada ítem requiere product_variant_id o combo_id (no ambos)")
+        if self.combo_id is not None and self.option_ids:
+            raise ValueError("Los combos no admiten option_ids en esta versión")
+        return self
 
 
 class OrderCreate(BaseModel):
@@ -130,6 +139,7 @@ class OrderItemResponse(BaseModel):
     estado_cocina: str
     void_de: UUID | None = None
     notes: str | None = None
+    combo_id: UUID | None = None
     options: list[OrderItemOptionResponse] = Field(default_factory=list)
     #: Versión del evento de tiempo real que emitió esta escritura. Solo lo
     #: rellena `PATCH /orders/items/{id}/kitchen`; el KDS lo usa para descartar

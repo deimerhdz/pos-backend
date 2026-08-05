@@ -34,6 +34,7 @@ from app.api.v1.catalog.line_pricing import (
     required_consumption,
 )
 from app.api.v1.orders.schemas import CancelIn
+from app.api.v1.promotions import service as promotions
 from app.api.v1.cart.schemas import (
     CartItemIn,
     CartItemUpdate,
@@ -72,7 +73,7 @@ def _get_or_create_table_session(db: Session, table: DiningTable) -> TableSessio
     return ts
 
 
-def _unique_display_label(db: Session, table_session_id: UUID, display_name: str) -> str:
+def unique_display_label(db: Session, table_session_id: UUID, display_name: str) -> str:
     """Etiqueta desambiguada para cocina/staff. `display_name` no es único: si ya
     hay una "Ana" en la mesa, la siguiente se muestra como "Ana (2)"."""
     taken = set(db.execute(
@@ -100,7 +101,7 @@ def open_session(
             table_session_id=table_session.id,
             dining_table_id=table.id,
             display_name=display_name,
-            display_label=_unique_display_label(db, table_session.id, display_name),
+            display_label=unique_display_label(db, table_session.id, display_name),
             status="open",
             expires_at=_now() + timedelta(minutes=settings.SESSION_TTL_MINUTES),
         )
@@ -212,6 +213,7 @@ def serialize_cart(cart: Cart, participant: SessionParticipant) -> CartResponse:
             unit_price=it.unit_price,
             line_total=line_total,
             notes=it.notes,
+            combo_id=it.combo_id,
             options=[CartItemOptionResponse.model_validate(o) for o in it.options],
         ))
     return CartResponse(
@@ -235,11 +237,14 @@ def get_cart(db: Session, participant_id: UUID) -> CartResponse:
 def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartResponse:
     cart = _get_or_create_open_cart(db, participant_id)
 
+    if data.combo_id is not None:
+        return _add_combo(db, participant_id, cart, data)
+
     variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
     if not variant.active:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
 
-    options = load_valid_options(db, data.option_ids)
+    options = load_valid_options(db, data.option_ids, variant=variant)
 
     # Disponibilidad: consumo del carrito actual + la línea nueva.
     required = _cart_consumption(db, cart)
@@ -268,6 +273,42 @@ def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartRespons
     return get_cart(db, participant_id)
 
 
+def _add_combo(db: Session, participant_id: UUID, cart: Cart, data: CartItemIn) -> CartResponse:
+    """Selección explícita de un combo: se expande en una `CartItem` normal por
+    cada componente (precio normal, sin opciones); el ahorro se calcula recién
+    al cobrar (`combo_discount_for_lines`), igual que con el resto de promociones."""
+    components = promotions.expand_combo(
+        db, data.combo_id, data.quantity, datetime.now(timezone.utc)
+    )
+
+    required = _cart_consumption(db, cart)
+    for component in components:
+        for iid, need in required_consumption(
+            db, component.product_variant_id, component.quantity, []
+        ).items():
+            required[iid] += need
+    check_availability(db, required, extra_context="carrito")
+
+    try:
+        for component in components:
+            item = CartItem(
+                cart_id=cart.id,
+                product_variant_id=component.product_variant_id,
+                quantity=component.quantity,
+                unit_price=component.unit_price,
+                notes=data.notes,
+                combo_id=data.combo_id,
+            )
+            db.add(item)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error agregando combo al carrito")
+        raise
+
+    return get_cart(db, participant_id)
+
+
 def update_item(
     db: Session, participant_id: UUID, item_id: UUID, data: CartItemUpdate
 ) -> CartResponse:
@@ -277,15 +318,17 @@ def update_item(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Línea de carrito no encontrada")
 
     new_qty = data.quantity if data.quantity is not None else item.quantity
+    variant = get_or_404(db, ProductVariant, item.product_variant_id, "Variant not found")
+
     if data.option_ids is not None:
-        options = load_valid_options(db, data.option_ids)
+        options = load_valid_options(db, data.option_ids, variant=variant)
     else:
+        # Selección ya guardada: no se revalida, o un cambio de min/max en el catálogo
+        # impediría hasta bajar la cantidad de una línea que ya estaba en el carrito.
         opt_ids = [o.option_id for o in item.options]
         options = db.execute(
             select(Option).where(Option.id.in_(opt_ids))
         ).scalars().all() if opt_ids else []
-
-    variant = get_or_404(db, ProductVariant, item.product_variant_id, "Variant not found")
 
     # Disponibilidad: resto del carrito (sin esta línea) + la línea editada.
     required = _cart_consumption(db, cart, exclude_item_id=item_id)
@@ -424,6 +467,7 @@ def submit_cart(db: Session, participant: SessionParticipant) -> CustomerOrder:
                 quantity=ci.quantity,
                 unit_price=ci.unit_price,  # snapshot copiado del carrito
                 notes=ci.notes,
+                combo_id=ci.combo_id,
                 estado_cocina="pendiente",
             )
             db.add(item)

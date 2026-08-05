@@ -42,6 +42,39 @@ class TableSessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ParticipantCreateIn(BaseModel):
+    """Comensal que crea el staff para repartir la cuenta.
+
+    No tiene token ni carrito: es una **etiqueta de cobro**, no alguien conectado por
+    el QR. Sirve para el caso en que una sola persona pidió por todos y luego cada
+    quien quiere pagar lo suyo.
+    """
+    display_name: str = Field(..., min_length=1, max_length=255)
+
+
+class ItemAssignmentIn(BaseModel):
+    """A quién se le cobra una línea, o parte de ella.
+
+    `participant_id` nulo la deja sin asignar. `quantity` permite repartir las
+    unidades de una misma línea entre varias personas: se mandan varias entradas del
+    mismo `order_item_id`, y **la suma debe ser exactamente la cantidad de la línea**
+    (el servicio lo verifica). Omitirlo significa "la línea entera".
+    """
+    order_item_id: UUID
+    participant_id: UUID | None = None
+    quantity: int | None = Field(None, ge=1)
+
+
+class AssignmentsIn(BaseModel):
+    """Reparto en lote.
+
+    Va en lote y no ítem a ítem porque el cajero reparte varias líneas de una vez: si
+    cada una fuera su propia petición, un fallo a mitad dejaría la cuenta repartida a
+    medias y el cobro cuadraría mal.
+    """
+    assignments: list[ItemAssignmentIn] = Field(..., min_length=1)
+
+
 class SessionBillLine(BaseModel):
     """Lo que debe un comensal. `participant_id` nulo agrupa lo que añadió el
     staff sin asignar a nadie."""
@@ -66,9 +99,9 @@ class SplitPaymentIn(BaseModel):
                     "(los que añadió el mesero).",
     )
     payments: list[PaymentIn] = Field(..., min_length=1)
-    discount: Decimal = Decimal("0")
-    tax: Decimal = Decimal("0")
-    tip: Decimal = Decimal("0")
+    discount: Decimal = Field(Decimal("0"), ge=0, max_digits=12, decimal_places=2)
+    tax: Decimal = Field(Decimal("0"), ge=0, max_digits=12, decimal_places=2)
+    tip: Decimal = Field(Decimal("0"), ge=0, max_digits=12, decimal_places=2)
 
 
 class CloseSessionIn(BaseModel):
@@ -80,9 +113,9 @@ class CloseSessionIn(BaseModel):
         default_factory=list,
         description="Solo en billing_mode='unified': pagos de la cuenta completa.",
     )
-    discount: Decimal = Decimal("0")
-    tax: Decimal = Decimal("0")
-    tip: Decimal = Decimal("0")
+    discount: Decimal = Field(Decimal("0"), ge=0, max_digits=12, decimal_places=2)
+    tax: Decimal = Field(Decimal("0"), ge=0, max_digits=12, decimal_places=2)
+    tip: Decimal = Field(Decimal("0"), ge=0, max_digits=12, decimal_places=2)
     customer_name: str | None = Field(
         None,
         max_length=255,

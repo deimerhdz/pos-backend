@@ -10,6 +10,7 @@ puerta.
 El pedido anónimo por QR **no** entra por aquí: llega como `recibida` vía
 `/cart/submit` y lo descuenta el staff al confirmarlo."""
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -24,9 +25,11 @@ from app.models.session_participant import SessionParticipant
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
+from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.orders.consolidation import get_or_create_table_session_id
 from app.api.v1.orders.consumption import deduct_order_items
 from app.api.v1.orders.schemas import OrderCreate
+from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +72,35 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
         db.flush()
 
         entries: list[tuple[OrderItem, list[Option]]] = []
+        now = datetime.now(timezone.utc)
         for line in data.items:
+            if line.combo_id is not None:
+                # Un combo se expande en sus componentes reales a precio normal;
+                # el ahorro se calcula al cobrar, no aquí (ver consolidation.py).
+                for component in promotions.expand_combo(db, line.combo_id, line.quantity, now):
+                    item = OrderItem(
+                        order_id=order.id,
+                        participant_id=data.participant_id,
+                        product_variant_id=component.product_variant_id,
+                        quantity=component.quantity,
+                        unit_price=component.unit_price,
+                        notes=line.notes,
+                        combo_id=line.combo_id,
+                    )
+                    db.add(item)
+                    db.flush()
+                    entries.append((item, []))
+                continue
+
             variant = get_or_404(db, ProductVariant, line.product_variant_id, "Variant not found")
             if not variant.active:
                 raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
 
-            unit_price = Decimal(variant.price)
+            # Deduplica, exige que estén activas y valida la selección contra los
+            # grupos del producto. Antes este bucle cargaba las opciones a mano y se
+            # saltaba las tres cosas.
+            options = load_valid_options(db, line.option_ids, variant=variant)
+
             item = OrderItem(
                 order_id=order.id,
                 participant_id=data.participant_id,
@@ -85,17 +111,11 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             db.add(item)
             db.flush()
 
-            seen: set[UUID] = set()
-            for opt_id in line.option_ids:
-                if opt_id in seen:
-                    continue
-                option = get_or_404(db, Option, opt_id, f"Option {opt_id} not found")
-                unit_price += Decimal(option.extra_price)
-                db.add(OrderItemOption(order_item_id=item.id, option_id=opt_id))
-                seen.add(opt_id)
+            for option in options:
+                db.add(OrderItemOption(order_item_id=item.id, option_id=option.id))
 
-            item.unit_price = unit_price
-            entries.append((item, [db.get(Option, oid) for oid in seen]))
+            item.unit_price = compute_line_price(variant, options)
+            entries.append((item, options))
 
         # Nace confirmada, así que compromete stock aquí y ahora. Si falta un
         # insumo (o alguna variante no tiene receta) revienta la transacción

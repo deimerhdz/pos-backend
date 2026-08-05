@@ -1,21 +1,24 @@
 """Deducción de inventario al cobrar una venta (reemplaza el trigger
 `fn_deduct_inventory_on_sale` de schema.sql en la capa de aplicación).
 
-Para cada línea vendida descuenta (a) los insumos de la receta de la variante y
-(b) los insumos de las opciones elegidas. Escribe movimientos 'out' en el kardex.
+Qué consume cada línea lo decide `catalog/consumption_plan.py`, compartido con el
+camino de órdenes; la única diferencia de la venta es que las opciones se leen del
+snapshot JSONB `sale_items.options` en vez de la tabla relacional.
 """
-from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core import inventory_reasons as reasons
-from app.models.recipe_item import RecipeItem
 from app.models.option import Option
 from app.models.sale import Sale, SaleItem
 from app.api.v1.inventory.stock import lock_items, record_movement
-from app.api.v1.catalog.line_pricing import required_consumption
+from app.api.v1.catalog.consumption_plan import (
+    ensure_lines_consume_inventory,
+    plan_line_consumption,
+    required_consumption,
+)
 
 
 def _sale_item_options(db: Session, si: SaleItem) -> list[Option]:
@@ -36,42 +39,32 @@ def deduct_sale(db: Session, sale: Sale, user_id: UUID | None) -> None:
         select(SaleItem).where(SaleItem.sale_id == sale.id)
     ).scalars().all()
 
+    # Las opciones se resuelven una sola vez: `_sale_item_options` hace un `db.get`
+    # por opción y aquí se recorre tres veces (guarda, pre-bloqueo y descuento).
+    entries = [(si, _sale_item_options(db, si)) for si in items]
+
+    # Este camino no tenía la guarda que sí protege las órdenes, así que una variante
+    # sin receta se cobraba por caja sin mover stock. Con slots el agujero crece: una
+    # receta solo-slot sin opción elegida tampoco descontaría nada.
+    ensure_lines_consume_inventory(
+        db, [(si.product_variant_id, si.quantity, options) for si, options in entries]
+    )
+
     # Pre-bloqueo en orden canónico de id: sin esto, una venta de mostrador y una
     # confirmación de mesa que compartan insumos pueden deadlockear entre sí.
     needed: set[UUID] = set()
-    for si in items:
+    for si, options in entries:
         needed |= set(
-            required_consumption(
-                db, si.product_variant_id, si.quantity, _sale_item_options(db, si)
-            )
+            required_consumption(db, si.product_variant_id, si.quantity, options)
         )
     lock_items(db, needed)
 
-    for si in items:
-        qty = Decimal(si.quantity)
-
-        # (a) receta de la variante
-        recipe = db.execute(
-            select(RecipeItem).where(RecipeItem.product_variant_id == si.product_variant_id)
-        ).scalars().all()
-        for ri in recipe:
+    for si, options in entries:
+        for line in plan_line_consumption(
+            db, si.product_variant_id, si.quantity, options
+        ):
             record_movement(
-                db, ri.inventory_item_id, type="out", quantity=ri.quantity * qty,
-                reason=reasons.VENTA, reference_type=reasons.REF_SALE,
-                reference_id=sale.id, user_id=user_id,
-            )
-
-        # (b) opciones elegidas (snapshot en si.options: [{option_id, ...}])
-        for opt in (si.options or []):
-            option_id = opt.get("option_id")
-            if not option_id:
-                continue
-            option = db.get(Option, UUID(str(option_id)))
-            if option is None or option.inventory_item_id is None or option.item_quantity <= 0:
-                continue
-            record_movement(
-                db, option.inventory_item_id, type="out",
-                quantity=option.item_quantity * qty,
+                db, line.inventory_item_id, type="out", quantity=line.quantity,
                 reason=reasons.VENTA, reference_type=reasons.REF_SALE,
                 reference_id=sale.id, user_id=user_id,
             )

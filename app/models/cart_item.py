@@ -30,6 +30,12 @@ class CartItem(UUIDPrimaryKeyMixin, Base):
         Numeric(12, 2), nullable=False, default=0, server_default="0"
     )
 
+    # Promoción de combo que generó esta línea (selección explícita). Varias
+    # líneas comparten el mismo combo_id: son los componentes de un mismo combo.
+    combo_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("promotions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     options: Mapped[List["CartItemOption"]] = relationship(

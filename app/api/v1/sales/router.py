@@ -1,6 +1,7 @@
+from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -8,6 +9,7 @@ from app.core.db import get_db, get_tenant
 from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import Tenant, User
+from app.core.pagination import Page, paginate
 from app.models.payment import PaymentMethod
 from app.models.sale import Sale
 from app.api.v1.sales import service
@@ -52,18 +54,24 @@ def create_sale(
     return _load_sale(db, sale.id)
 
 
-@router.get("", response_model=list[SaleResponse], summary="Listar ventas")
-def list_sales(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    return db.execute(
-        select(Sale)
-        .options(
-            selectinload(Sale.items),
-            selectinload(Sale.payments),
-            selectinload(Sale.invoice),
-            selectinload(Sale.dining_table),
-        )
-        .order_by(Sale.sold_at.desc())
-    ).scalars().all()
+@router.get("", response_model=Page[SaleResponse], summary="Listar ventas")
+def list_sales(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    status: str | None = Query(None, pattern="^(issued|paid|void)$", description="Filtra por estado de la venta."),
+    date_from: date | None = Query(None, description="Fecha inicial (inclusive) sobre sold_at."),
+    date_to: date | None = Query(None, description="Fecha final (inclusive) sobre sold_at."),
+    invoice_reference: str | None = Query(None, description="Búsqueda por referencia de factura (prefijo+número)."),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    stmt = service.list_sales_query(
+        status=status,
+        date_from=date_from,
+        date_to=date_to,
+        invoice_reference=invoice_reference,
+    )
+    return paginate(db, stmt, page, size)
 
 
 @router.get("/{sale_id}", response_model=SaleResponse, summary="Obtener una venta")

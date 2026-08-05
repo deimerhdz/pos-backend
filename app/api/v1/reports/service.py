@@ -12,7 +12,9 @@ from app.models.sale import Sale, SaleItem
 from app.models.product_variant import ProductVariant
 from app.models.product import Product
 from app.models.category import Category
+from app.models.option import Option
 from app.models.recipe_item import RecipeItem
+from app.models.variant_option_group import VariantOptionGroup
 from app.models.inventory_item import InventoryItem
 
 
@@ -118,17 +120,76 @@ def inventory_report(db: Session) -> list[dict]:
     return out
 
 
-def _variant_unit_cost_map(db: Session) -> dict:
-    """Costo unitario (COGS) de cada variante = Σ recipe_item.quantity * insumo.unit_cost."""
+def _option_group_cost_basis(db: Session) -> dict:
+    """Por grupo: `(costo unitario medio del insumo, cantidad propia media de la opción)`.
+
+    Lo que consume un grupo no tiene insumo fijo: depende de lo que elija el cliente.
+    Para el COGS se estima con el promedio de las opciones activas que sí ligan insumo
+    — si los sabores cuestan parecido el error es despreciable, y es mucho mejor que
+    ignorarlos, que dejaría el margen inflado.
+
+    La cantidad propia se necesita porque es la que aplica cuando el tamaño no define
+    ninguna (la misma regla que usa `plan_line_consumption`)."""
     rows = db.execute(
         select(
-            RecipeItem.product_variant_id,
-            func.coalesce(func.sum(RecipeItem.quantity * InventoryItem.unit_cost), 0),
+            Option.option_group_id,
+            func.avg(InventoryItem.unit_cost),
+            func.avg(Option.item_quantity),
         )
-        .join(InventoryItem, InventoryItem.id == RecipeItem.inventory_item_id)
-        .group_by(RecipeItem.product_variant_id)
+        .join(InventoryItem, InventoryItem.id == Option.inventory_item_id)
+        .where(Option.active.is_(True))
+        .group_by(Option.option_group_id)
     ).all()
-    return {vid: Decimal(c) for vid, c in rows}
+    return {
+        gid: (Decimal(cost), Decimal(qty or 0))
+        for gid, cost, qty in rows
+        if cost is not None
+    }
+
+
+def _variant_unit_cost_map(db: Session) -> dict:
+    """Costo unitario (COGS) de cada variante: insumos fijos de la receta + lo que
+    consumen los grupos que ofrece, valorados al promedio de su grupo (ver arriba).
+
+    El aporte del grupo se cuenta `min_select` veces: es lo que el cliente elegirá como
+    mínimo, y para los grupos obligatorios (`min = max`, el caso de los sabores) es
+    exacto. Un grupo opcional (`min = 0`) no suma nada al costo estimado.
+
+    La cantidad sale de la misma regla que el descuento real: manda la del tamaño y, si
+    no la define, la de la opción. Contar solo las que define el tamaño dejaba fuera
+    todo el helado mientras el catálogo siguiera con las cantidades en las opciones, e
+    inflaba el margen."""
+    basis = _option_group_cost_basis(db)
+
+    out: dict = {}
+
+    fijos = db.execute(
+        select(RecipeItem.product_variant_id, RecipeItem.quantity, InventoryItem.unit_cost)
+        .join(InventoryItem, InventoryItem.id == RecipeItem.inventory_item_id)
+    ).all()
+    for variant_id, quantity, unit_cost in fijos:
+        out[variant_id] = out.get(variant_id, Decimal(0)) + Decimal(quantity) * Decimal(unit_cost)
+
+    grupos = db.execute(
+        select(
+            VariantOptionGroup.product_variant_id,
+            VariantOptionGroup.option_group_id,
+            VariantOptionGroup.quantity_per_option,
+            VariantOptionGroup.min_select,
+        ).where(VariantOptionGroup.min_select > 0)
+    ).all()
+    for variant_id, group_id, qty_per_option, min_select in grupos:
+        datos = basis.get(group_id)
+        if datos is None:
+            continue
+        cost, qty_opcion = datos
+        por_opcion = Decimal(qty_per_option) if qty_per_option > 0 else qty_opcion
+        if por_opcion <= 0:
+            continue
+        aporte = por_opcion * Decimal(min_select) * cost
+        out[variant_id] = out.get(variant_id, Decimal(0)) + aporte
+
+    return out
 
 
 def profitability_report(db: Session, date_from, date_to) -> dict:
