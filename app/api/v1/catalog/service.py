@@ -6,7 +6,7 @@ Los grupos de opciones (sabores) se gestionan aparte y se asignan al producto.
 import re
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.product import Product
@@ -25,6 +25,39 @@ def _unique_sku(db: Session, base: str) -> str:
         sku = f"{base}-{i}"
         i += 1
     return sku
+
+
+def variante_duplicada(
+    db: Session,
+    product_id: UUID,
+    name: str,
+    *,
+    exclude_id: UUID | None = None,
+) -> ProductVariant | None:
+    """Variante del mismo producto que ya ocupa ese nombre, esté activa o no.
+
+    Existe porque `DELETE /variants/{id}` es un soft-delete: la fila desactivada sigue
+    ocupando el nombre en `uq__product_variants__product_id__name`, así que recrear una
+    presentación borrada choca con la constraint. Sin esta comprobación el conflicto
+    llegaba al `commit()` y salía como 500 en vez de un 409 accionable.
+
+    La búsqueda es case-insensitive aunque la constraint no lo sea: en una carta
+    «Pequeña» y «pequeña» son la misma presentación y dos filas confundirían al cajero.
+    Ordena activas primero para que el 409 hable de la que el usuario tiene a la vista.
+    """
+    stmt = (
+        select(ProductVariant)
+        .where(
+            ProductVariant.product_id == product_id,
+            func.lower(func.trim(ProductVariant.name)) == name.strip().lower(),
+        )
+        .order_by(ProductVariant.active.desc())
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(ProductVariant.id != exclude_id)
+    # `.first()` y no `scalar_one_or_none()`: si los datos ya traen dos filas que solo
+    # difieren en mayúsculas, esto no debe reventar con MultipleResultsFound.
+    return db.execute(stmt).scalars().first()
 
 
 def ensure_default_variant(db: Session, product: Product, *, price=0) -> ProductVariant:
