@@ -8,16 +8,16 @@ Backend de punto de venta (POS) **multi-tenant** construido con **FastAPI + Post
 
 ## Stack
 
-| Área | Tecnología |
-|------|-----------|
-| API | FastAPI |
-| ORM / migraciones | SQLAlchemy 2 + Alembic |
-| Base de datos | PostgreSQL 16 (schema-per-tenant) |
-| Cache / colas | Redis (blocklist de JWT + broker de Celery) |
-| Tareas async | Celery (worker) |
-| Almacenamiento de imágenes | Cloudflare R2 (S3-compatible) |
-| Email | Resend |
-| Auth | JWT (PyJWT, HS256) + bcrypt |
+| Área                       | Tecnología                                  |
+| -------------------------- | ------------------------------------------- |
+| API                        | FastAPI                                     |
+| ORM / migraciones          | SQLAlchemy 2 + Alembic                      |
+| Base de datos              | PostgreSQL 16 (schema-per-tenant)           |
+| Cache / colas              | Redis (blocklist de JWT + broker de Celery) |
+| Tareas async               | Celery (worker)                             |
+| Almacenamiento de imágenes | Cloudflare R2 (S3-compatible)               |
+| Email                      | Resend                                      |
+| Auth                       | JWT (PyJWT, HS256) + bcrypt                 |
 
 Python **3.12** en la imagen Docker (3.11+ compatible).
 
@@ -40,20 +40,20 @@ cp .env.example .env
 
 Variables principales:
 
-| Variable | Descripción |
-|----------|-------------|
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Credenciales que usa `docker-compose` para el contenedor de Postgres. |
-| `DATABASE_URL` | Cadena SQLAlchemy, p. ej. `postgresql+psycopg://admin:...@postgres:5432/pos_db`. |
-| `REDIS_URL` | p. ej. `redis://redis:6379/0`. |
-| `JWT_SECRET` | Secreto de firma de los JWT (**obligatorio**). |
-| `JWT_ALGORITHM` | Por defecto `HS256`. |
-| `ACCESS_TOKEN_EXPIRY` | Expiración del access token en minutos (por defecto `1440`). |
-| `SESSION_TTL_MINUTES` | Ventana deslizante de la sesión del comensal (QR). Por defecto `240` (4 h). |
-| `SESSION_ABS_MAX_MINUTES` | Tope absoluto del token de sesión del comensal. Por defecto `1440` (24 h). |
-| `QR_TOKEN_SECRET` | Secreto dedicado para firmar tokens de QR/sesión. Si se omite, usa `JWT_SECRET`. |
-| `RESEND_API_KEY` / `MAIL_FROM_NAME` / `MAIL_FROM` | Envío de correo (Resend). |
-| `SUPER_ADMIN_NAME` / `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD` | Super admin global sembrado en el primer arranque. |
-| `R2_*` | Credenciales y endpoints de Cloudflare R2 para imágenes de productos. |
+| Variable                                                          | Descripción                                                                      |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`             | Credenciales que usa `docker-compose` para el contenedor de Postgres.            |
+| `DATABASE_URL`                                                    | Cadena SQLAlchemy, p. ej. `postgresql+psycopg://admin:...@postgres:5432/pos_db`. |
+| `REDIS_URL`                                                       | p. ej. `redis://redis:6379/0`.                                                   |
+| `JWT_SECRET`                                                      | Secreto de firma de los JWT (**obligatorio**).                                   |
+| `JWT_ALGORITHM`                                                   | Por defecto `HS256`.                                                             |
+| `ACCESS_TOKEN_EXPIRY`                                             | Expiración del access token en minutos (por defecto `1440`).                     |
+| `SESSION_TTL_MINUTES`                                             | Ventana deslizante de la sesión del comensal (QR). Por defecto `240` (4 h).      |
+| `SESSION_ABS_MAX_MINUTES`                                         | Tope absoluto del token de sesión del comensal. Por defecto `1440` (24 h).       |
+| `QR_TOKEN_SECRET`                                                 | Secreto dedicado para firmar tokens de QR/sesión. Si se omite, usa `JWT_SECRET`. |
+| `RESEND_API_KEY` / `MAIL_FROM_NAME` / `MAIL_FROM`                 | Envío de correo (Resend).                                                        |
+| `SUPER_ADMIN_NAME` / `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD` | Super admin global sembrado en el primer arranque.                               |
+| `R2_*`                                                            | Credenciales y endpoints de Cloudflare R2 para imágenes de productos.            |
 
 > **Hosts:** dentro de Docker, `DATABASE_URL`/`REDIS_URL` apuntan a los nombres de servicio (`postgres`, `redis`). Para correr la app fuera de Docker usa `localhost`.
 
@@ -118,7 +118,7 @@ alembic downgrade -1                            # revierte una migración
 
 **Modelo multi-tenant:** existe un schema `shared` (registro de tenants + `users`/`roles`) y **un schema por tenant** creado dinámicamente. SQLAlchemy y Alembic usan `schema_translate_map` para enrutar los modelos declarados con `schema="tenant"` al schema correcto en tiempo de ejecución. Las migraciones se aplican a cada schema de tenant (helper `for_each_tenant_schema`).
 
-Para un reset limpio en desarrollo (sin datos que preservar) existe el flujo de *reset baseline* que regenera una única migración desde los modelos actuales.
+Para un reset limpio en desarrollo (sin datos que preservar) existe el flujo de _reset baseline_ que regenera una única migración desde los modelos actuales.
 
 ---
 
@@ -143,7 +143,7 @@ GET  /api/v1/auth/refresh-token
 GET  /api/v1/auth/logout       # revoca el token (blocklist en Redis)
 ```
 
-El flujo público del comensal (QR) usa **tokens firmados** de QR y de sesión (independientes del JWT de staff): el token de QR codifica tenant + mesa; el de sesión identifica al comensal con una ventana deslizante de actividad.
+El flujo público del comensal (QR) usa **tokens firmados** de QR y de sesión (independientes del JWT de staff): el token de QR codifica tenant + mesa; el de sesión identifica al comensal con una ventana deslizante de actividad .
 
 ---
 
@@ -179,9 +179,9 @@ Resumen del recorrido implementado (8 fases; ver [gestion-mesas.md](gestion-mesa
 1. **QR firmado + menú público** — el comensal escanea y ve el menú sin autenticación.
 2. **Carrito por comensal** — sesión con token deslizante; cada comensal arma su carrito.
 3. **Consolidación (mesero)** — agrupa los carritos de la mesa en una orden y **descuenta inventario**.
-4. **Adiciones post-consolidación** — más ítems a la orden abierta; crea *orden-hija* si la única está en cobro.
+4. **Adiciones post-consolidación** — más ítems a la orden abierta; crea _orden-hija_ si la única está en cobro.
 5. **KDS (cocina)** — estados por ítem (`pendiente → en_preparacion → listo → entregado`), anulación/reemplazo.
-6. **Bloqueo + cobro** — lock optimista, cuenta con *split* por comensal, pago (genera venta), cancelación con reversa de inventario, liberación de mesa.
+6. **Bloqueo + cobro** — lock optimista, cuenta con _split_ por comensal, pago (genera venta), cancelación con reversa de inventario, liberación de mesa.
 7. **Facturación** — factura interna con consecutivo (N por mesa, una por orden pagada).
 
 ---
