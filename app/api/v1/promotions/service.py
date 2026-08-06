@@ -72,29 +72,48 @@ def _line_discount(promo: Promotion, line_total: Decimal) -> Decimal:
     return Decimal(0)
 
 
-def evaluate(db: Session, lines: list[dict], now: datetime) -> tuple[Decimal, object]:
-    """`lines`: dicts con product_id, category_id, quantity, line_total.
-    Devuelve (descuento_total, promotion_id_aplicada | None)."""
+def active_discount_promotions(db: Session, now: datetime) -> list[Promotion]:
+    """Promociones percent/fixed vigentes ahora mismo. Se pide una sola vez por
+    request y se reutiliza por línea — evita repetir la consulta por producto
+    en `_build_menu` (menú) y `serialize_cart` (carrito del comensal)."""
     promos = db.execute(
         select(Promotion).options(selectinload(Promotion.targets))
     ).scalars().all()
-    valid = [p for p in promos if _valid_now(p, now)]
+    return [p for p in promos if _valid_now(p, now)]
+
+
+def best_line_discount(
+    valid_promos: list[Promotion], product_id, category_id, quantity: int, line_total: Decimal,
+) -> tuple[Decimal, object]:
+    """Mejor descuento entre las promociones ya filtradas por vigencia, para una
+    sola línea. Devuelve (monto, promotion_id | None)."""
+    best = Decimal(0)
+    best_id = None
+    for p in valid_promos:
+        if quantity < p.min_qty:
+            continue
+        if not _matches(p, product_id, category_id):
+            continue
+        d = _line_discount(p, line_total)
+        if d > best:
+            best, best_id = d, p.id
+    return best, best_id
+
+
+def evaluate(db: Session, lines: list[dict], now: datetime) -> tuple[Decimal, object]:
+    """`lines`: dicts con product_id, category_id, quantity, line_total.
+    Devuelve (descuento_total, promotion_id_aplicada | None)."""
+    valid = active_discount_promotions(db, now)
     if not valid:
         return Decimal(0), None
 
     total_discount = Decimal(0)
     applied: set = set()
     for line in lines:
-        best = Decimal(0)
-        best_id = None
-        for p in valid:
-            if line["quantity"] < p.min_qty:
-                continue
-            if not _matches(p, line.get("product_id"), line.get("category_id")):
-                continue
-            d = _line_discount(p, Decimal(line["line_total"]))
-            if d > best:
-                best, best_id = d, p.id
+        best, best_id = best_line_discount(
+            valid, line.get("product_id"), line.get("category_id"),
+            line["quantity"], Decimal(line["line_total"]),
+        )
         if best > 0:
             total_discount += best
             applied.add(best_id)

@@ -3,7 +3,8 @@
 `GET /menu` resuelve el tenant por el header x-tenant-host (catálogo genérico del
 local); `GET /menu/qr-token/{token}` lo resuelve desde el token firmado, que es la
 vía del comensal y la única que identifica una mesa."""
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -22,6 +23,7 @@ from app.models.product_variant import ProductVariant
 from app.models.option_group import OptionGroup
 from app.models.variant_option_group import VariantOptionGroup
 from app.models.dining_table import DiningTable
+from app.api.v1.promotions.service import active_discount_promotions, best_line_discount
 from app.api.v1.menu.schemas import (
     MenuCategoryResponse, MenuProductResponse, MenuVariantResponse,
     MenuOptionGroupResponse, MenuOptionResponse, MenuTableResponse,
@@ -77,6 +79,8 @@ def _option_availability(db: Session) -> dict[UUID, bool]:
 
 def _build_menu(db: Session) -> list[MenuCategoryResponse]:
     avail = _option_availability(db)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    promos = active_discount_promotions(db, now)
 
     categories = db.execute(
         select(Category).where(Category.active.is_(True)).order_by(Category.name)
@@ -135,8 +139,19 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
                     groups.append(grupo)
                     union.setdefault(g.id, grupo)
 
+                # Cantidad 1 a propósito: al navegar el menú aún no hay carrito, así
+                # que una promo con `min_qty > 1` no se muestra hasta que el
+                # comensal la tenga (`serialize_cart` sí conoce la cantidad real).
+                discounted_price = None
+                if promos:
+                    discount, _ = best_line_discount(promos, p.id, cat.id, 1, v.price)
+                    if discount > 0:
+                        discounted_price = (v.price - discount).quantize(
+                            Decimal("0.01"), rounding=ROUND_HALF_UP
+                        )
+
                 variants.append(MenuVariantResponse(
-                    id=v.id, name=v.name, price=v.price,
+                    id=v.id, name=v.name, price=v.price, discounted_price=discounted_price,
                     option_groups=groups, available=v_pedible,
                 ))
                 pedible = pedible or v_pedible
