@@ -44,8 +44,12 @@ y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Administración
 - **Arqueos parciales (RF-046)**: `POST /cash/shifts/{id}/partial-count`.
-- **Horarios (RF-073)**: `/business-hours` (GET/PUT semanal).
-- **Auditoría (RF-076)**: `audit_logs` + `record_audit()` + `/audit-logs`.
+- ~~**Horarios (RF-073)**: `/business-hours` (GET/PUT semanal).~~ **Deprecado**: se
+  retiraron el router y la pestaña de Ajustes. La tabla `business_hours` y su
+  modelo se conservan (sin migración de borrado), así que no se pierden datos.
+- **Auditoría (RF-076)**: `audit_logs` + `record_audit()` + `/audit-logs`. Se
+  retiró la pestaña de Ajustes; el endpoint sigue activo porque `record_audit()`
+  sigue escribiendo desde el checkout y promociones.
 
 ### Datos
 - Seed del menú "El Fin del Calor" (`app/scripts/seed_menu_fin_del_calor.py`):
