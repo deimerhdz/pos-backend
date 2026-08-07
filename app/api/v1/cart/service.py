@@ -228,7 +228,10 @@ def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> 
         # cobrar); aplicarles además un percent/fixed sería descontar dos veces.
         if promos and it.combo_id is None:
             product_id, category_id = catalog.get(it.product_variant_id, (None, None))
-            discount, _ = promotions.best_line_discount(promos, product_id, category_id, it.quantity, line_total)
+            discount, _ = promotions.best_line_discount(
+                promos, product_id, category_id, it.quantity, line_total,
+                unit_price=Decimal(it.unit_price),
+            )
             if discount > 0:
                 discounted_line_total = (line_total - discount).quantize(
                     Decimal("0.01"), rounding=ROUND_HALF_UP

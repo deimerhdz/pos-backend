@@ -208,11 +208,12 @@ def sweep_orphan_sessions() -> int:
 
 
 def expire_promotions() -> int:
-    """Marca `active=False` en promociones cuyo `ends_at` ya pasó, en todos los
-    tenants. Puramente informativo: `_valid_now()` (usado por `evaluate`,
-    `expand_combo`, etc.) ya compara `ends_at` contra `now` en cada evaluación,
-    así que esto nunca decide si una promoción aplica — solo mantiene el
-    listado de administración sin promociones vencidas marcadas como activas."""
+    """Pasa a `finished` las promociones cuyo `ends_at` ya venció, en todos los
+    tenants. Puramente informativo: `_valid_now()` ya compara `ends_at` contra
+    `now` en cada evaluación, así que esto nunca decide si una promoción aplica
+    — solo mantiene el listado de administración limpio y le da a `finished` su
+    significado real. `finished` es terminal: para revivir una promoción se
+    duplica."""
     from sqlalchemy import update
     from app.models.promotion import Promotion
 
@@ -229,8 +230,9 @@ def expire_promotions() -> int:
                 # de tabla sin calificar.
                 result = db.execute(
                     update(Promotion)
-                    .where(Promotion.active.is_(True), Promotion.ends_at.is_not(None), Promotion.ends_at < now)
-                    .values(active=False)
+                    .where(Promotion.status.in_(("active", "paused", "draft")),
+                           Promotion.ends_at.is_not(None), Promotion.ends_at < now)
+                    .values(status="finished")
                 )
                 db.commit()
                 total += result.rowcount
@@ -238,7 +240,7 @@ def expire_promotions() -> int:
             logger.exception("Error expirando promociones del schema %s", schema)
 
     if total:
-        logger.info("Expiración de promociones: %d promoción(es) marcada(s) inactiva(s)", total)
+        logger.info("Expiración de promociones: %d promoción(es) finalizada(s)", total)
     return total
 
 

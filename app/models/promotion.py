@@ -1,36 +1,59 @@
 from app.core.models import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy import (
-    String, Boolean, Integer, Numeric, ForeignKey, DateTime, Time, CheckConstraint,
-    UniqueConstraint,
+    String, Text, Integer, Numeric, ForeignKey, DateTime, Time, CheckConstraint,
+    UniqueConstraint, Index,
 )
 from sqlalchemy.orm import mapped_column, Mapped, relationship
-from typing import Optional, List, TYPE_CHECKING
+from typing import Optional, List
 from decimal import Decimal
 from datetime import datetime, time
 
 
-class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Promoción del catálogo (RF-008..012). `type` gobierna el cálculo:
-    - `percent`: `value` = % de descuento (0..100).
-    - `fixed`: `value` = monto fijo de descuento por línea aplicable.
-    - `combo`: `value` = precio total del bundle; los componentes viven en
-      `combo_items` (producto + cantidad requerida). Se selecciona
-      explícitamente (`combo_id` en vez de `product_variant_id` al agregar un
-      ítem); el servicio la expande en líneas reales de cada componente a su
-      precio normal y el ahorro se aplica como descuento de venta.
-    - `buy_x_get_y` / `qty_price`: reservados (fase 2; hoy no descuentan).
+# Máquina de estados del RF. `draft` es el único estado en el que se puede
+# cambiar `type`, `targets` y `combo_items`: una vez activada, la promoción ya
+# pudo explicar el descuento de una venta y reescribir su forma reescribiría la
+# historia. Para cambiar la forma se duplica (`POST /promotions/{id}/duplicate`).
+PROMOTION_STATUSES = ("draft", "active", "paused", "finished")
 
-    Vigencia opcional por rango de fechas (`starts_at`/`ends_at`), días de la
-    semana (`days_of_week`, CSV 0=lunes..6=domingo), días del mes
-    (`days_of_month`, CSV 1..31, ej. quincena "15,30") y ventana horaria
-    (`start_time`/`end_time`). El alcance de `percent`/`fixed` se define en
-    `promotion_targets` (producto o categoría); sin targets = aplica a toda la
-    venta. `combo` no usa `promotion_targets`, usa `combo_items`."""
+# Transiciones permitidas. `finished` es terminal: una promoción vencida no
+# revive, se duplica.
+PROMOTION_TRANSITIONS = {
+    "draft": {"active", "finished"},
+    "active": {"paused", "finished"},
+    "paused": {"active", "finished"},
+    "finished": set(),
+}
+
+# `buy_x_get_y` sale del dominio: mientras `_line_discount` le devuelva 0, ser
+# configurable solo sirve para que un admin cree un "2x1" que no descuenta.
+PROMOTION_TYPES = ("percent", "fixed", "combo", "qty_price")
+
+
+class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Promoción del catálogo. `type` gobierna el cálculo:
+
+    - `percent`: `value` = % de descuento (0..100) sobre el `line_total`.
+    - `fixed`: `value` = monto fijo de descuento por línea aplicable.
+    - `qty_price`: `min_qty` = unidades del paquete y `value` = precio total de
+      ese paquete ("compra 2 granizados y paga X"). Descuenta solo paquetes
+      completos; el remanente se cobra a precio normal.
+    - `combo`: `value` = precio total del bundle, componentes en `combo_items`.
+      Se selecciona explícitamente por `combo_id` y no participa de `evaluate`.
+
+    Vigencia opcional: `starts_at`/`ends_at`, `days_of_week` (CSV 0=lunes..
+    6=domingo), `days_of_month` (CSV 1..31) y ventana horaria
+    `start_time`/`end_time`, que admite cruce de medianoche.
+
+    **Toda la vigencia se evalúa en hora local del tenant.** Antes se evaluaba
+    en UTC, lo que no solo corría la ventana horaria: en UTC-5 también corría el
+    día de la semana, el día del mes y el corte de `ends_at`.
+    """
 
     __tablename__ = "promotions"
 
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     type: Mapped[str] = mapped_column(String(20), nullable=False)
 
@@ -38,7 +61,13 @@ class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Numeric(12, 2), nullable=False, default=0, server_default="0"
     )
 
-    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="draft", index=True
+    )
+
+    # Resuelve el conflicto cuando varias promociones aplican a la misma línea.
+    # Mayor gana; empate se rompe por descuento mayor y luego por `created_at`.
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     starts_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -49,10 +78,7 @@ class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
 
-    # Parámetros para tipos de fase 2.
     min_qty: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
-    buy_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    get_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     targets: Mapped[List["PromotionTarget"]] = relationship(
         back_populates="promotion", cascade="all, delete-orphan"
@@ -63,10 +89,31 @@ class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __table_args__ = (
         CheckConstraint(
-            "type IN ('percent', 'fixed', 'buy_x_get_y', 'combo', 'qty_price')",
+            "type IN ('percent', 'fixed', 'combo', 'qty_price')",
             name="ck_promotion_type",
         ),
+        CheckConstraint(
+            "status IN ('draft', 'active', 'paused', 'finished')",
+            name="ck_promotion_status",
+        ),
         CheckConstraint("value >= 0", name="ck_promotion_value_positive"),
+        # El rango porcentual deja de depender solo de Pydantic: `PromotionUpdate`
+        # no lo validaba, y un PATCH con `value=500` sobre un percent hacía que
+        # `build_sale` rechazara con "El total no puede ser negativo" cualquier
+        # venta que tocara esa categoría. Un typo de configuración tumbaba la caja.
+        CheckConstraint(
+            "type <> 'percent' OR value <= 100",
+            name="ck_promotion_percent_range",
+        ),
+        # Un `qty_price` de paquete 1 es un precio, no una promoción.
+        CheckConstraint(
+            "type <> 'qty_price' OR min_qty >= 2",
+            name="ck_promotion_qty_price_pack",
+        ),
+        # `active_discount_promotions` filtra estado y fecha de corte en SQL:
+        # este índice es lo que evita el escaneo completo de la tabla en cada
+        # `GET /menu` y `GET /cart` públicos.
+        Index("ix_promotions_status_ends_at", "status", "ends_at"),
         {"schema": "tenant"},
     )
 
@@ -102,8 +149,7 @@ class PromotionTarget(UUIDPrimaryKeyMixin, Base):
 class PromotionComboItem(UUIDPrimaryKeyMixin, Base):
     """Componente de un combo (`Promotion.type == 'combo'`): variante requerida
     y cantidad por unidad de combo. `Promotion.value` es el precio total del
-    bundle; el ahorro se calcula comparando el precio normal de estos
-    componentes contra ese precio total."""
+    bundle."""
 
     __tablename__ = "promotion_combo_items"
 
