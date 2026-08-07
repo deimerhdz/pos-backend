@@ -270,30 +270,18 @@ def main():
               [o1["status"], o2["status"]], ["recibida", "recibida"])
         check("enviar el pedido tampoco toca el inventario", stock(fx), stock_0)
 
-        kds = api("GET", "/api/v1/orders/kds").json()
-        ids_kds = {o["order_id"] for o in kds}
-        check("cocina NO ve los pedidos sin confirmar",
-              ids_kds & {o1["id"], o2["id"]}, set())
-
         # --- confirmación por staff: aquí baja el stock --------------------
         api("POST", f"/api/v1/orders/{o1['id']}/confirm")
         api("POST", f"/api/v1/orders/{o2['id']}/confirm")
         check("confirmar descuenta 3 unidades × 2 de receta",
               stock_0 - stock(fx), POR_UNIDAD * 3)
 
-        kds = api("GET", "/api/v1/orders/kds").json()
-        ids_kds = {o["order_id"] for o in kds}
-        check("cocina ya ve los dos pedidos confirmados",
-              ids_kds >= {o1["id"], o2["id"]}, True)
-
-        # --- cocina entrega -------------------------------------------------
+        # --- la terminal marca los pedidos listos ---------------------------
         for o in (o1, o2):
-            detalle = api("GET", f"/api/v1/orders/{o['id']}").json()
-            for it in detalle["items"]:
-                for destino in ("en_preparacion", "listo", "entregado"):
-                    api("PATCH", f"/api/v1/orders/items/{it['id']}/kitchen",
-                        json={"estado_cocina": destino})
-        note("cocina avanzó todos los ítems hasta 'entregado'")
+            listo = api("POST", f"/api/v1/orders/{o['id']}/ready").json()
+            check("marcar listo deja todos los ítems en 'listo'",
+                  {it["estado_cocina"] for it in listo["items"]}, {"listo"})
+        note("la terminal marcó ambos pedidos listos, una llamada por pedido")
 
         # --- cuenta con split ----------------------------------------------
         bill = api("GET", f"/api/v1/table-sessions/{ts_id}/bill").json()

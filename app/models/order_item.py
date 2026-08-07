@@ -8,6 +8,11 @@ from decimal import Decimal
 if TYPE_CHECKING:
     from .customer_order import CustomerOrder
 
+#: Ítems que aún no están terminados. Es la misma regla en tres sitios —bloquear
+#: el cobro, cerrar la sesión de mesa y marcar listo un pedido entero—, así que
+#: vive junto al modelo dueño del campo en vez de copiarse en cada uno.
+EN_CURSO = ("pendiente", "en_preparacion")
+
 
 class OrderItem(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "order_items"
@@ -41,9 +46,9 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
         ForeignKey("promotions.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
-    # Ciclo de cocina (KDS), independiente del status de pago de la orden.
-    # La fuente de verdad de las transiciones pendiente→...→entregado es el KDS
-    # (Fase 6). 'anulado' se excluye de la validación de bloqueo de cobro.
+    # Ciclo de preparación del ítem, independiente del status de pago de la orden.
+    # Las transiciones pendiente→en_preparacion→listo las mueve la terminal de
+    # mesas. 'anulado' se excluye de la validación de bloqueo de cobro.
     estado_cocina: Mapped[str] = mapped_column(
         String(15), nullable=False, server_default="pendiente"
     )
@@ -62,7 +67,7 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_order_item_quantity_positive"),
         CheckConstraint(
-            "estado_cocina IN ('pendiente', 'en_preparacion', 'listo', 'entregado', 'anulado')",
+            "estado_cocina IN ('pendiente', 'en_preparacion', 'listo', 'anulado')",
             name="ck_order_item_estado_cocina",
         ),
         {"schema": "tenant"},

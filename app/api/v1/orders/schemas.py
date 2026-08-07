@@ -27,11 +27,10 @@ class OrderStatus(str, Enum):
 
 
 class KitchenStatus(str, Enum):
-    """Estado de cocina (KDS) por ítem, independiente del status de pago."""
+    """Estado de preparación por ítem, independiente del status de pago."""
     PENDIENTE = "pendiente"
     EN_PREPARACION = "en_preparacion"
     LISTO = "listo"
-    ENTREGADO = "entregado"
     ANULADO = "anulado"
 
 
@@ -167,28 +166,9 @@ class OrderResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ---------- KDS (cocina) ----------
+# ---------- Preparación ----------
 class KitchenTransitionIn(BaseModel):
     estado_cocina: KitchenStatus
-
-
-class KdsItemResponse(BaseModel):
-    id: UUID
-    product_variant_id: UUID
-    quantity: int
-    estado_cocina: str
-    notes: str | None = None
-    options: list[OrderItemOptionResponse] = Field(default_factory=list)
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class KdsOrderResponse(BaseModel):
-    order_id: UUID
-    dining_table_id: UUID | None = None
-    table_number: int | None = None
-    created_at: datetime
-    items: list[KdsItemResponse] = Field(default_factory=list)
 
 
 # ---------- Anulación / reemplazo de ítem ----------

@@ -24,7 +24,7 @@ from app.api.v1.sales.schemas import SaleResponse
 from app.api.v1.orders.schemas import (
     TableCreate, TableUpdate, TableResponse, TableQrTokenResponse,
     OrderCreate, OrderResponse, OrderItemIn,
-    OrderItemResponse, KdsOrderResponse, KitchenTransitionIn, VoidItemIn,
+    OrderItemResponse, KitchenTransitionIn, VoidItemIn,
     BlockIn, CancelIn, PayIn, BillResponse,
     TableStatusUpdate, MoveOrderIn, MergeOrdersIn, MergeResponse, GroupBillResponse,
 )
@@ -216,16 +216,11 @@ def add_table_item(
     return _load_order(db, order.id)
 
 
-# ============================ KDS / cocina ============================
-@router.get("/kds", response_model=list[KdsOrderResponse], summary="Pantalla de cocina (ítems activos por mesa/orden)")
-def kds_board(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    return kitchen.list_kds(db)
-
-
+# ============================ Preparación ============================
 @router.patch(
     "/items/{item_id}/kitchen",
     response_model=OrderItemResponse,
-    summary="Avanzar estado de cocina de un ítem (pendiente→en_preparacion→listo→entregado)",
+    summary="Avanzar la preparación de un ítem (pendiente→en_preparacion→listo)",
 )
 def kitchen_transition(
     item_id: UUID, body: KitchenTransitionIn,
@@ -234,9 +229,12 @@ def kitchen_transition(
 ):
     """Devuelve `rt_v`: la versión del evento que acaba de emitir esta escritura.
 
-    El KDS parchea el ítem localmente tras el PATCH (escritura optimista). Sin
-    `rt_v` no tendría con qué descartar un evento en vuelo de otra pantalla que
-    llegara justo después y revirtiera visualmente lo que el cocinero ya vio.
+    Sirve para que una pantalla que parchea el ítem en local (escritura
+    optimista) pueda descartar un evento en vuelo de otra terminal que llegue
+    justo después y revierta visualmente lo que el usuario ya vio.
+
+    `pendiente → listo` es un salto legal: quien toma el pedido es quien lo
+    prepara, así que la terminal lo marca de un toque.
     """
     item = kitchen.transition_kitchen(db, item_id, body)
     order = db.get(CustomerOrder, item.order_id)
@@ -251,6 +249,33 @@ def kitchen_transition(
     if entry_id is not None:
         out.rt_v = events.version_of(entry_id)
     return out
+
+
+@router.post(
+    "/{order_id}/ready",
+    response_model=OrderResponse,
+    summary="Marcar como listos todos los ítems en curso de la orden",
+)
+def order_ready(
+    order_id: UUID,
+    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
+):
+    """Lo que la terminal necesita para cobrar sin ir ítem por ítem.
+
+    Emite un evento por ítem cambiado en lugar de uno agregado: las pantallas ya
+    escuchan `order.item_kitchen_changed`, y un tipo nuevo obligaría a tocarlas
+    todas para no ganar nada."""
+    order, cambiados = kitchen.mark_order_ready(db, order_id)
+    for it in cambiados:
+        events.item_kitchen_changed(
+            tenant.id,
+            order_id=order.id,
+            table_session_id=order.table_session_id,
+            item_id=it.id,
+            estado_cocina=it.estado_cocina,
+        )
+    return _load_order(db, order.id)
 
 
 @router.post(
@@ -400,8 +425,8 @@ def list_orders(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """La terminal y el KDS sondean esto, así que responde con `ETag`: mientras
-    nada cambie el navegador revalida y recibe un 304, sin cuerpo ni re-render."""
+    """La terminal sondea esto, así que responde con `ETag`: mientras nada
+    cambie el navegador revalida y recibe un 304, sin cuerpo ni re-render."""
     q = select(CustomerOrder).options(
         selectinload(CustomerOrder.items).selectinload(OrderItem.options)
     ).order_by(CustomerOrder.created_at.desc())
@@ -422,6 +447,6 @@ def get_order(order_id: UUID, db: Session = Depends(get_db), _: User = Depends(g
 #
 # Cada transición legítima tiene su endpoint, con sus reglas:
 #   recibida → abierta    POST /orders/{id}/confirm      (descuenta inventario)
-#   abierta  → bloqueada  POST /orders/{id}/block        (valida cocina)
+#   abierta  → bloqueada  POST /orders/{id}/block        (valida la preparación)
 #   → pagada              POST /table-sessions/{id}/close (cobra y libera la mesa)
 #   → cancelada           POST /orders/{id}/cancel       (revierte lo no preparado)
