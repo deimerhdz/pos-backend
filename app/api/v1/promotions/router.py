@@ -2,15 +2,15 @@
 (RF-012) vive en el checkout de ventas, que llama a `service.evaluate`."""
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User
 from app.core.audit import record_audit
+from app.core.pagination import Page, paginate
 from app.models.promotion import Promotion
 from app.api.v1.promotions import service
 from app.api.v1.promotions.schemas import (
@@ -20,13 +20,16 @@ from app.api.v1.promotions.schemas import (
 router = APIRouter(prefix="/promotions", tags=["promotions"])
 
 
-@router.get("", response_model=list[PromotionResponse], summary="Listar promociones")
-def list_promotions(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    return db.execute(
-        select(Promotion)
-        .options(selectinload(Promotion.targets), selectinload(Promotion.combo_items))
-        .order_by(Promotion.name)
-    ).scalars().all()
+@router.get("", response_model=Page[PromotionResponse], summary="Listar promociones")
+def list_promotions(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    active: bool | None = Query(None, description="Filtra por estado activo/inactivo."),
+    search: str | None = Query(None, description="Búsqueda por nombre."),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return paginate(db, service.list_query(search=search, active=active), page, size)
 
 
 @router.post("", response_model=PromotionResponse, status_code=status.HTTP_201_CREATED, summary="Crear promoción")
