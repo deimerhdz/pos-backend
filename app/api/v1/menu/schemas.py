@@ -3,6 +3,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.v1.promotions.schemas import PromotionType
+
 
 class MenuOptionResponse(BaseModel):
     id: UUID
@@ -30,6 +32,10 @@ class MenuVariantResponse(BaseModel):
     # Precio ya con el mejor descuento percent/fixed vigente aplicado, o `None` si
     # ninguna promoción aplica. Se evalúa asumiendo cantidad 1 (aún no hay carrito).
     discounted_price: Decimal | None = None
+    # Tipo de la promoción que generó `discounted_price` ("percent"/"fixed"), o
+    # `None` si no hay descuento — el cliente lo usa solo para elegir cómo mostrar
+    # la insignia de descuento (% vs. monto fijo), nunca para recalcular precios.
+    discount_kind: PromotionType | None = None
     # Los grupos cuelgan de la presentación: cuántas opciones se eligen cambia con el
     # tamaño (la ensalada pequeña 1 sabor, la mediana 2). Esta es la fuente autoritativa.
     option_groups: list[MenuOptionGroupResponse] = Field(default_factory=list)

@@ -81,6 +81,7 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
     avail = _option_availability(db)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     promos = active_discount_promotions(db, now)
+    promo_by_id = {p.id: p for p in promos}
 
     categories = db.execute(
         select(Category).where(Category.active.is_(True)).order_by(Category.name)
@@ -143,16 +144,18 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
                 # que una promo con `min_qty > 1` no se muestra hasta que el
                 # comensal la tenga (`serialize_cart` sí conoce la cantidad real).
                 discounted_price = None
+                discount_kind = None
                 if promos:
-                    discount, _ = best_line_discount(promos, p.id, cat.id, 1, v.price)
+                    discount, promo_id = best_line_discount(promos, p.id, cat.id, 1, v.price)
                     if discount > 0:
                         discounted_price = (v.price - discount).quantize(
                             Decimal("0.01"), rounding=ROUND_HALF_UP
                         )
+                        discount_kind = promo_by_id[promo_id].type
 
                 variants.append(MenuVariantResponse(
                     id=v.id, name=v.name, price=v.price, discounted_price=discounted_price,
-                    option_groups=groups, available=v_pedible,
+                    discount_kind=discount_kind, option_groups=groups, available=v_pedible,
                 ))
                 pedible = pedible or v_pedible
 
