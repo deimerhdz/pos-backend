@@ -27,7 +27,7 @@ from app.models.product_variant import ProductVariant
 from app.models.cash_shift import CashShift
 from app.models.sale import Sale
 from app.models.customer_order import CustomerOrder
-from app.models.order_item import OrderItem
+from app.models.order_item import EN_CURSO, OrderItem
 from app.models.order_cancel_log import OrderCancelLog
 from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
 from app.api.v1.orders.consumption import deduct_order_items, reverse_order_items
@@ -39,14 +39,12 @@ from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
 
-# Estados de cocina que impiden bloquear para cobro.
-_NOT_READY = ("pendiente", "en_preparacion")
 TERMINAL = ("pagada", "cancelada")
 
-# Estados de cocina en los que el insumo YA se combinó físicamente: cancelar no
-# lo devuelve al stock, es pérdida. El 'out' de la confirmación ya representa esa
+# Estados en los que el insumo YA se combinó físicamente: cancelar no lo
+# devuelve al stock, es pérdida. El 'out' de la confirmación ya representa esa
 # pérdida, así que tampoco se escribe un movimiento extra (sería doble descuento).
-_CONSUMED_KITCHEN = ("en_preparacion", "listo", "entregado")
+_CONSUMED_KITCHEN = ("en_preparacion", "listo")
 
 # Estados de orden en los que el inventario todavía NO se descontó: el descuento
 # ocurre al confirmar. Cancelar desde aquí no genera ningún movimiento.
@@ -90,7 +88,7 @@ def block_order(db: Session, order_id: UUID, data: BlockIn) -> CustomerOrder:
         pendientes = db.execute(
             select(OrderItem).where(
                 OrderItem.order_id == order.id,
-                OrderItem.estado_cocina.in_(_NOT_READY),
+                OrderItem.estado_cocina.in_(EN_CURSO),
             )
         ).scalars().all()
         if pendientes:
@@ -363,14 +361,14 @@ def cancel_order(
     user: User | None,
     participant: SessionParticipant | None = None,
 ) -> CustomerOrder:
-    """Cancela un pedido y ajusta el inventario **según lo que cocina alcanzó a
+    """Cancela un pedido y ajusta el inventario **según lo que se alcanzó a
     consumir**, no como una reversa simétrica:
 
     - orden aún sin confirmar (`recibida`): nunca se descontó → cero movimientos;
     - ítem `pendiente`: descontado pero no preparado → entrada real ('in');
-    - ítem `en_preparacion`/`listo`/`entregado`: el insumo ya se combinó → **no
-      vuelve al stock**. El 'out' de la confirmación ya es esa pérdida; escribir
-      otro movimiento la descontaría dos veces. Se traza en `audit_logs`;
+    - ítem `en_preparacion`/`listo`: el insumo ya se combinó → **no vuelve al
+      stock**. El 'out' de la confirmación ya es esa pérdida; escribir otro
+      movimiento la descontaría dos veces. Se traza en `audit_logs`;
     - ítem `anulado`: ya lo resolvió `void_item`.
 
     Devolver todo al stock (comportamiento anterior) sobrestimaba el inventario en

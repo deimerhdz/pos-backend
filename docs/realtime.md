@@ -1,6 +1,6 @@
 # Tiempo real (SSE + Redis Streams)
 
-Sustituye el sondeo de los tres clientes (menú QR, terminal de mesas, KDS) por
+Sustituye el sondeo de los dos clientes (menú QR, terminal de mesas) por
 notificaciones push. La latencia baja de ~10 s a <100 ms y el trabajo por cambio
 pasa de O(clientes × frecuencia) a O(destinatarios del evento) ≈ 4.
 
@@ -60,7 +60,7 @@ PATCH /orders/items/{id}/kitchen
 | Canal | Quién | Qué recibe |
 |---|---|---|
 | `session:{table_session_id}` | Comensal | Solo lo de **su** sesión de mesa |
-| `staff` | Cajero, KDS | Todo el tenant |
+| `staff` | Terminal de mesas | Todo el tenant |
 
 La suscripción **se deriva del token, nunca se pide**: el `table_session_id` va
 firmado en el JWT del comensal, así que es imposible escuchar otra mesa u otro
@@ -243,6 +243,6 @@ documentados en el código y cubiertos por tests:
    cuando cambia. Por eso `session.bill_changed` solo la marca obsoleta y ofrece
    un botón "Actualizar": recargarla sola le borraría al cajero lo que teclea.
 
-3. **El KDS escribe optimista** (`kitchen-merge.ts`). Se descartan los eventos
-   con `v` menor o igual a la ya aplicada y se aplazan los de ítems con un PATCH
-   en vuelo; la versión se siembra con el `rt_v` que devuelve el propio PATCH.
+3. **`rt_v` protege la escritura optimista.** Un cliente que parchee el ítem en
+   local puede descartar los eventos con `v` menor o igual a la ya aplicada;
+   la versión se siembra con el `rt_v` que devuelve el propio PATCH.

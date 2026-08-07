@@ -40,7 +40,7 @@ def stream_key(tenant_id: int) -> str:
     return f"events:tenant:{tenant_id}"
 
 
-#: Canal del personal: cajero y KDS ven todo el tenant.
+#: Canal del personal: la terminal ve todo el tenant.
 CH_STAFF = "staff"
 
 

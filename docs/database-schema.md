@@ -486,7 +486,7 @@ Las columnas de tenant que referencian **quién actuó** (`user_id`) son *soft-r
 - `void_de` → `heladeria.order_items(id)`
 
 **Checks:**
-- `ck__order_items__ck_order_item_estado_cocina`: CHECK (((estado_cocina)::text = ANY ((ARRAY['pendiente'::character varying, 'en_preparacion'::character varying, 'listo'::character varying, 'entregado'::character varying, 'anulado'::character varying])::text[])))
+- `ck__order_items__ck_order_item_estado_cocina`: CHECK (((estado_cocina)::text = ANY ((ARRAY['pendiente'::character varying, 'en_preparacion'::character varying, 'listo'::character varying, 'anulado'::character varying])::text[])))
 - `ck__order_items__ck_order_item_quantity_positive`: CHECK ((quantity > 0))
 
 **Índices:**

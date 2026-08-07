@@ -20,7 +20,7 @@ from app.core.crud import get_or_404
 from app.core.models import User
 from app.models.customer_order import CustomerOrder
 from app.models.dining_table import DiningTable
-from app.models.order_item import OrderItem, OrderItemOption
+from app.models.order_item import EN_CURSO, OrderItem, OrderItemOption
 from app.models.sale import Sale
 from app.models.session_participant import SessionParticipant
 from app.models.table_session import TableSession
@@ -33,9 +33,6 @@ from app.api.v1.table_sessions.schemas import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Estados de cocina que impiden cerrar: hay comida sin entregar.
-_EN_CURSO = ("pendiente", "en_preparacion")
 
 
 def _load(db: Session, table_session_id: UUID, *, lock: bool = False) -> TableSession:
@@ -200,7 +197,7 @@ def _assert_closable(db: Session, orders: list[CustomerOrder]) -> None:
         {"order_id": str(o.id), "order_item_id": str(it.id),
          "estado_cocina": it.estado_cocina}
         for o in orders for it in o.items
-        if it.estado_cocina in _EN_CURSO
+        if it.estado_cocina in EN_CURSO
     ]
     if en_cocina:
         raise HTTPException(
@@ -466,9 +463,9 @@ def set_assignments(
             item.participant_id = entradas[0].participant_id
             continue
 
-        # Partir en cocina duplicaría el ticket del KDS con la comida a medio hacer.
-        # No estorba: cobrar ya exige que cocina haya terminado.
-        if item.estado_cocina in _EN_CURSO:
+        # Partir un ítem a medio preparar duplicaría la línea con la comida sin
+        # terminar. No estorba: cobrar ya exige que esté listo.
+        if item.estado_cocina in EN_CURSO:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "No se puede repartir por unidades un producto que cocina aún no ha "

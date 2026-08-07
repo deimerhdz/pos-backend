@@ -1,8 +1,9 @@
-"""KDS (pantalla de cocina) y ciclo de vida del ítem (Fase 6).
+"""Ciclo de vida del ítem: preparación y anulación.
 
-La cocina es la fuente de verdad del `estado_cocina`, independiente del status
-de pago. Editar un ítem ya en preparación/listo no es UPDATE silencioso: se anula
-(`void`) y se crea uno nuevo con `void_de`."""
+`estado_cocina` es independiente del status de pago de la orden y lo mueve la
+terminal de mesas (antes había un KDS aparte, ya deprecado). Editar un ítem ya
+en preparación/listo no es UPDATE silencioso: se anula (`void`) y se crea uno
+nuevo con `void_de`."""
 import logging
 from uuid import UUID
 
@@ -12,27 +13,23 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.crud import get_or_404
 from app.core.models import User
-from app.models.dining_table import DiningTable
 from app.models.option import Option
 from app.models.customer_order import CustomerOrder
-from app.models.order_item import OrderItem, OrderItemOption
+from app.models.order_item import EN_CURSO, OrderItem, OrderItemOption
 from app.models.order_item_void_log import OrderItemVoidLog
 from app.models.product_variant import ProductVariant
 from app.api.v1.orders.consumption import deduct_order_items, reverse_order_items
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
-from app.api.v1.orders.schemas import (
-    KdsItemResponse, KdsOrderResponse, KitchenTransitionIn, VoidItemIn,
-)
+from app.api.v1.orders.schemas import KitchenTransitionIn, VoidItemIn
 
 logger = logging.getLogger(__name__)
 
-ACTIVE_KITCHEN = ("pendiente", "en_preparacion", "listo")
-
-# Transiciones legales hacia adelante (KDS).
-_FORWARD = {
-    "pendiente": "en_preparacion",
-    "en_preparacion": "listo",
-    "listo": "entregado",
+# Transiciones legales, siempre hacia adelante. `pendiente → listo` es el salto
+# directo que usa el botón de un toque de la terminal: quien toma el pedido es
+# quien lo prepara, y obligarle a pasar por 'en_preparacion' es un clic de más.
+_ALLOWED: dict[str, frozenset[str]] = {
+    "pendiente": frozenset({"en_preparacion", "listo"}),
+    "en_preparacion": frozenset({"listo"}),
 }
 
 
@@ -43,45 +40,16 @@ def _item_options(db: Session, item: OrderItem) -> list[Option]:
     return db.execute(select(Option).where(Option.id.in_(opt_ids))).scalars().all()
 
 
-def list_kds(db: Session) -> list[KdsOrderResponse]:
-    """Ítems activos de cocina, agrupados por orden/mesa (no por comensal).
-
-    Excluye los pedidos en `recibida`: el comensal ya los envió pero el staff aún
-    no los confirmó, así que no han comprometido stock y no deben llegar a cocina."""
-    orders = db.execute(
-        select(CustomerOrder)
-        .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
-        .where(CustomerOrder.status.notin_(("cancelada", "recibida")))
-        .order_by(CustomerOrder.created_at)
-    ).scalars().all()
-
-    table_numbers = dict(db.execute(select(DiningTable.id, DiningTable.number)).all())
-
-    result: list[KdsOrderResponse] = []
-    for order in orders:
-        active = [it for it in order.items if it.estado_cocina in ACTIVE_KITCHEN]
-        if not active:
-            continue
-        result.append(KdsOrderResponse(
-            order_id=order.id,
-            dining_table_id=order.dining_table_id,
-            table_number=table_numbers.get(order.dining_table_id),
-            created_at=order.created_at,
-            items=[KdsItemResponse.model_validate(it) for it in active],
-        ))
-    return result
-
-
 def transition_kitchen(
     db: Session, item_id: UUID, data: KitchenTransitionIn
 ) -> OrderItem:
     item = get_or_404(db, OrderItem, item_id, "Order item not found")
     target = data.estado_cocina.value
-    if _FORWARD.get(item.estado_cocina) != target:
+    if target not in _ALLOWED.get(item.estado_cocina, frozenset()):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={
-                "error": "Transición de cocina inválida",
+                "error": "Transición de preparación inválida",
                 "desde": item.estado_cocina,
                 "hacia": target,
             },
@@ -90,6 +58,36 @@ def transition_kitchen(
     db.commit()
     db.refresh(item)
     return item
+
+
+def mark_order_ready(db: Session, order_id: UUID) -> tuple[CustomerOrder, list[OrderItem]]:
+    """Pasa a `listo` todos los ítems en curso de la orden, en un solo commit.
+
+    Es lo que necesita la terminal para cobrar sin ir ítem por ítem: la
+    alternativa era una petición por transición y por ítem. Devuelve también los
+    ítems que cambiaron, porque el router emite un evento por cada uno."""
+    order = db.execute(
+        select(CustomerOrder)
+        .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
+        .where(CustomerOrder.id == order_id)
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    if order.status in ("pagada", "cancelada"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"La orden ya es terminal (status={order.status})",
+        )
+
+    cambiados = [it for it in order.items if it.estado_cocina in EN_CURSO]
+    if not cambiados:
+        return order, []
+
+    for it in cambiados:
+        it.estado_cocina = "listo"
+    db.commit()
+    db.refresh(order)
+    return order, cambiados
 
 
 def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> CustomerOrder:
@@ -103,11 +101,6 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
 
     if item.estado_cocina == "anulado":
         raise HTTPException(status.HTTP_409_CONFLICT, "El ítem ya está anulado")
-    if item.estado_cocina == "entregado":
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "Ítem entregado: reclamo/reproceso, fuera de alcance",
-        )
 
     order_id = item.order_id
     was_pendiente = item.estado_cocina == "pendiente"

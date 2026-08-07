@@ -77,7 +77,7 @@ def _expect_422(fn, label):
 
 
 def _fixture(db, suf: str):
-    """Mesa con sesión activa, dos comensales y un pedido entregado de 3 líneas:
+    """Mesa con sesión activa, dos comensales y un pedido listo de 3 líneas:
     una de cada comensal y una sin asignar (la que teclearía el mesero)."""
     user = db.execute(select(User).limit(1)).scalar_one_or_none()
     if user is None:
@@ -127,7 +127,7 @@ def _fixture(db, suf: str):
     for participant_id in (ana.id, beto.id, None):
         db.add(OrderItem(
             order_id=order.id, product_variant_id=variant.id, participant_id=participant_id,
-            quantity=1, unit_price=PRECIO, estado_cocina="entregado",
+            quantity=1, unit_price=PRECIO, estado_cocina="listo",
         ))
     db.flush()
     return dict(shift=shift.id, user=user.id, method=method.id, table=table.id,
@@ -391,7 +391,7 @@ def unidades():
                    {"o": str(fx["order"])})
         db.add(OrderItem(
             order_id=fx["order"], product_variant_id=fx["variant"], participant_id=None,
-            quantity=2, unit_price=PRECIO, estado_cocina="entregado",
+            quantity=2, unit_price=PRECIO, estado_cocina="listo",
         ))
         db.commit()
 
