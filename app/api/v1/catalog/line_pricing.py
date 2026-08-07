@@ -27,6 +27,7 @@ from app.models.option import Option
 from app.models.option_group import OptionGroup
 from app.models.product_variant import ProductVariant
 from app.models.inventory_item import InventoryItem
+from app.models.variant_option_group import VariantOptionGroup
 from app.api.v1.catalog.consumption_plan import (  # noqa: F401  (reexport)
     ConsumptionLine,
     load_variant_groups,
@@ -65,6 +66,45 @@ def load_valid_options(
     return options
 
 
+def grupos_que_descuentan(db: Session, links: Sequence[VariantOptionGroup]) -> set[UUID]:
+    """De estos grupos, cuáles mueven inventario al elegir una opción.
+
+    Hay **dos** vías y contar solo una deja fuera la mitad del catálogo:
+
+    - `variant_option_groups.quantity_per_option`: el tamaño reparte una cantidad
+      por cada opción elegida (la copa grande, 120 g de cada sabor);
+    - `options.item_quantity`: la opción descuenta lo suyo en todo el catálogo.
+
+    Basta con que la opción descuente por su cuenta para que el grupo importe:
+    elegir menos opciones descuenta menos, con independencia de dónde esté
+    escrita la cantidad.
+    """
+    gids = {l.option_group_id for l in links}
+    if not gids:
+        return set()
+    por_grupo = {l.option_group_id for l in links if l.quantity_per_option > 0}
+    por_opcion = set(db.execute(
+        select(Option.option_group_id)
+        .where(Option.option_group_id.in_(gids), Option.item_quantity > 0)
+        .distinct()
+    ).scalars().all())
+    return por_grupo | por_opcion
+
+
+def _exige_maximo(gid: UUID, lo: int, consumen: set[UUID]) -> bool:
+    """¿Este grupo obliga a elegir el máximo, y no solo el mínimo?
+
+    Solo si descuenta inventario **y** es obligatorio. Un grupo así reparte una
+    cantidad física fija entre las opciones elegidas: los tres sabores de un
+    helado de tres bolas. Elegir uno solo sirve tres bolas y descuenta una.
+
+    Un grupo que descuenta pero es opcional (`min_select = 0`) se queda como
+    está: ahí no elegir es una respuesta válida y el consumo cuadra con lo que
+    se sirve.
+    """
+    return lo > 0 and gid in consumen
+
+
 def validate_option_selection(
     db: Session, variant: ProductVariant, options: Sequence[Option]
 ) -> None:
@@ -80,13 +120,17 @@ def validate_option_selection(
     catálogo, pero **los grupos que descuentan se validan siempre**. Ahí no es
     cosmético, es inventario.
 
+    Y por lo mismo un grupo que descuenta y es obligatorio exige el **máximo**, no el
+    mínimo (ver `_exige_maximo`): el error simétrico al de arriba es elegir un sabor
+    para un helado de tres bolas, que sirve tres y descuenta una.
+
     Todo sale de la misma tabla y del mismo nivel (la variante). Antes los bounds venían
     del producto y el consumo de la variante, así que un tamaño podía exigir un número
     de sabores pensado para otro.
     """
     links = load_variant_groups(db, variant.id)
     bounds = {l.option_group_id: (l.min_select, l.max_select) for l in links}
-    consumen = {l.option_group_id for l in links if l.quantity_per_option > 0}
+    consumen = grupos_que_descuentan(db, links)
 
     chosen: dict[UUID, int] = defaultdict(int)
     for option in options:
@@ -99,14 +143,20 @@ def validate_option_selection(
             problems.append((gid, "no está disponible para esta presentación"))
             continue
         lo, hi = bounds[gid]
-        if count > hi:
+        if _exige_maximo(gid, lo, consumen):
+            if count != hi:
+                problems.append(
+                    (gid, f"exige exactamente {hi} opción(es), se enviaron {count}")
+                )
+        elif count > hi:
             problems.append((gid, f"admite como máximo {hi} opción(es), se enviaron {count}"))
         elif count < lo:
             problems.append((gid, f"exige al menos {lo} opción(es), se enviaron {count}"))
 
-    for gid, (lo, _hi) in bounds.items():
+    for gid, (lo, hi) in bounds.items():
         if lo > 0 and gid not in chosen:
-            problems.append((gid, f"es obligatorio: elige al menos {lo} opción(es)"))
+            faltan = hi if _exige_maximo(gid, lo, consumen) else lo
+            problems.append((gid, f"es obligatorio: elige {faltan} opción(es)"))
 
     if not problems:
         return

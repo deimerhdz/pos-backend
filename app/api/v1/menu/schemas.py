@@ -22,6 +22,11 @@ class MenuOptionGroupResponse(BaseModel):
     name: str
     min_select: int
     max_select: int
+    # El grupo descuenta inventario por cada opción elegida. El cliente no ve
+    # cuánto (eso es del negocio), pero sí necesita el booleano: en un grupo así
+    # elegir menos del máximo sirve de más y descuenta de menos, así que la UI
+    # tiene que exigir el máximo en vez del mínimo.
+    consume: bool = False
     options: list[MenuOptionResponse] = Field(default_factory=list)
 
 

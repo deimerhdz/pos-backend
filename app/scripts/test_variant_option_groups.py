@@ -336,8 +336,30 @@ def main():
                     "y el tamaño deja de significar nada"
                 )
 
+        # --- 7. un grupo que descuenta exige el MÁXIMO, no el mínimo -----------
+        # El error simétrico al anterior: la grande son dos bolas, así que un solo
+        # sabor sirve dos y descuenta una. Con `min_select=1` esto pasaba.
+        with with_db(schema) as db:
+            uno = [db.get(Option, op_fresa_id)]
+            try:
+                validate_option_selection(db, db.get(ProductVariant, grande_id), uno)
+            except HTTPException as e:
+                if e.status_code != 422:
+                    raise AssertionError(f"esperado 422, vino {e.status_code}")
+                print("  ok  · la grande rechaza 1 solo sabor → 422 (exige los 2)")
+            else:
+                raise AssertionError(
+                    "la grande aceptó 1 sabor con max_select=2: sirve dos bolas y "
+                    "descuenta una, y el inventario se sobrestima"
+                )
+
+            # La pequeña es 1–1: un sabor es justo su máximo y sigue siendo válido.
+            validate_option_selection(db, db.get(ProductVariant, pequena_id), uno)
+            print("  ok  · la pequeña acepta 1 sabor (su máximo)")
+
         print("\n✔ Cada tamaño manda su propia cardinalidad y su propia cantidad; "
-              "revierte simétricamente y bloquea la venta sin elegir.")
+              "revierte simétricamente, bloquea la venta sin elegir y exige el "
+              "máximo donde descuenta.")
         return 0
     finally:
         _cleanup(schema, product_id, group_id, [fresa_id, choco_id])

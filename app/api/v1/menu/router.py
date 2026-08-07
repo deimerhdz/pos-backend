@@ -135,6 +135,14 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
                     grupo = MenuOptionGroupResponse(
                         id=g.id, name=g.name,
                         min_select=link.min_select, max_select=link.max_select,
+                        # Descuenta el tamaño (`quantity_per_option`) o la propia
+                        # opción (`item_quantity`): cualquiera de las dos obliga
+                        # al comensal a completar el grupo. Ver
+                        # `line_pricing.grupos_que_descuentan`.
+                        consume=(
+                            link.quantity_per_option > 0
+                            or any(o.item_quantity > 0 for o in g.options if o.active)
+                        ),
                         options=options,
                     )
                     groups.append(grupo)
