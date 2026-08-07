@@ -6,12 +6,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ---------- Variantes ----------
 class VariantCreate(BaseModel):
+    # Se recortan los espacios antes de validar: «Pequeña » no es una presentación
+    # distinta de «Pequeña», y un nombre de solo espacios queda en 422 por min_length.
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     name: str = Field(..., min_length=1, max_length=255, examples=["1 bola", "2 bolas"])
     price: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
     sku: str | None = Field(None, max_length=100)
 
 
 class VariantUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     name: str | None = Field(None, min_length=1, max_length=255)
     price: Decimal | None = Field(None, ge=0, max_digits=12, decimal_places=2)
     sku: str | None = Field(None, max_length=100)
