@@ -32,10 +32,11 @@ def list_products(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     active: bool | None = Query(None, description="Filtra por estado activo/inactivo."),
+    search: str | None = Query(None, description="Búsqueda por nombre."),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    return paginate(db, service.list_query(active), page, size)
+    return paginate(db, service.list_query(active, search), page, size)
 
 
 @router.get(

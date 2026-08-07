@@ -14,11 +14,26 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql import Select
 
 from app.core.crud import get_or_404
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.promotion import Promotion, PromotionComboItem
+
+
+def list_query(search: str | None = None, active: bool | None = None) -> Select:
+    """Construye el Select filtrado/ordenado para GET /promotions."""
+    stmt = (
+        select(Promotion)
+        .options(selectinload(Promotion.targets), selectinload(Promotion.combo_items))
+        .order_by(Promotion.name)
+    )
+    if active is not None:
+        stmt = stmt.where(Promotion.active == active)
+    if search:
+        stmt = stmt.where(Promotion.name.ilike(f"%{search.strip()}%"))
+    return stmt
 
 
 def _valid_now(promo: Promotion, now: datetime) -> bool:

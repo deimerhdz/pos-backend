@@ -27,10 +27,12 @@ class ProductService:
         if category_id is not None:
             get_or_404(db, Category, category_id, "Category not found")
 
-    def list_query(self, active: bool | None = None) -> Select:
+    def list_query(self, active: bool | None = None, search: str | None = None) -> Select:
         stmt = select(Product).order_by(Product.created_at.desc())
         if active is not None:
             stmt = stmt.where(Product.active == active)
+        if search:
+            stmt = stmt.where(Product.name.ilike(f"%{search.strip()}%"))
         return stmt
 
     def get_or_404(self, db: Session, id: UUID) -> Product:
