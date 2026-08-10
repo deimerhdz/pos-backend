@@ -58,8 +58,10 @@ class Sale(UUIDPrimaryKeyMixin, Base):
     total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
 
     # Promoción aplicada automáticamente (RF-012); su descuento está incluido en `discount`.
+    # `SET NULL`, igual que los `combo_id` de cart/order/sale_items: sin él,
+    # borrar una promoción ya vendida lanzaba IntegrityError -> 500.
     promotion_id: Mapped[Optional[UUID]] = mapped_column(
-        ForeignKey("promotions.id"), nullable=True
+        ForeignKey("promotions.id", ondelete="SET NULL"), nullable=True
     )
 
     # Efectivo recibido y cambio entregado (RF-029). Nullable: ventas antiguas

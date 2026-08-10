@@ -8,6 +8,7 @@ from app.core.db import get_db
 from app.core.dependencies import AccessTokenBearer, get_current_user
 from app.core.crud import get_or_404, ensure_unique
 from app.core.models import User
+from app.core.pagination import Page, paginate
 from app.models.category import Category
 from app.api.v1.categories.schemas import CategoryCreate, CategoryUpdate, CategoryResponse
 
@@ -16,27 +17,32 @@ acccess_token_bearer = AccessTokenBearer()
 
 @router.get(
     "",
-    response_model=list[CategoryResponse],
+    response_model=Page[CategoryResponse],
     summary="Listar categorías",
-    description="Devuelve todas las categorías. Permite filtrar por estado activo/inactivo.",
-    response_description="Lista de categorías.",
+    description="Devuelve las categorías de forma paginada. Permite filtrar por estado activo/inactivo y buscar por nombre.",
+    response_description="Página de categorías.",
     responses={
         401: {"description": "No autenticado o token inválido."},
     },
 )
 def list_categories(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     active: bool | None = Query(
         None, description="Filtra por estado activo (true) o inactivo (false)."
     ),
+    search: str | None = Query(None, description="Búsqueda por nombre (contiene, sin distinguir mayúsculas)."),
     db: Session = Depends(get_db),
     _: dict = Depends(acccess_token_bearer),
     user: User = Depends(get_current_user),
 
 ):
-    query = select(Category)
+    query = select(Category).order_by(Category.name)
     if active is not None:
         query = query.where(Category.active == active)
-    return db.execute(query).scalars().all()
+    if search:
+        query = query.where(Category.name.ilike(f"%{search.strip()}%"))
+    return paginate(db, query, page, size)
 
 
 @router.get(

@@ -5,7 +5,7 @@ disponibilidad. **No descuenta inventario**: eso ocurre al confirmar el pedido."
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -26,6 +26,7 @@ from app.models.cart_item import CartItem, CartItemOption
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
 from app.models.option import Option
+from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.api.v1.catalog.line_pricing import (
     check_availability,
@@ -200,18 +201,54 @@ def _cart_consumption(
     return total
 
 
-def serialize_cart(cart: Cart, participant: SessionParticipant) -> CartResponse:
+def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> CartResponse:
+    now = _now()
+    promos = promotions.active_discount_promotions(db, now)
+
+    variant_ids = {it.product_variant_id for it in cart.items}
+    catalog: dict[UUID, tuple[UUID, UUID]] = {}
+    if variant_ids:
+        rows = db.execute(
+            select(ProductVariant.id, ProductVariant.product_id, Product.category_id)
+            .join(Product, Product.id == ProductVariant.product_id)
+            .where(ProductVariant.id.in_(variant_ids))
+        ).all()
+        catalog = {row.id: (row.product_id, row.category_id) for row in rows}
+
     items: list[CartItemResponse] = []
     total = Decimal("0")
+    discounted_total = Decimal("0")
+    any_discount = False
     for it in cart.items:
         line_total = Decimal(it.unit_price) * it.quantity
         total += line_total
+        discounted_unit_price = None
+        discounted_line_total = None
+        # Los combos ya llevan su propio ahorro (`combo_discount_for_lines` al
+        # cobrar); aplicarles además un percent/fixed sería descontar dos veces.
+        if promos and it.combo_id is None:
+            product_id, category_id = catalog.get(it.product_variant_id, (None, None))
+            discount, _ = promotions.best_line_discount(
+                promos, product_id, category_id, it.quantity, line_total,
+                unit_price=Decimal(it.unit_price),
+            )
+            if discount > 0:
+                discounted_line_total = (line_total - discount).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                discounted_unit_price = (discounted_line_total / it.quantity).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                any_discount = True
+        discounted_total += discounted_line_total if discounted_line_total is not None else line_total
         items.append(CartItemResponse(
             id=it.id,
             product_variant_id=it.product_variant_id,
             quantity=it.quantity,
             unit_price=it.unit_price,
             line_total=line_total,
+            discounted_unit_price=discounted_unit_price,
+            discounted_line_total=discounted_line_total,
             notes=it.notes,
             combo_id=it.combo_id,
             options=[CartItemOptionResponse.model_validate(o) for o in it.options],
@@ -220,7 +257,9 @@ def serialize_cart(cart: Cart, participant: SessionParticipant) -> CartResponse:
         id=cart.id, participant_id=cart.participant_id, status=cart.status,
         display_name=participant.display_name,
         display_label=participant.display_label,
-        total=total, items=items,
+        total=total,
+        discounted_total=discounted_total if any_discount else None,
+        items=items,
     )
 
 
@@ -229,7 +268,7 @@ def get_cart(db: Session, participant_id: UUID) -> CartResponse:
     porque el token de sesión no lo lleva: al recargar el menú, `GET /cart` es lo
     único que permite al front repintar el saludo."""
     participant = get_or_404(db, SessionParticipant, participant_id, "Comensal no encontrado")
-    return serialize_cart(_get_or_create_open_cart(db, participant_id), participant)
+    return serialize_cart(db, _get_or_create_open_cart(db, participant_id), participant)
 
 
 # --------------------------------------------------------------- CRUD de líneas

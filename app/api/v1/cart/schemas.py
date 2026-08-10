@@ -72,6 +72,11 @@ class CartItemResponse(BaseModel):
     quantity: int
     unit_price: Decimal
     line_total: Decimal
+    # Precio/subtotal ya con el mejor descuento percent/fixed vigente aplicado, o
+    # `None` si ninguna promoción aplica a esta línea (o es un combo: ese ahorro se
+    # calcula aparte, al cobrar).
+    discounted_unit_price: Decimal | None = None
+    discounted_line_total: Decimal | None = None
     notes: str | None = None
     combo_id: UUID | None = None
     options: list[CartItemOptionResponse] = Field(default_factory=list)
@@ -88,6 +93,10 @@ class CartResponse(BaseModel):
     display_label: str | None = None
     status: str
     total: Decimal
+    # Suma de las líneas ya con su mejor descuento aplicado, o `None` si ninguna
+    # línea tiene promoción vigente. Vista previa para el comensal; el cobro real
+    # lo sigue fijando el checkout de staff.
+    discounted_total: Decimal | None = None
     items: list[CartItemResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

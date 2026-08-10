@@ -3,7 +3,8 @@
 `GET /menu` resuelve el tenant por el header x-tenant-host (catálogo genérico del
 local); `GET /menu/qr-token/{token}` lo resuelve desde el token firmado, que es la
 vía del comensal y la única que identifica una mesa."""
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -22,6 +23,7 @@ from app.models.product_variant import ProductVariant
 from app.models.option_group import OptionGroup
 from app.models.variant_option_group import VariantOptionGroup
 from app.models.dining_table import DiningTable
+from app.api.v1.promotions.service import active_discount_promotions, best_line_discount
 from app.api.v1.menu.schemas import (
     MenuCategoryResponse, MenuProductResponse, MenuVariantResponse,
     MenuOptionGroupResponse, MenuOptionResponse, MenuTableResponse,
@@ -77,6 +79,9 @@ def _option_availability(db: Session) -> dict[UUID, bool]:
 
 def _build_menu(db: Session) -> list[MenuCategoryResponse]:
     avail = _option_availability(db)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    promos = active_discount_promotions(db, now)
+    promo_by_id = {p.id: p for p in promos}
 
     categories = db.execute(
         select(Category).where(Category.active.is_(True)).order_by(Category.name)
@@ -130,14 +135,35 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
                     grupo = MenuOptionGroupResponse(
                         id=g.id, name=g.name,
                         min_select=link.min_select, max_select=link.max_select,
+                        # Descuenta el tamaño (`quantity_per_option`) o la propia
+                        # opción (`item_quantity`): cualquiera de las dos obliga
+                        # al comensal a completar el grupo. Ver
+                        # `line_pricing.grupos_que_descuentan`.
+                        consume=(
+                            link.quantity_per_option > 0
+                            or any(o.item_quantity > 0 for o in g.options if o.active)
+                        ),
                         options=options,
                     )
                     groups.append(grupo)
                     union.setdefault(g.id, grupo)
 
+                # Cantidad 1 a propósito: al navegar el menú aún no hay carrito, así
+                # que una promo con `min_qty > 1` no se muestra hasta que el
+                # comensal la tenga (`serialize_cart` sí conoce la cantidad real).
+                discounted_price = None
+                discount_kind = None
+                if promos:
+                    discount, promo_id = best_line_discount(promos, p.id, cat.id, 1, v.price)
+                    if discount > 0:
+                        discounted_price = (v.price - discount).quantize(
+                            Decimal("0.01"), rounding=ROUND_HALF_UP
+                        )
+                        discount_kind = promo_by_id[promo_id].type
+
                 variants.append(MenuVariantResponse(
-                    id=v.id, name=v.name, price=v.price,
-                    option_groups=groups, available=v_pedible,
+                    id=v.id, name=v.name, price=v.price, discounted_price=discounted_price,
+                    discount_kind=discount_kind, option_groups=groups, available=v_pedible,
                 ))
                 pedible = pedible or v_pedible
 

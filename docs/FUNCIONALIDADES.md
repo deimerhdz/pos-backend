@@ -19,7 +19,7 @@ schema `shared`; los datos operativos viven en el schema del tenant.
 |---|---|---|
 | **Super Admin** (global, `tenant_id = NULL`) | JWT global (`get_current_super_admin`), sin `x-tenant-host` | Provisiona tenants y su admin inicial; visión global de usuarios y tenants |
 | **Admin de tenant** (`role = ADMIN`) | JWT de tenant + `x-tenant-host` (`require_tenant_admin`) | Configuración: usuarios, catálogo, inventario, proveedores/compras, cajas, mesas, métodos de pago, imágenes |
-| **Cajero / Mesero** (`role = CASHIER` o `ADMIN`) | JWT de tenant + `x-tenant-host` (`get_current_user`) | Operación diaria: caja, ventas, mesas, cocina/KDS, cobro y facturación |
+| **Cajero / Mesero** (`role = CASHIER` o `ADMIN`) | JWT de tenant + `x-tenant-host` (`get_current_user`) | Operación diaria: caja, ventas, mesas, preparación, cobro y facturación |
 | **Comensal (QR, anónimo)** | Token QR firmado + token de sesión (`x-session-token`) | Menú público, sesión de mesa y carrito, sin cuenta de usuario |
 
 > **Nota:** `require_tenant_admin` incluye todo lo de `get_current_user` (un ADMIN también opera).
@@ -110,8 +110,8 @@ Columnas: **ID · Actor · Requerimiento · Endpoint**.
 | RF-ORD-04 | Cajero/Mesero | Cerrar una sesión de mesa | `POST /orders/sessions/{id}/close` |
 | RF-ORD-05 | Cajero/Mesero | Consolidar los carritos de la mesa en la orden abierta (**descuenta inventario**) | `POST /orders/tables/{id}/consolidate` |
 | RF-ORD-06 | Cajero/Mesero | Agregar un ítem directo a la orden de la mesa | `POST /orders/tables/{id}/items` |
-| RF-ORD-07 | Cajero/Mesero | Ver el tablero de cocina (KDS) agrupado por mesa/orden | `GET /orders/kds` |
-| RF-ORD-08 | Cajero/Mesero | Avanzar estado de cocina (pendiente→en_preparación→listo→entregado) | `PATCH /orders/items/{id}/kitchen` |
+| RF-ORD-07 | Cajero/Mesero | Marcar listos de una vez todos los ítems en curso de un pedido | `POST /orders/{id}/ready` |
+| RF-ORD-08 | Cajero/Mesero | Avanzar la preparación de un ítem (pendiente→en_preparación→listo) | `PATCH /orders/items/{id}/kitchen` |
 | RF-ORD-09 | Cajero/Mesero | Anular / reemplazar un ítem (revierte inventario si no se preparó) | `POST /orders/items/{id}/void` |
 | RF-ORD-10 | Cajero/Mesero | Ver la cuenta de la mesa con **split por comensal** | `GET /orders/tables/{id}/bill` |
 | RF-ORD-11 | Cajero/Mesero | Bloquear la orden para cobro (lock optimista, valida cocina sin pendientes) | `POST /orders/{id}/block` |
@@ -173,7 +173,7 @@ Columnas: **ID · Actor · Requerimiento · Endpoint**.
 ### 3.3 Cajero / Mesero
 - Como **cajero** quiero **abrir mi turno de caja** con un monto inicial para empezar a cobrar con control de efectivo (RF-CASH-02).
 - Como **mesero** quiero **consolidar los carritos de la mesa** en una orden para enviarla a cocina descontando insumos (RF-ORD-05).
-- Como **cocina/mesero** quiero **ver el KDS y avanzar el estado** de cada ítem para coordinar la preparación (RF-ORD-07/08), y **anular** un ítem devolviendo insumos si no se preparó (RF-ORD-09).
+- Como **mesero** quiero **avanzar la preparación** de cada ítem desde la terminal de mesas (RF-ORD-07/08), y **anular** un ítem devolviendo insumos si no se preparó (RF-ORD-09).
 - Como **cajero** quiero **ver la cuenta con split por comensal, bloquear y cobrar** la orden para cerrar la mesa correctamente (RF-ORD-10/11/12).
 - Como **cajero** quiero **registrar ventas de mostrador** rápidas que descuenten stock (RF-SALE-02).
 - Como **cajero** quiero **registrar movimientos de efectivo, cerrar el turno con arqueo y ver la reconciliación** para cuadrar la caja (RF-CASH-03/04/05).
@@ -241,11 +241,11 @@ flowchart TD
     %% Rama mesa
     D -->|Servicio en mesa| E[POST /orders/tables/id/consolidate]
     E --> E1[/DESCUENTA inventario ref=order/]
-    E1 --> F[GET /orders/kds]
-    F --> G[PATCH items/id/kitchen<br/>pendiente→...→entregado]
+    E1 --> F[Terminal de mesas]
+    F --> G[PATCH items/id/kitchen o<br/>POST orders/id/ready]
     G --> H[GET /orders/tables/id/bill<br/>split por comensal]
     H --> I[POST /orders/id/block]
-    I --> J{¿Cocina sin<br/>pendientes?}
+    I --> J{¿Todo<br/>listo?}
     J -->|No| G
     J -->|Sí| K[POST /orders/id/pay]
     K --> L{¿turno abierto<br/>y pagado ≥ total?}

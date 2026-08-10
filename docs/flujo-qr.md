@@ -47,7 +47,7 @@ sequenceDiagram
     API-->>S: pedido en "abierta"
 
     K->>API: PATCH /orders/items/{id}/kitchen
-    Note right of K: pendiente → en_preparacion<br/>→ listo → entregado
+    Note right of K: pendiente → en_preparacion → listo<br/>(o el salto directo pendiente → listo)
 
     Note over S,API: Cobro
     S->>API: GET /table-sessions/{id}/bill
@@ -94,10 +94,10 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     [*] --> pendiente
-    pendiente --> en_preparacion: cocina
-    en_preparacion --> listo: cocina
-    listo --> entregado: cocina
-    entregado --> [*]
+    pendiente --> en_preparacion: staff
+    pendiente --> listo: staff ⚑ salto directo
+    en_preparacion --> listo: staff
+    listo --> [*]
 
     pendiente --> anulado: staff ⚑ devuelve stock
     en_preparacion --> anulado: staff ⚑ NO devuelve stock
@@ -188,8 +188,8 @@ escaneada**. Nunca reutilizar el `table_session_id` de un token inválido.
 |---|---|---|
 | `GET` | `/api/v1/orders/tables/{table_id}/qr-token` | generar el QR imprimible (solo admin) |
 | `POST` | `/api/v1/orders/{order_id}/confirm` | aceptar pedido ⚑ descuenta stock |
-| `GET` | `/api/v1/orders/kds` | pantalla de cocina |
-| `PATCH` | `/api/v1/orders/items/{item_id}/kitchen` | avanzar estado de cocina |
+| `POST` | `/api/v1/orders/{order_id}/ready` | marcar listos todos los ítems en curso |
+| `PATCH` | `/api/v1/orders/items/{item_id}/kitchen` | avanzar la preparación de un ítem |
 | `POST` | `/api/v1/orders/items/{item_id}/void` | anular/reemplazar un ítem |
 | `POST` | `/api/v1/orders/{order_id}/cancel` | cancelar pedido (sin límite de estado) |
 | `GET` | `/api/v1/table-sessions` | mesas con sesión abierta |
@@ -368,8 +368,8 @@ también se corta.
 
 ### Staff — cocina
 
-- [ ] El KDS **no** muestra pedidos en `recibida`.
-- [ ] Tras confirmar, el pedido aparece en el KDS.
+- [ ] La terminal muestra los pedidos en `recibida` en la pestaña "Por confirmar", no en el pedido de la mesa.
+- [ ] Tras confirmar, los ítems del pedido salen `pendiente` y se pueden marcar listos.
 - [ ] Confirmar sin stock → `400` y el pedido **sigue** en `recibida` (se puede
       reintentar tras reponer).
 - [ ] Las transiciones de cocina solo avanzan; retroceder da `409`.

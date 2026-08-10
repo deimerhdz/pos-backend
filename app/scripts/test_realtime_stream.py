@@ -195,12 +195,11 @@ def main():
         c.close()
         time.sleep(0.3)
 
-        # Con la conexión caída, cocina avanza el ítem varias veces.
+        # Con la conexión caída, la terminal avanza la preparación del ítem.
         item_id = pedido["items"][0]["id"]
         api("POST", f"/api/v1/orders/{pedido['id']}/confirm")
-        for estado in ("en_preparacion", "listo"):
-            api("PATCH", f"/api/v1/orders/items/{item_id}/kitchen",
-                json={"estado_cocina": estado})
+        api("PATCH", f"/api/v1/orders/items/{item_id}/kitchen",
+            json={"estado_cocina": "en_preparacion"})
 
         c2 = SseClient(base, {"token": token, "last_event_id": antes}).open()
         abiertos.append(c2)
@@ -212,17 +211,19 @@ def main():
         check("el replay recupera lo perdido, en orden",
               tipos,
               ["order.confirmed", "session.bill_changed",
-               "order.item_kitchen_changed", "order.item_kitchen_changed"])
+               "order.item_kitchen_changed"])
 
         vs = [e["parsed"]["v"] for e in c2.events if e.get("event") != "hello"]
         check("y con `v` estrictamente creciente", vs, sorted(set(vs)))
 
         # ------------------------------------------------------ rt_v del PATCH
         r = api("PATCH", f"/api/v1/orders/items/{item_id}/kitchen",
-                json={"estado_cocina": "entregado"}).json()
+                json={"estado_cocina": "listo"}).json()
         if r.get("rt_v") is None:
-            raise Fail("el PATCH de cocina no devolvió `rt_v` (el KDS lo necesita)")
-        note(f"el PATCH de cocina devuelve rt_v={r['rt_v']} para el guard del KDS")
+            raise Fail("el PATCH de preparación no devolvió `rt_v` "
+                       "(la escritura optimista lo necesita)")
+        note(f"el PATCH de preparación devuelve rt_v={r['rt_v']} para el guard "
+             f"de la escritura optimista")
 
         # ------------------------------------------------------ ticket de staff
         t1 = api("POST", "/api/v1/realtime/ticket").json()

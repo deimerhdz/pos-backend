@@ -5,7 +5,7 @@ La ventana temporal filtra por `sales.sold_at`: [date_from 00:00, date_to+1d).""
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select, func
+from sqlalchemy import Date, select, func
 from sqlalchemy.orm import Session
 
 from app.models.sale import Sale, SaleItem
@@ -27,17 +27,25 @@ def _paid_sales_filter(date_from: date | None, date_to: date | None):
     return conds
 
 
-def sales_report(db: Session, date_from, date_to) -> dict:
+def sales_report(db: Session, date_from, date_to, group_by: str = "day") -> dict:
     conds = _paid_sales_filter(date_from, date_to)
     total, count = db.execute(
         select(func.coalesce(func.sum(Sale.total), 0), func.count(Sale.id)).where(*conds)
     ).one()
     total = Decimal(total)
+    # Un rango anual por día son 365 puntos, que ninguna gráfica dibuja. Con
+    # `month` el bucket es el primer día del mes: el consumidor sigue recibiendo
+    # fechas y no tiene que aprender un formato nuevo.
+    bucket = (
+        func.cast(func.date_trunc("month", Sale.sold_at), Date)
+        if group_by == "month"
+        else func.date(Sale.sold_at)
+    )
     by_day = [
         {"day": d, "total": Decimal(t), "count": c}
         for d, t, c in db.execute(
-            select(func.date(Sale.sold_at), func.sum(Sale.total), func.count(Sale.id))
-            .where(*conds).group_by(func.date(Sale.sold_at)).order_by(func.date(Sale.sold_at))
+            select(bucket, func.sum(Sale.total), func.count(Sale.id))
+            .where(*conds).group_by(bucket).order_by(bucket)
         ).all()
     ]
     avg = (total / count) if count else Decimal(0)

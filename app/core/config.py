@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     # si no, el refresh muere junto al access y no sirve para renovar. Default 7 días.
     REFRESH_TOKEN_EXPIRY_MINUTES:int = Field(default=60*24*7,env="REFRESH_TOKEN_EXPIRY_MINUTES")
 
+    # Zona horaria en la que se evalúa la vigencia de promociones y horarios.
+    # Antes todo se evaluaba en UTC, lo que en UTC-5 no solo corría la ventana
+    # horaria: también el día de la semana, el día del mes y el corte de
+    # `ends_at`. Un "20% los martes" arrancaba el lunes a las 19:00 locales.
+    TENANT_TIMEZONE:str = Field(default="America/Bogota",env="TENANT_TIMEZONE")
+
     # QR / sesión de comensal (flujo público de mesas).
     # Ventana deslizante del comensal (session_participants.expires_at).
     SESSION_TTL_MINUTES:int = Field(default=240,env="SESSION_TTL_MINUTES")
