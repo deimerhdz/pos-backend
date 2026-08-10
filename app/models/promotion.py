@@ -2,7 +2,7 @@ from app.core.models import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy import (
     String, Text, Integer, Numeric, ForeignKey, DateTime, Time, CheckConstraint,
-    UniqueConstraint, Index,
+    UniqueConstraint, Index, text,
 )
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import Optional, List
@@ -35,15 +35,17 @@ class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     - `percent`: `value` = % de descuento (0..100) sobre el `line_total`.
     - `fixed`: `value` = monto fijo de descuento por línea aplicable.
-    - `qty_price`: `min_qty` = unidades del paquete y `value` = precio total de
-      ese paquete ("compra 2 granizados y paga X"). Descuenta solo paquetes
-      completos; el remanente se cobra a precio normal.
+    - `qty_price`: **`value` y `min_qty` de la promoción NO se usan.** El precio
+      y el tamaño del paquete viven en cada `PromotionTarget`, porque un único
+      precio dejaba la Ensalada Grande y la Pequeña al mismo par. Descuenta solo
+      paquetes completos; el remanente se cobra a precio normal. Un destino sin
+      precio no descuenta (ver `_pack_terms`).
     - `combo`: `value` = precio total del bundle, componentes en `combo_items`.
       Se selecciona explícitamente por `combo_id` y no participa de `evaluate`.
 
     Vigencia opcional: `starts_at`/`ends_at`, `days_of_week` (CSV 0=lunes..
-    6=domingo), `days_of_month` (CSV 1..31) y ventana horaria
-    `start_time`/`end_time`, que admite cruce de medianoche.
+    6=domingo) y ventana horaria `start_time`/`end_time`, que admite cruce de
+    medianoche.
 
     **Toda la vigencia se evalúa en hora local del tenant.** Antes se evaluaba
     en UTC, lo que no solo corría la ventana horaria: en UTC-5 también corría el
@@ -73,7 +75,6 @@ class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     days_of_week: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    days_of_month: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
@@ -120,7 +121,18 @@ class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class PromotionTarget(UUIDPrimaryKeyMixin, Base):
     """Alcance de una promoción: un producto o una categoría. Una promoción sin
-    filas de target aplica a toda la venta."""
+    filas de target aplica a toda la venta.
+
+    `value` y `min_qty` son el **precio y el tamaño de paquete de este target**,
+    y solo se usan en promociones `qty_price`. En NULL, el target hereda los de
+    la promoción. Existen porque un único precio para todo el alcance obligaba a
+    dejar la Ensalada Grande ($16.000) y la Pequeña ($9.000) al mismo precio de
+    paquete, o a partir la promoción en una por producto.
+
+    **El target más específico gana**: si una línea casa con un target de
+    producto y con el de su categoría, manda el de producto. Eso es lo que
+    permite "toda la categoría a $10.000, salvo la Grande a $12.000".
+    """
 
     __tablename__ = "promotion_targets"
 
@@ -137,10 +149,27 @@ class PromotionTarget(UUIDPrimaryKeyMixin, Base):
         ForeignKey("categories.id", ondelete="CASCADE"), nullable=True, index=True
     )
 
+    # Solo para `qty_price`. NULL = hereda el de la promoción.
+    value: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    min_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     __table_args__ = (
         CheckConstraint(
             "(product_id IS NOT NULL) OR (category_id IS NOT NULL)",
             name="ck_promotion_target_scope",
+        ),
+        CheckConstraint("value IS NULL OR value >= 0", name="ck_target_value_positive"),
+        CheckConstraint("min_qty IS NULL OR min_qty >= 2", name="ck_target_pack_size"),
+        # Un target repetido daba igual mientras no llevara precio; con precio,
+        # dos filas del mismo producto harían que el descuento dependiera del
+        # orden del SELECT.
+        Index(
+            "uq_promotion_targets_product", "promotion_id", "product_id",
+            unique=True, postgresql_where=text("product_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_promotion_targets_category", "promotion_id", "category_id",
+            unique=True, postgresql_where=text("category_id IS NOT NULL"),
         ),
         {"schema": "tenant"},
     )

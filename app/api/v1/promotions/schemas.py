@@ -21,9 +21,9 @@ class PromotionStatus(str, Enum):
 
 
 def _validate_csv(value: str | None, low: int, high: int, label: str) -> str | None:
-    """`days_of_week`/`days_of_month` eran texto libre acotado por longitud: un
-    `"lunes,martes"` se guardaba tal cual y la promoción no aplicaba nunca, sin
-    ningún error visible."""
+    """`days_of_week` era texto libre acotado por longitud: un `"lunes,martes"`
+    se guardaba tal cual y la promoción no aplicaba nunca, sin ningún error
+    visible."""
     if value is None:
         return None
     value = value.strip()
@@ -43,8 +43,6 @@ class _VigenciaMixin(BaseModel):
     def _normalize_days(self):
         if "days_of_week" in self.model_fields_set:
             self.days_of_week = _validate_csv(self.days_of_week, 0, 6, "days_of_week")
-        if "days_of_month" in self.model_fields_set:
-            self.days_of_month = _validate_csv(self.days_of_month, 1, 31, "days_of_month")
         return self
 
     @model_validator(mode="after")
@@ -63,14 +61,29 @@ class _VigenciaMixin(BaseModel):
 
 
 class TargetIn(BaseModel):
+    """Un destino de la promoción, con su precio de paquete opcional.
+
+    `value`/`min_qty` solo aplican a `qty_price`: en NULL, el target hereda los
+    de la promoción. Existen para que "2 Ensaladas Grandes por $12.000" y
+    "2 Pequeñas por $8.000" quepan en una sola promoción.
+    """
+
     product_id: UUID | None = None
     category_id: UUID | None = None
+    value: Decimal | None = Field(None, ge=0, max_digits=12, decimal_places=2)
+    min_qty: int | None = Field(None, ge=2)
 
     @model_validator(mode="after")
     def _one_scope(self):
         if self.product_id is None and self.category_id is None:
             raise ValueError("Cada target requiere product_id o category_id")
+        if self.product_id is not None and self.category_id is not None:
+            raise ValueError("Un target apunta a un producto o a una categoría, no a los dos")
         return self
+
+    @property
+    def has_pricing(self) -> bool:
+        return self.value is not None or self.min_qty is not None
 
 
 class ComboItemIn(BaseModel):
@@ -109,7 +122,6 @@ class PromotionCreate(_VigenciaMixin, _PromotionRules):
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     days_of_week: str | None = Field(None, max_length=20, examples=["0,1,2,3,4"])
-    days_of_month: str | None = Field(None, max_length=100, examples=["15,30"])
     start_time: time | None = None
     end_time: time | None = None
     min_qty: int = Field(1, ge=1)
@@ -120,6 +132,37 @@ class PromotionCreate(_VigenciaMixin, _PromotionRules):
     def _status_on_create(self):
         if self.status == PromotionStatus.FINISHED:
             raise ValueError("Una promoción no puede crearse finalizada")
+        return self
+
+    @model_validator(mode="after")
+    def _target_pricing_only_qty_price(self):
+        """El precio por target solo lo entiende `_line_discount` en `qty_price`.
+        Aceptarlo en los otros tipos dejaría un campo que se guarda y no hace
+        nada, que es peor que rechazarlo."""
+        if self.type != PromotionType.QTY_PRICE and any(t.has_pricing for t in self.targets):
+            raise ValueError(
+                "El precio por producto solo aplica a promociones de tipo paquete (qty_price)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _qty_price_needs_priced_targets(self):
+        """Un paquete ya no tiene precio propio: vive entero en sus destinos.
+
+        Sin esto se podría crear un `qty_price` global o con destinos a medias,
+        que `_line_discount` resolvería con descuento 0 — una promoción que se
+        guarda, se activa y no hace nada.
+        """
+        if self.type != PromotionType.QTY_PRICE:
+            return self
+        if not self.targets:
+            raise ValueError(
+                "Un paquete necesita al menos un producto o categoría: el precio se define en cada uno"
+            )
+        if any(t.value is None or t.min_qty is None for t in self.targets):
+            raise ValueError(
+                "Cada producto o categoría del paquete necesita sus unidades y su precio"
+            )
         return self
 
     @model_validator(mode="after")
@@ -148,7 +191,6 @@ class PromotionUpdate(_VigenciaMixin):
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     days_of_week: str | None = Field(None, max_length=20)
-    days_of_month: str | None = Field(None, max_length=100)
     start_time: time | None = None
     end_time: time | None = None
     min_qty: int | None = Field(None, ge=1)
@@ -172,6 +214,8 @@ class PromotionDuplicate(BaseModel):
 class TargetResponse(BaseModel):
     product_id: UUID | None = None
     category_id: UUID | None = None
+    value: Decimal | None = None
+    min_qty: int | None = None
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -200,7 +244,6 @@ class PromotionResponse(BaseModel):
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     days_of_week: str | None = None
-    days_of_month: str | None = None
     start_time: time | None = None
     end_time: time | None = None
     min_qty: int

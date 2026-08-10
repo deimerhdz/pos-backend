@@ -101,27 +101,44 @@ def _valid_now(promo: Promotion, now: datetime) -> bool:
         allowed = {d.strip() for d in promo.days_of_week.split(",") if d.strip()}
         if str(now.weekday()) not in allowed:  # 0=lunes..6=domingo
             return False
-    if promo.days_of_month:
-        allowed_days = {d.strip() for d in promo.days_of_month.split(",") if d.strip()}
-        if str(now.day) not in allowed_days:
-            return False
     return _in_time_window(now.time(), promo.start_time, promo.end_time)
 
 
-def _matches(promo: Promotion, product_id, category_id) -> bool:
-    """Sin targets = global. Con targets, aplica si alguno casa el producto o la
-    categoría de la línea."""
+def _matching_target(promo: Promotion, product_id, category_id):
+    """`(aplica, target)` para una línea. Sin targets = global, sin target.
+
+    **El de producto gana al de categoría.** Antes daba igual cuál se
+    encontrara primero porque el precio era uno solo; ahora el target elegido
+    decide el precio del paquete, así que "toda la categoría a $10.000 salvo la
+    Grande a $12.000" depende de que el más específico mande.
+    """
     if not promo.targets:
-        return True
+        return True, None
+
+    por_categoria = None
     for t in promo.targets:
         if t.product_id is not None and t.product_id == product_id:
-            return True
+            return True, t
         if t.category_id is not None and t.category_id == category_id:
-            return True
-    return False
+            por_categoria = t
+    return (True, por_categoria) if por_categoria is not None else (False, None)
 
 
-def _line_discount(promo: Promotion, line_total: Decimal, quantity: int,
+def _pack_terms(promo: Promotion, target) -> tuple[int, Decimal] | None:
+    """Tamaño y precio del paquete, que viven **solo en el destino**.
+
+    Devuelve `None` si el destino no los define — o si no hay destino, como en
+    un `qty_price` global. Antes se caía a los de la promoción, pero desde que
+    el formulario ya no pide un "paquete por defecto" ese campo vale 0, y caer
+    a él descontaría la línea entera (`normal - 0 x packs`). Sin precio no hay
+    descuento: el fallo seguro en vez del caro.
+    """
+    if target is None or target.value is None or target.min_qty is None:
+        return None
+    return target.min_qty, Decimal(target.value)
+
+
+def _line_discount(promo: Promotion, target, line_total: Decimal, quantity: int,
                    unit_price: Decimal) -> Decimal:
     if promo.type == "percent":
         return line_total * Decimal(promo.value) / Decimal(100)
@@ -131,11 +148,15 @@ def _line_discount(promo: Promotion, line_total: Decimal, quantity: int,
         # Solo paquetes completos; el remanente se cobra a precio normal. Misma
         # semántica de "bundle completo" que los combos, para que una anulación
         # parcial degrade suave en vez de romper el cálculo.
-        packs = quantity // promo.min_qty
+        terms = _pack_terms(promo, target)
+        if terms is None:
+            return Decimal(0)
+        pack, price = terms
+        packs = quantity // pack
         if packs <= 0:
             return Decimal(0)
-        normal = unit_price * promo.min_qty * packs
-        return max(Decimal(0), normal - Decimal(promo.value) * packs)
+        normal = unit_price * pack * packs
+        return max(Decimal(0), normal - price * packs)
     return Decimal(0)
 
 
@@ -169,14 +190,21 @@ class PromotionResult:
         return next(iter(ids)) if len(ids) == 1 else None
 
 
-def _describe(promo: Promotion, amount: Decimal, quantity: int) -> str:
+def _describe(promo: Promotion, amount: Decimal, quantity: int, target=None) -> str:
     if promo.type == "percent":
         return f"{promo.name}: {promo.value:g}% de descuento"
     if promo.type == "fixed":
         return f"{promo.name}: descuento de {amount.quantize(Decimal('0.01'))}"
     if promo.type == "qty_price":
-        packs = quantity // promo.min_qty
-        return f"{promo.name}: {packs} x ({promo.min_qty} por {promo.value})"
+        # Con precio por target, el texto del cajero tiene que decir el paquete
+        # que se aplicó de verdad. Solo se llama con descuento > 0, así que aquí
+        # los términos existen; el `or` es defensivo, no un caso esperado.
+        terms = _pack_terms(promo, target)
+        if terms is None:
+            return promo.name
+        pack, price = terms
+        packs = quantity // pack
+        return f"{promo.name}: {packs} x ({pack} por {price})"
     return promo.name
 
 
@@ -202,14 +230,14 @@ def active_discount_promotions(db: Session, now: datetime) -> list[Promotion]:
     return [p for p in db.execute(stmt).scalars().all() if _valid_now(p, now)]
 
 
-def best_line_discount(
+def _best_line_match(
     valid_promos: list[Promotion], product_id, category_id, quantity: int,
     line_total: Decimal, unit_price: Decimal | None = None,
-) -> tuple[Decimal, object]:
-    """Mejor promoción para una sola línea, entre las ya filtradas por vigencia.
+):
+    """`(monto, promo | None, target | None)` para una línea.
 
-    Criterio: `priority` mayor gana; empate por descuento mayor; empate por
-    `created_at` más antiguo. Devuelve `(monto, promotion_id | None)`.
+    Devuelve también el target porque el precio del paquete puede salir de él, y
+    tanto el desglose del cajero como el propio cálculo lo necesitan.
     """
     quantity = int(quantity)
     line_total = Decimal(line_total)
@@ -218,20 +246,45 @@ def best_line_discount(
     unit_price = Decimal(unit_price)
 
     best_key = None
-    best_amount = Decimal(0)
-    best_id = None
+    best = (Decimal(0), None, None)
     for p in valid_promos:
-        if quantity < p.min_qty:
+        aplica, target = _matching_target(p, product_id, category_id)
+        if not aplica:
             continue
-        if not _matches(p, product_id, category_id):
+        # El mínimo se mide contra el paquete del destino: "3 Pequeñas por
+        # $20.000" corta en 3 aunque otro destino de la misma promoción pida 2.
+        if p.type == "qty_price":
+            terms = _pack_terms(p, target)
+            if terms is None:
+                continue  # destino sin precio: no descuenta
+            minimo = terms[0]
+        else:
+            minimo = p.min_qty
+        if quantity < minimo:
             continue
-        amount = _line_discount(p, line_total, quantity, unit_price)
+        amount = _line_discount(p, target, line_total, quantity, unit_price)
         if amount <= 0:
             continue
         key = (p.priority, amount, -p.created_at.timestamp())
         if best_key is None or key > best_key:
-            best_key, best_amount, best_id = key, amount, p.id
-    return best_amount, best_id
+            best_key, best = key, (amount, p, target)
+    return best
+
+
+def best_line_discount(
+    valid_promos: list[Promotion], product_id, category_id, quantity: int,
+    line_total: Decimal, unit_price: Decimal | None = None,
+) -> tuple[Decimal, object]:
+    """Mejor promoción para una sola línea, entre las ya filtradas por vigencia.
+
+    Criterio: `priority` mayor gana; empate por descuento mayor; empate por
+    `created_at` más antiguo. Devuelve `(monto, promotion_id | None)` — firma
+    que consumen el menú público y el carrito.
+    """
+    amount, promo, _ = _best_line_match(
+        valid_promos, product_id, category_id, quantity, line_total, unit_price
+    )
+    return amount, (promo.id if promo is not None else None)
 
 
 def evaluate_detailed(
@@ -253,7 +306,6 @@ def evaluate_detailed(
     if not valid:
         return PromotionResult()
 
-    by_id = {p.id: p for p in valid}
     result = PromotionResult()
     raw_total = Decimal(0)
 
@@ -261,12 +313,11 @@ def evaluate_detailed(
         quantity = int(line["quantity"])
         line_total = Decimal(line["line_total"])
         unit_price = line.get("unit_price")
-        amount, promo_id = best_line_discount(
+        amount, promo, target = _best_line_match(
             valid, line.get("product_id"), line.get("category_id"),
             quantity, line_total, unit_price,
         )
-        if amount > 0 and promo_id is not None:
-            promo = by_id[promo_id]
+        if amount > 0 and promo is not None:
             raw_total += amount
             result.lines.append(LineDiscount(
                 line_index=index,
@@ -274,7 +325,7 @@ def evaluate_detailed(
                 promotion_name=promo.name,
                 promotion_type=promo.type,
                 amount=amount,
-                detail=_describe(promo, amount, quantity),
+                detail=_describe(promo, amount, quantity, target),
             ))
 
     result.total = raw_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -457,7 +508,6 @@ def find_overlaps(db: Session, promo: Promotion) -> list[Promotion]:
         c for c in candidates
         if _ranges_overlap(promo, c)
         and _csv_overlap(promo.days_of_week, c.days_of_week)
-        and _csv_overlap(promo.days_of_month, c.days_of_month)
         and _times_overlap(promo, c)
         and _scope_overlap(db, promo, c)
     ]
@@ -485,7 +535,8 @@ def _apply_targets(db: Session, promo: Promotion, targets) -> None:
     db.flush()
     for t in targets:
         db.add(PromotionTarget(
-            promotion_id=promo.id, product_id=t.product_id, category_id=t.category_id
+            promotion_id=promo.id, product_id=t.product_id, category_id=t.category_id,
+            value=t.value, min_qty=t.min_qty,
         ))
 
 
@@ -503,7 +554,7 @@ def create(db: Session, data) -> Promotion:
         name=data.name, description=data.description, type=data.type.value,
         value=data.value, status=data.status.value, priority=data.priority,
         starts_at=data.starts_at, ends_at=data.ends_at,
-        days_of_week=data.days_of_week, days_of_month=data.days_of_month,
+        days_of_week=data.days_of_week,
         start_time=data.start_time, end_time=data.end_time, min_qty=data.min_qty,
     )
     db.add(promo)
@@ -519,7 +570,7 @@ def update(db: Session, promo: Promotion, data) -> Promotion:
     poder limpiar un campo opcional enviando `null` explícito."""
     provided = data.model_fields_set
     for field_name in ("name", "description", "value", "priority", "starts_at", "ends_at",
-                       "days_of_week", "days_of_month", "start_time", "end_time", "min_qty"):
+                       "days_of_week", "start_time", "end_time", "min_qty"):
         if field_name in provided:
             setattr(promo, field_name, getattr(data, field_name))
 
@@ -575,6 +626,26 @@ def update_shape(db: Session, promo: Promotion, data) -> Promotion:
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "combo_items solo aplica a promociones type=combo",
         )
+    # Aquí, y no en el schema, porque `PromotionShapeUpdate` puede cambiar el
+    # tipo y los targets a la vez: el tipo que manda es el ya aplicado.
+    if promo.type != "qty_price" and any(
+        t.value is not None or t.min_qty is not None for t in promo.targets
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "El precio por producto solo aplica a promociones de tipo paquete (qty_price)",
+        )
+    if promo.type == "qty_price":
+        if not promo.targets:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Un paquete necesita al menos un producto o categoría: el precio se define en cada uno",
+            )
+        if any(t.value is None or t.min_qty is None for t in promo.targets):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Cada producto o categoría del paquete necesita sus unidades y su precio",
+            )
     return promo
 
 
@@ -604,14 +675,15 @@ def duplicate(db: Session, promo: Promotion, new_name: str) -> Promotion:
         name=new_name, description=promo.description, type=promo.type,
         value=promo.value, status="draft", priority=promo.priority,
         starts_at=promo.starts_at, ends_at=promo.ends_at,
-        days_of_week=promo.days_of_week, days_of_month=promo.days_of_month,
+        days_of_week=promo.days_of_week,
         start_time=promo.start_time, end_time=promo.end_time, min_qty=promo.min_qty,
     )
     db.add(copy)
     db.flush()
     for t in promo.targets:
         db.add(PromotionTarget(
-            promotion_id=copy.id, product_id=t.product_id, category_id=t.category_id
+            promotion_id=copy.id, product_id=t.product_id, category_id=t.category_id,
+            value=t.value, min_qty=t.min_qty,
         ))
     for c in promo.combo_items:
         db.add(PromotionComboItem(

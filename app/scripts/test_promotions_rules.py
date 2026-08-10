@@ -23,6 +23,7 @@ Cubre lo que no tenía ninguna prueba:
 import os
 from datetime import datetime, time, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 # Sin .env real: `Settings` exige credenciales que este script no usa. Se
 # rellenan con valores inertes para que el import no falle en CI.
@@ -41,9 +42,9 @@ for _k, _v in {
     os.environ.setdefault(_k, _v)
 
 from app.api.v1.promotions.service import (  # noqa: E402
-    _in_time_window, _line_discount, _valid_now, best_line_discount,
+    _in_time_window, _line_discount, _matching_target, _valid_now, best_line_discount,
 )
-from app.models.promotion import Promotion  # noqa: E402
+from app.models.promotion import Promotion, PromotionTarget  # noqa: E402
 
 fallos: list[str] = []
 
@@ -85,11 +86,6 @@ check("happy hour 15-17 aplica a las 16:00 locales",
 check("happy hour 15-17 no aplica a las 10:00 locales",
       not _valid_now(hh, datetime(2026, 8, 4, 15, 0, tzinfo=timezone.utc)))
 
-# Quincena: el día del mes también se lee en local.
-quincena = promo(days_of_month="15")
-check("quincena: el 15 a las 20:00 locales sigue siendo el 15",
-      _valid_now(quincena, datetime(2026, 8, 16, 1, 0, tzinfo=timezone.utc)))
-
 
 # --- 2. Ventana que cruza medianoche ---------------------------------------
 print("\n2. Ventana horaria con cruce de medianoche")
@@ -102,23 +98,81 @@ check("sin ventana, siempre dentro", _in_time_window(time(3, 0), None, None))
 
 # --- 3. qty_price ----------------------------------------------------------
 print("\n3. qty_price: 2 granizados por 8000 (precio normal 5000 c/u)")
-pack = promo(type="qty_price", value=Decimal("8000"), min_qty=2)
+pack = promo(type="qty_price", value=Decimal("0"), min_qty=2)
+# El precio vive en el destino: la promoción ya no tiene paquete propio.
+destino = PromotionTarget(product_id=None, category_id=None,
+                          value=Decimal("8000"), min_qty=2)
 
-d = _line_discount(pack, Decimal("10000"), 2, Decimal("5000"))
+d = _line_discount(pack, destino, Decimal("10000"), 2, Decimal("5000"))
 check("2 unidades descuentan 2000", d == Decimal("2000"))
 
-d = _line_discount(pack, Decimal("15000"), 3, Decimal("5000"))
+d = _line_discount(pack, destino, Decimal("15000"), 3, Decimal("5000"))
 check("3 unidades: un paquete + remanente a precio normal", d == Decimal("2000"))
 
-d = _line_discount(pack, Decimal("20000"), 4, Decimal("5000"))
+d = _line_discount(pack, destino, Decimal("20000"), 4, Decimal("5000"))
 check("4 unidades: dos paquetes", d == Decimal("4000"))
 
-d = _line_discount(pack, Decimal("5000"), 1, Decimal("5000"))
+d = _line_discount(pack, destino, Decimal("5000"), 1, Decimal("5000"))
 check("1 unidad no arma paquete: descuento 0", d == Decimal("0"))
 
-caro = promo(type="qty_price", value=Decimal("99000"), min_qty=2)
+caro_t = PromotionTarget(product_id=None, category_id=None,
+                         value=Decimal("99000"), min_qty=2)
+caro = promo(type="qty_price", value=Decimal("0"), min_qty=2)
 check("un paquete más caro que sus partes nunca encarece",
-      _line_discount(caro, Decimal("10000"), 2, Decimal("5000")) == Decimal("0"))
+      _line_discount(caro, caro_t, Decimal("10000"), 2, Decimal("5000")) == Decimal("0"))
+
+# Fallo seguro: sin precio en el destino no hay descuento, nunca la línea entera.
+check("un destino sin precio no descuenta",
+      _line_discount(pack, None, Decimal("10000"), 2, Decimal("5000")) == Decimal("0"))
+sin_precio = PromotionTarget(product_id=None, category_id=None, value=None, min_qty=None)
+check("un destino a medias tampoco descuenta",
+      _line_discount(pack, sin_precio, Decimal("10000"), 2, Decimal("5000")) == Decimal("0"))
+
+
+# --- 3b. Precio de paquete por producto ------------------------------------
+print("\n3b. Precio y paquete por target: el más específico gana")
+
+CAT = uuid4()
+GRANDE = uuid4()
+PEQUENA = uuid4()
+
+# "Toda la categoría 2 por 10.000, salvo la Grande que va 2 por 12.000".
+por_producto = promo(name="ensaladas", type="qty_price", value=Decimal("10000"), min_qty=2)
+por_producto.targets = [
+    PromotionTarget(category_id=CAT, product_id=None, value=Decimal("10000"), min_qty=2),
+    PromotionTarget(product_id=GRANDE, category_id=None, value=Decimal("12000"), min_qty=2),
+]
+
+aplica, t = _matching_target(por_producto, GRANDE, CAT)
+check("el target de producto gana al de su categoría", aplica and t.value == Decimal("12000"))
+
+aplica, t = _matching_target(por_producto, PEQUENA, CAT)
+check("un producto sin fila propia usa el precio de su categoría",
+      aplica and t.value == Decimal("10000"))
+
+aplica, t = _matching_target(por_producto, uuid4(), uuid4())
+check("fuera del alcance no aplica", not aplica)
+
+# Grande: normal 16.000 c/u; 2 unidades = 32.000, paquete a 12.000 -> 20.000.
+_, t = _matching_target(por_producto, GRANDE, CAT)
+d = _line_discount(por_producto, t, Decimal("32000"), 2, Decimal("16000"))
+check("2 Grandes descuentan 20.000 con su precio propio", d == Decimal("20000"))
+
+# Pequeña: normal 9.000 c/u; 2 unidades = 18.000, hereda el 10.000 -> 8.000.
+_, t = _matching_target(por_producto, PEQUENA, CAT)
+d = _line_discount(por_producto, t, Decimal("18000"), 2, Decimal("9000"))
+check("2 Pequeñas usan el precio de la categoría y descuentan 8.000", d == Decimal("8000"))
+
+# Paquete de tamaño distinto por producto: 3 Pequeñas por 20.000.
+tres = PromotionTarget(product_id=PEQUENA, category_id=None,
+                       value=Decimal("20000"), min_qty=3)
+por_producto.targets.append(tres)
+_, t = _matching_target(por_producto, PEQUENA, CAT)
+check("el target de producto también manda en el tamaño", t.min_qty == 3)
+d = _line_discount(por_producto, t, Decimal("36000"), 4, Decimal("9000"))
+check("4 Pequeñas: un paquete de 3 (27.000 -> 20.000) y una suelta", d == Decimal("7000"))
+d = _line_discount(por_producto, t, Decimal("18000"), 2, Decimal("9000"))
+check("2 Pequeñas ya no arman el paquete de 3", d == Decimal("0"))
 
 
 # --- 4. Prioridad ----------------------------------------------------------
@@ -150,11 +204,11 @@ check("10% + 20% no suman 30%", monto == Decimal("2000"))
 print("\n6. Ninguna línea queda en negativo")
 fijo = promo(type="fixed", value=Decimal("50000"))
 check("un fijo mayor que la línea se topa en el total de la línea",
-      _line_discount(fijo, Decimal("3000"), 1, Decimal("3000")) == Decimal("3000"))
+      _line_discount(fijo, None, Decimal("3000"), 1, Decimal("3000")) == Decimal("3000"))
 
 cien = promo(value=Decimal("100"))
 check("100% descuenta exactamente la línea",
-      _line_discount(cien, Decimal("3000"), 1, Decimal("3000")) == Decimal("3000"))
+      _line_discount(cien, None, Decimal("3000"), 1, Decimal("3000")) == Decimal("3000"))
 
 
 # --- 7. min_qty ------------------------------------------------------------
