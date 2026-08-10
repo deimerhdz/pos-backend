@@ -1,5 +1,6 @@
 """Reportes gerenciales (RF-059..065). Solo lectura; requiere admin del tenant."""
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -18,9 +19,15 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 @router.get("/sales", response_model=SalesReport, summary="Reporte de ventas (RF-059)")
 def sales(
     date_from: date | None = Query(None), date_to: date | None = Query(None),
+    group_by: Literal["day", "month"] = Query(
+        "day", description="Granularidad de `by_day`. `month` para rangos largos."
+    ),
     db: Session = Depends(get_db), _: User = Depends(require_tenant_admin),
 ):
-    return service.sales_report(db, date_from, date_to)
+    """`group_by=month` agrupa el desglose por mes en vez de por día: un rango
+    anual pasa de 365 puntos a 12, que es lo que una gráfica puede dibujar. El
+    defecto `day` deja la respuesta igual que siempre."""
+    return service.sales_report(db, date_from, date_to, group_by)
 
 
 @router.get("/products", response_model=list[ProductRow], summary="Ventas por producto (RF-060)")
