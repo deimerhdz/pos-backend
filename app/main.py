@@ -30,7 +30,6 @@ from app.api.v1.health.router import router as health_router
 from app.api.v1.tenant.router import router as tenant_router
 from app.api.v1.reports.router import router as reports_router
 from app.api.v1.promotions.router import router as promotions_router
-from app.api.v1.business_hours.router import router as business_hours_router
 from app.api.v1.audit.router import router as audit_router
 from app.api.v1.realtime.router import router as realtime_router
 load_dotenv()
@@ -119,7 +118,6 @@ def create_app()->FastAPI:
     app.include_router(tenant_router, prefix="/api/v1")
     app.include_router(reports_router, prefix="/api/v1")
     app.include_router(promotions_router, prefix="/api/v1")
-    app.include_router(business_hours_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
     app.include_router(realtime_router, prefix="/api/v1")
     return app
