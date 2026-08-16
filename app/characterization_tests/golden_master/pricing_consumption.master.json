@@ -1,0 +1,277 @@
+{
+  "01_linea_simple_sin_opciones": {
+    "descripcion": "RN-CAT-01/RN-CAT-17: variante sin opciones, receta fija simple.",
+    "ensure_lines_consume_inventory": "ok",
+    "entrada": {
+      "cantidad": 2,
+      "opciones": [],
+      "precio_variante": "5000",
+      "variante": "Cono Simple"
+    },
+    "plan_consumo": [
+      {
+        "cantidad": "2.000",
+        "insumo": "Barquillo",
+        "origen": "receta"
+      }
+    ],
+    "precio_linea": "5000",
+    "validacion_opciones": "ok"
+  },
+  "02_opciones_extra_price_decimales": {
+    "descripcion": "RN-CAT-01/RN-CAT-02: extras con decimales de 2 cifras, sin quantize; RN-CAT-34 sin_receta: el grupo elegido no descuenta inventario y no hay receta fija.",
+    "ensure_lines_consume_inventory": {
+      "detail": {
+        "error": "«Producto Malteada · Malteada» no tiene receta configurada, así que venderlo no descontaría inventario. Cárgasela en Productos → Recetas para poder venderlo.",
+        "variantes_sin_receta": [
+          "Producto Malteada · Malteada"
+        ]
+      },
+      "status_code": 409
+    },
+    "entrada": {
+      "cantidad": 1,
+      "opciones": [
+        {
+          "extra_price": "350.25",
+          "nombre": "Chispas"
+        },
+        {
+          "extra_price": "100.00",
+          "nombre": "Cereza"
+        }
+      ],
+      "precio_variante": "8500.50",
+      "variante": "Malteada"
+    },
+    "plan_consumo": [],
+    "precio_linea": "8950.75",
+    "validacion_opciones": "ok"
+  },
+  "03_a02_protegida_tamano_manda_sobre_opcion": {
+    "descripcion": "A-02 [PROTEGIDA] / RN-CAT-18: el tamaño (120g) manda sobre la opción (80g); nunca se suman (no da 200g).",
+    "ensure_lines_consume_inventory": "ok",
+    "entrada": {
+      "cantidad": 1,
+      "item_quantity_por_opcion": "80",
+      "opciones": [
+        "Fresa",
+        "Chocolate",
+        "Vainilla"
+      ],
+      "quantity_per_option_grupo": "120",
+      "variante": "Copa Grande"
+    },
+    "plan_consumo": [
+      {
+        "cantidad": "120.000",
+        "insumo": "Fresa",
+        "origen": "variante"
+      },
+      {
+        "cantidad": "120.000",
+        "insumo": "Chocolate",
+        "origen": "variante"
+      },
+      {
+        "cantidad": "120.000",
+        "insumo": "Vainilla",
+        "origen": "variante"
+      }
+    ],
+    "precio_linea": "15000",
+    "validacion_opciones": "ok"
+  },
+  "04_opcion_manda_cuando_tamano_no_define": {
+    "descripcion": "RN-CAT-18 (rama respaldo): el grupo no define quantity_per_option (0) -> manda item_quantity de la opción (15), multiplicado por cantidad vendida (3).",
+    "ensure_lines_consume_inventory": "ok",
+    "entrada": {
+      "cantidad": 3,
+      "opciones": [
+        "Chispas de Chocolate"
+      ],
+      "variante": "Cono Waffle"
+    },
+    "plan_consumo": [
+      {
+        "cantidad": "45",
+        "insumo": "ChispasChoc",
+        "origen": "opcion"
+      }
+    ],
+    "precio_linea": "6500",
+    "validacion_opciones": "ok"
+  },
+  "05_dos_opciones_mismo_insumo_dos_movimientos": {
+    "descripcion": "RN-CAT-21: dos opciones distintas apuntando al mismo insumo generan DOS líneas de consumo separadas, nunca una fusionada.",
+    "ensure_lines_consume_inventory": "ok",
+    "entrada": {
+      "cantidad": 1,
+      "opciones": [
+        "Fresa",
+        "Fresa Premium"
+      ],
+      "variante": "Ensalada de Frutas"
+    },
+    "plan_consumo": [
+      {
+        "cantidad": "60.000",
+        "insumo": "Fresa (ensalada)",
+        "origen": "variante"
+      },
+      {
+        "cantidad": "60.000",
+        "insumo": "Fresa (ensalada)",
+        "origen": "variante"
+      }
+    ],
+    "precio_linea": "7000",
+    "validacion_opciones": "ok"
+  },
+  "06_opcion_sin_insumo_ligado_se_ignora": {
+    "descripcion": "RN-CAT-22: opción sin `inventory_item_id` (aunque tenga item_quantity=50 mal cargado) no genera consumo -> plan vacío -> RN-CAT-34 sin_receta.",
+    "ensure_lines_consume_inventory": {
+      "detail": {
+        "error": "«Producto Refresco · Refresco» no tiene receta configurada, así que venderlo no descontaría inventario. Cárgasela en Productos → Recetas para poder venderlo.",
+        "variantes_sin_receta": [
+          "Producto Refresco · Refresco"
+        ]
+      },
+      "status_code": 409
+    },
+    "entrada": {
+      "cantidad": 1,
+      "opciones": [
+        "Sin hielo"
+      ],
+      "variante": "Refresco"
+    },
+    "plan_consumo": [],
+    "precio_linea": "3000",
+    "validacion_opciones": "ok"
+  },
+  "07_per_unit_cero_no_genera_linea": {
+    "descripcion": "RN-CAT-23: insumo ligado pero cantidad resultante <=0 (quantity_per_option=0 Y item_quantity=0) -> no genera línea de consumo.",
+    "ensure_lines_consume_inventory": "no_evaluado_en_este_caso",
+    "entrada": {
+      "cantidad": 1,
+      "opciones": [
+        "Con gas"
+      ],
+      "variante": "Agua"
+    },
+    "plan_consumo": [],
+    "precio_linea": "2000",
+    "validacion_opciones": "ok"
+  },
+  "08_grupo_obligatorio_seleccion_invalida_422": {
+    "descripcion": "RN-CAT-28/RN-CAT-30: grupo obligatorio que descuenta exige EXACTAMENTE el máximo (2); elegir 1 se rechaza con 422 siempre, sin importar STRICT_OPTION_SELECTION.",
+    "ensure_lines_consume_inventory": "no_evaluado_en_este_caso",
+    "entrada": {
+      "cantidad": 1,
+      "opciones": [
+        "Mango"
+      ],
+      "variante": "Copa Mediana"
+    },
+    "plan_consumo": "no_evaluado_en_este_caso",
+    "precio_linea": "11000",
+    "validacion_opciones": {
+      "detail": {
+        "error": "Selección de opciones inválida: «Sabores 2 bolas» exige exactamente 2 opción(es), se enviaron 1",
+        "grupos": "«Sabores 2 bolas» exige exactamente 2 opción(es), se enviaron 1"
+      },
+      "status_code": 422
+    }
+  },
+  "09_variante_sin_receta_ni_grupo_409": {
+    "descripcion": "RN-CAT-34: variante sin receta ni grupo configurado -> 409 sin_receta.",
+    "ensure_lines_consume_inventory": {
+      "detail": {
+        "error": "«Producto Malteada Especial · Malteada Especial» no tiene receta configurada, así que venderlo no descontaría inventario. Cárgasela en Productos → Recetas para poder venderlo.",
+        "variantes_sin_receta": [
+          "Producto Malteada Especial · Malteada Especial"
+        ]
+      },
+      "status_code": 409
+    },
+    "entrada": {
+      "cantidad": 1,
+      "opciones": [],
+      "variante": "Malteada Especial"
+    },
+    "plan_consumo": [],
+    "precio_linea": "9000",
+    "validacion_opciones": "ok"
+  },
+  "10_a06_grupo_opcional_unica_fuente_sin_elegir_409": {
+    "descripcion": "A-06/RN-CAT-35 [DISCREPANCIA]: grupo opcional (min_select=0) que descuenta y es la ÚNICA fuente de consumo configurada. La validación de selección SÍ permite no elegir nada (grupo opcional), pero ensure_lines_consume_inventory bloquea igual con 409 sin_eleccion — contradice el propio comentario del código ('una decisión legítima del comensal').",
+    "ensure_lines_consume_inventory": {
+      "detail": {
+        "error": "«Producto Cono Simple Sabor · Cono Simple Sabor» consume inventario según la opción que elija el cliente, pero no se eligió ninguna, así que venderlo no descontaría nada.",
+        "variantes_sin_opcion": [
+          "Producto Cono Simple Sabor · Cono Simple Sabor"
+        ]
+      },
+      "status_code": 409
+    },
+    "entrada": {
+      "cantidad": 1,
+      "opciones": [],
+      "variante": "Cono Simple Sabor"
+    },
+    "plan_consumo": [],
+    "precio_linea": "4000",
+    "validacion_opciones": "ok"
+  },
+  "11_a06_opcion_de_grupo_ajeno_tolerada": {
+    "descripcion": "A-06 [PENDIENTE de decisión de negocio] / RN-CAT-32: con STRICT_OPTION_SELECTION=False (default), una opción de un grupo que la variante NO ofrece en absoluto pasa la validación sin error, sigue sumando su extra_price al cobro y sigue generando su propio consumo de inventario ajeno a la variante vendida.",
+    "ensure_lines_consume_inventory": "no_evaluado_en_este_caso",
+    "entrada": {
+      "cantidad": 1,
+      "opciones": [
+        "Extra de pizza"
+      ],
+      "variante": "Cono Simple Ajeno"
+    },
+    "plan_consumo": [
+      {
+        "cantidad": "1",
+        "insumo": "Masa de pizza",
+        "origen": "opcion"
+      }
+    ],
+    "precio_linea": "7500",
+    "validacion_opciones": "ok"
+  },
+  "12_disponibilidad_stock_boundary": {
+    "descripcion": "RN-CAT-24: `stock_actual < requerido` es comparación ESTRICTA. Los tres puntos del umbral: exactamente igual (pasa), 0.001 por debajo del stock (falla), 0.001 por encima del stock (falla).",
+    "disponibilidad": {
+      "requerido_120_000_contra_stock_119_999": {
+        "detail": {
+          "contexto": "",
+          "disponible": "119.999",
+          "error": "Stock insuficiente",
+          "insumo": "Leche (boundary, un paso menos)",
+          "requerido": "120.000"
+        },
+        "status_code": 409
+      },
+      "requerido_120_001_contra_stock_120_000": {
+        "detail": {
+          "contexto": "",
+          "disponible": "120.000",
+          "error": "Stock insuficiente",
+          "insumo": "Leche (boundary)",
+          "requerido": "120.001"
+        },
+        "status_code": 409
+      },
+      "requerido_exacto_120_000_contra_stock_120_000": "ok"
+    },
+    "entrada": {
+      "requerido_exacto": "120.000",
+      "stock_disponible": "120.000"
+    }
+  }
+}

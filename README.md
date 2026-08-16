@@ -186,6 +186,32 @@ Resumen del recorrido implementado (8 fases; ver [gestion-mesas.md](gestion-mesa
 
 ---
 
+## Tests de caracterización
+
+`app/characterization_tests/` congela el comportamiento **actual** de los
+módulos de criticidad ALTA de catálogo/inventario/facturación (motor de
+precio de línea, plan de consumo de inventario, `record_movement`/
+`apply_adjustment`, formato de número de factura, etc.), incluyendo un
+golden master del núcleo de cálculo del flujo de pedido de mesa por QR. No
+son tests de aceptación: si uno falla tras un cambio de código, la pregunta
+es si el negocio autorizó ese cambio de comportamiento, no cómo "arreglar"
+el test. Ver `app/characterization_tests/__init__.py` y
+`golden_master/README.md` para el alcance completo y el procedimiento de
+regeneración del golden master.
+
+No añaden dependencias: usan `unittest` (biblioteca estándar) y SQLAlchemy
+(ya en `requirements.txt`) sobre SQLite en memoria — no requieren Postgres
+ni Redis levantados.
+
+```bash
+python -m unittest discover -s app/characterization_tests -p 'test_*.py' -v
+```
+
+(o un módulo suelto, p. ej. `python -m unittest
+app.characterization_tests.test_golden_master_pricing_consumption -v`).
+
+---
+
 ## Licencia
 
 Proyecto privado. Todos los derechos reservados.
