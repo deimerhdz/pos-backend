@@ -11,7 +11,7 @@ from decimal import Decimal
 from fastapi import HTTPException
 
 from app.characterization_tests import fixtures as f
-from app.api.v1.catalog.line_pricing import (
+from app.catalog_engine import (
     check_availability,
     compute_line_price,
     load_valid_options,

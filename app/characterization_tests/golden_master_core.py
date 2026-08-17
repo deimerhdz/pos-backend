@@ -33,8 +33,8 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.characterization_tests import fixtures as f
-from app.api.v1.catalog.line_pricing import check_availability, compute_line_price, validate_option_selection
-from app.api.v1.catalog.consumption_plan import ensure_lines_consume_inventory, plan_line_consumption
+from app.catalog_engine import check_availability, compute_line_price, validate_option_selection
+from app.catalog_engine import ensure_lines_consume_inventory, plan_line_consumption
 
 
 def _dec(x) -> str:

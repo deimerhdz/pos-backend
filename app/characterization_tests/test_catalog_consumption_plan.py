@@ -11,13 +11,13 @@ from decimal import Decimal
 from fastapi import HTTPException
 
 from app.characterization_tests import fixtures as f
-from app.api.v1.catalog.consumption_plan import (
+from app.catalog_engine import (
     ensure_lines_consume_inventory,
     group_discounts,
     plan_line_consumption,
     required_consumption,
 )
-from app.api.v1.catalog.line_pricing import grupos_que_descuentan as grupos_que_descuentan_lp
+from app.catalog_engine import grupos_que_descuentan as grupos_que_descuentan_lp
 
 
 class PlanLineConsumptionTests(unittest.TestCase):
