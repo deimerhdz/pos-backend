@@ -22,9 +22,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install sqlalchemy pydantic pydantic-settings fastapi
+        run: pip install -r requirements.txt
       - name: Reglas de promociones
         run: python -m app.scripts.test_promotions_rules
+      - name: Characterization tests
+        run: python -m unittest discover -s app/characterization_tests -p 'test_*.py' -v
 
   build:
     needs: test
