@@ -7,7 +7,7 @@ import unittest
 from decimal import Decimal
 
 from app.characterization_tests import fixtures as f
-from app.api.v1.inventory.stock import apply_adjustment, lock_items, record_movement
+from app.inventory_engine import apply_adjustment, lock_items, record_movement
 from app.core.exceptions import InsufficientStockError
 
 
