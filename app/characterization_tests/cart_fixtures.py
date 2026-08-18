@@ -114,6 +114,24 @@ _TABLE_NAMES = _CATALOG_TABLE_NAMES + _CART_TABLE_NAMES
 def _compile_jsonb_as_json_on_sqlite(element, compiler, **kw):  # pragma: no cover
     return "JSON"
 
+# specs/022-correccion-zona-horaria-menu-carrito: `menu/router._option_availability`
+# usa `func.bool_or(...)` (agregado de Postgres) para saber si alguna variante de un
+# grupo de opciones no exige cantidad. SQLite no trae `bool_or` — sin registrarlo
+# como función agregada sobre la conexión, cualquier SELECT que lo mencione falla con
+# `OperationalError: no such function: bool_or`, incluso con la tabla vacía (falla en
+# la compilación/ejecución del SQL, no en el conteo de filas). No es una migración de
+# modelo ni toca producción: es un shim de test equivalente al de JSONB de arriba.
+class _BoolOr:
+    def __init__(self) -> None:
+        self._result = False
+
+    def step(self, value) -> None:
+        if value:
+            self._result = True
+
+    def finalize(self) -> bool:
+        return self._result
+
 # research.md §3: `postgresql_where` es un kwarg de dialecto que SQLAlchemy solo
 # interpreta al compilar DDL para Postgres; sobre SQLite el índice se crea sin el
 # predicado parcial, es decir, como UNIQUE incondicional. Sin removerlo aquí no se
@@ -149,6 +167,7 @@ def new_session() -> Session:
     tables = [t for t in Base.metadata.tables.values() if t.name in _TABLE_NAMES]
     engine = create_engine("sqlite:///:memory:")
     conn = engine.connect().execution_options(schema_translate_map={"tenant": None})
+    conn.connection.dbapi_connection.create_aggregate("bool_or", 1, _BoolOr)
     Base.metadata.create_all(bind=conn, tables=tables)
     conn.commit()
     return Session(bind=conn)
@@ -292,17 +311,27 @@ def make_combo_item(
 # --------------------------------------------------------------- Reloj fijado (A-08)
 
 class frozen_now:
-    """Context manager: parchea `app.api.v1.cart.service.datetime` por una
-    subclase cuyo `.now(tz)` devuelve `instant` fijo, sin importar el `tz` que
-    reciba. `timedelta`/`timezone` del módulo no se tocan (research.md §5).
+    """Context manager: parchea `<module>.datetime` (por defecto
+    `app.api.v1.cart.service`) por una subclase cuyo `.now(tz)` devuelve
+    `instant` fijo, sin importar el `tz` que reciba. `timedelta`/`timezone`
+    del módulo no se tocan (research.md §5, specs/015-caracterizacion-cart).
+
+    `module` (specs/022-correccion-zona-horaria-menu-carrito, research.md
+    Decisión 2) permite reutilizar el mismo reloj fijado en otros módulos que
+    también evalúan vigencia de promociones (p. ej. `app.api.v1.menu.router`)
+    sin duplicar esta clase.
 
     Uso:
         with frozen_now(datetime(2026, 1, 15, 20, 0, tzinfo=timezone.utc)):
             resp = service.open_session(db, tenant_id, table, "Ana")
+
+        with frozen_now(instant, module="app.api.v1.menu.router"):
+            menu = _build_menu(db)
     """
 
-    def __init__(self, instant: datetime):
+    def __init__(self, instant: datetime, module: str = "app.api.v1.cart.service"):
         self._instant = instant
+        self._module = module
         self._patcher = None
 
     def __enter__(self) -> "frozen_now":
@@ -313,7 +342,7 @@ class frozen_now:
             def now(cls, tz=None):
                 return instant
 
-        self._patcher = mock.patch("app.api.v1.cart.service.datetime", FixedDatetime)
+        self._patcher = mock.patch(f"{self._module}.datetime", FixedDatetime)
         self._patcher.start()
         return self
 

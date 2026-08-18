@@ -202,7 +202,7 @@ def _cart_consumption(
 
 
 def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> CartResponse:
-    now = _now()
+    now = datetime.now(timezone.utc)
     promos = promotions.active_discount_promotions(db, now)
 
     variant_ids = {it.product_variant_id for it in cart.items}

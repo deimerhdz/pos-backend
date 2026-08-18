@@ -79,7 +79,7 @@ def _option_availability(db: Session) -> dict[UUID, bool]:
 
 def _build_menu(db: Session) -> list[MenuCategoryResponse]:
     avail = _option_availability(db)
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc)
     promos = active_discount_promotions(db, now)
     promo_by_id = {p.id: p for p in promos}
 

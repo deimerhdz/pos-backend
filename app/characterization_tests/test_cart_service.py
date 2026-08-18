@@ -134,14 +134,16 @@ class TestCartService(unittest.TestCase):
 
     # --------------------------------------------------- open_session/serialize — A-08 (T012)
 
-    def test_open_session_y_serialize_cart_a08_zona_horaria_no_aplicada(self):
-        """CONGELA comportamiento actual (A-08): `_now()` de `cart/service.py`
-        devuelve UTC ya sin tzinfo (`datetime.now(timezone.utc).replace(
-        tzinfo=None)`), y `promotions.local_now()` trata un `datetime` naive
-        como si YA fuera hora local del tenant (`TENANT_TIMEZONE=
-        America/Bogota`, UTC-5) en vez de convertirlo. A las 20:00 UTC (15:00
-        Bogotá real), una promoción con ventana horaria 20:00-21:00 aparece
-        vigente y descuenta, aunque en Bogotá apenas son las 15:00."""
+    def test_serialize_cart_a08_zona_horaria_aplicada_tras_la_correccion(self):
+        """CONGELA comportamiento corregido — A-08 (`cart/service.py:205`,
+        cierre: specs/022-correccion-zona-horaria-menu-carrito): `serialize_cart`
+        ahora pasa un `datetime` aware (`datetime.now(timezone.utc)`) a
+        `promotions.local_now()`, que lo convierte correctamente a hora local
+        del tenant (`TENANT_TIMEZONE=America/Bogota`, UTC-5) en vez de
+        tratarlo como si ya lo estuviera. A las 20:00 UTC (15:00 Bogotá real,
+        fuera de la ventana 20:00-21:00 local), una promoción con esa ventana
+        horaria ya NO aparece vigente ni descuenta — antes de esta corrección,
+        sí lo hacía (registro-de-anomalias.md, A-08)."""
         db, table, ts, participant = self._seed_session()
         variant, product, category = self._seed_variant(db)
         cart_fixtures.make_promotion(
@@ -156,8 +158,27 @@ class TestCartService(unittest.TestCase):
                 CartItemIn(product_variant_id=variant.id, quantity=1),
             )
 
-        # Comportamiento correcto (Bogotá 15:00, fuera de la ventana 20-21)
-        # sería `discounted_total is None`; el código actual sí descuenta.
+        self.assertIsNone(resp.discounted_total)
+
+    def test_serialize_cart_dentro_de_ventana_en_hora_local_si_descuenta(self):
+        """CA3 (sin regresión): a la 01:00 UTC del día siguiente (20:00
+        Bogotá, dentro de la ventana 20:00-21:00 local) el carrito SÍ debe
+        aplicar el descuento — mismo resultado que ya producía el caso
+        correcto antes de esta corrección."""
+        db, table, ts, participant = self._seed_session()
+        variant, product, category = self._seed_variant(db)
+        cart_fixtures.make_promotion(
+            db, type="percent", value=Decimal("20"), status="active",
+            start_time=time(20, 0), end_time=time(21, 0),
+        )
+
+        instant = datetime(2026, 1, 16, 1, 0, tzinfo=timezone.utc)
+        with cart_fixtures.frozen_now(instant):
+            resp = service.add_item(
+                db, participant.id,
+                CartItemIn(product_variant_id=variant.id, quantity=1),
+            )
+
         self.assertIsNotNone(resp.discounted_total)
         self.assertLess(resp.discounted_total, resp.total)
 
