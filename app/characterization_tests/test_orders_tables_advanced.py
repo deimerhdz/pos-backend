@@ -14,8 +14,12 @@ Documenta los tres hallazgos de **A-26**:
   - RN-ORD-63: `merge_orders`, ante grupos preexistentes en colisión, resuelve
     el ganador con un `SELECT` sin `ORDER BY` — no determinista.
 
-Y el camino C de **A-01** (`group_bill`, sin filtro de status ni descuentos,
-en uso real para mesas fusionadas).
+El camino C de **A-01** (`group_bill`) quedó corregido por
+`specs/019-correccion-cuenta-mesas-fusionadas` (commit que cita esa decisión,
+Constitución Principio II): excluye órdenes `pagada`/`cancelada` del cálculo y
+aplica promociones/combos vigentes, igual que `table_sessions.compute_bill`
+(camino A, referencia) — antes no filtraba por status ni aplicaba ningún
+descuento.
 
 Ejecutar solo este módulo:
 
@@ -28,6 +32,7 @@ from fastapi import HTTPException
 
 from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import tables_advanced
+from app.api.v1.table_sessions import service as table_sessions_service
 
 PRECIO = Decimal("10000")
 
@@ -121,44 +126,213 @@ class TestTablesAdvanced(unittest.TestCase):
 
     # ----------------------------------------------------------- group_bill (T046)
 
-    def test_group_bill_a01_camino_c_incluye_todos_los_status_sin_descuentos(self):
-        """CONGELA comportamiento actual — A-01 camino C
-        (`tables_advanced.group_bill:92-114`, spec.md Historia 4, escenario
-        4): grupo fusionado con órdenes en status 'abierta', 'pagada' y
-        'cancelada' → el total agregado incluye las tres sin excluir
-        ninguna por status, y no aplica ningún descuento — tal como lo
-        consume hoy `table.service.ts` del frontend."""
-        # `merge_orders` rechaza órdenes ya terminales (`pagada`/`cancelada`):
-        # las tres se fusionan mientras están 'abierta' y el status terminal
-        # se fija después, directo en la fila — así se siembra el estado de
-        # un grupo fusionado con pedidos ya cerrados, sin pasar por
-        # `merge_orders` con ellos ya en terminal.
+    def test_group_bill_excluye_orden_pagada_del_total_historia_1_escenario_1(self):
+        """CONGELA comportamiento corregido — A-01 camino C, Historia 1
+        escenario 1 (FR-001): grupo con la orden A `pagada` ($20.000) y la
+        orden B `abierta` ($15.000, sin promoción vigente) → el total
+        devuelto es $15.000, la orden A queda excluida del cálculo pero
+        sigue presente en `orders[]`."""
         db, table_a, ts_a, order_a = self._seed_table_con_orden_activa(status="abierta")
         db, table_b, ts_b, order_b = self._seed_table_con_orden_activa(db, status="abierta")
-        db, table_c, ts_c, order_c = self._seed_table_con_orden_activa(db, status="abierta")
+
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant_a = fx.make_variant(db, product=product, price=Decimal("20000"))
+        variant_b = fx.make_variant(db, product=product, price=Decimal("15000"))
+        fx.make_order_item(db, order_a, variant_a)
+        fx.make_order_item(db, order_b, variant_b)
+
+        group_id = tables_advanced.merge_orders(db, [order_a.id, order_b.id])["merged_group_id"]
+        order_a.status = "pagada"
+        db.commit()
+
+        bill = tables_advanced.group_bill(db, group_id)
+
+        order_ids = {o["order_id"] for o in bill["orders"]}
+        self.assertEqual(order_ids, {order_a.id, order_b.id})
+        self.assertEqual(bill["total"], Decimal("15000"))
+
+    def test_group_bill_excluye_orden_cancelada_del_total_historia_1_escenario_2(self):
+        """CONGELA comportamiento corregido — Historia 1 escenario 2
+        (FR-001): una orden `cancelada` se excluye del total igual que una
+        `pagada`, sin importar el `estado_cocina` de sus ítems (Edge Case de
+        `spec.md`: el filtro por `status` de la orden tiene prioridad)."""
+        db, table_a, ts_a, order_a = self._seed_table_con_orden_activa(status="abierta")
+        db, table_b, ts_b, order_b = self._seed_table_con_orden_activa(db, status="abierta")
 
         category = fx.make_category(db)
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=PRECIO)
         fx.make_order_item(db, order_a, variant)
         fx.make_order_item(db, order_b, variant)
-        fx.make_order_item(db, order_c, variant)
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("50"), status="active")
+        group_id = tables_advanced.merge_orders(db, [order_a.id, order_b.id])["merged_group_id"]
+        order_a.status = "cancelada"
+        db.commit()
+
+        bill = tables_advanced.group_bill(db, group_id)
+        self.assertEqual(bill["total"], PRECIO)
+
+    def test_group_bill_todas_terminales_da_total_cero_sin_error(self):
+        """CONGELA comportamiento corregido — Edge Case de `spec.md`: si
+        **todas** las órdenes del grupo están `pagada`/`cancelada`, el total
+        es $0 (grupo sin nada pendiente de cobro), no un error — mismo
+        comportamiento que ya tiene `table_sessions.compute_bill`."""
+        db, table_a, ts_a, order_a = self._seed_table_con_orden_activa(status="abierta")
+        db, table_b, ts_b, order_b = self._seed_table_con_orden_activa(db, status="abierta")
+
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        fx.make_order_item(db, order_a, variant)
+        fx.make_order_item(db, order_b, variant)
+
+        group_id = tables_advanced.merge_orders(db, [order_a.id, order_b.id])["merged_group_id"]
+        order_a.status = "pagada"
+        order_b.status = "cancelada"
+        db.commit()
+
+        bill = tables_advanced.group_bill(db, group_id)
+        self.assertEqual(bill["total"], Decimal("0"))
+
+    def test_group_bill_aplica_promocion_percent_vigente_sin_terminales_historia_2_escenario_1(self):
+        """CONGELA comportamiento corregido — Historia 2 escenario 1
+        (FR-002): grupo con una sola orden `abierta` ($15.000 brutos) y una
+        promoción `percent` del 10% vigente sobre su categoría, sin ninguna
+        orden `pagada`/`cancelada` en el grupo → el total ya descuenta la
+        promoción."""
+        db, table_b, ts_b, order_b = self._seed_table_con_orden_activa(status="abierta")
+
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=Decimal("15000"))
+        fx.make_order_item(db, order_b, variant)
+
+        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
         fx.make_promotion_target(db, promo, category_id=category.id)
 
-        result = tables_advanced.merge_orders(db, [order_a.id, order_b.id, order_c.id])
-        group_id = result["merged_group_id"]
+        group_id = tables_advanced.merge_orders(db, [order_b.id])["merged_group_id"]
 
-        order_b.status = "pagada"
-        order_c.status = "cancelada"
+        bill = tables_advanced.group_bill(db, group_id)
+        self.assertEqual(bill["total"], Decimal("13500"))
+
+    def test_group_bill_aplica_combo_vigente_sin_terminales_fr_002(self):
+        """CONGELA comportamiento corregido — FR-002/SC-002 (combos): además
+        de `percent`/`fixed`, `group_bill` también descuenta un combo
+        vigente vía `combo_discount_for_lines` — gap de cobertura detectado
+        en /speckit-analyze (G1: FR-002 solo tenía test de promoción
+        `percent`, ningún escenario de combo). Combo de 2 unidades de una
+        variante a $10.000 c/u ($20.000 normal) por un bundle de $18.000 →
+        descuento de $2.000."""
+        db, table_b, ts_b, order_b = self._seed_table_con_orden_activa(status="abierta")
+
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+
+        combo = fx.make_promotion(db, type="combo", value=Decimal("18000"), status="active")
+        fx.make_combo_item(db, combo, variant, quantity=2)
+        fx.make_order_item(db, order_b, variant, quantity=2, combo_id=combo.id)
+
+        group_id = tables_advanced.merge_orders(db, [order_b.id])["merged_group_id"]
+
+        bill = tables_advanced.group_bill(db, group_id)
+        self.assertEqual(bill["total"], Decimal("18000"))
+
+    def test_group_bill_excluye_items_anulados_de_orden_billable_fr_003(self):
+        """CONGELA comportamiento — FR-003 (sin cambio, se conserva): un
+        ítem individual `anulado` sigue excluido del subtotal de su orden
+        aunque la orden esté `abierta`, heredado de
+        `checkout.order_sale_lines` — re-verificado a nivel de `group_bill`
+        (gap de cobertura detectado en /speckit-analyze, G2: ninguna prueba
+        de esta suite ejercitaba un ítem `anulado` en `group_bill`)."""
+        db, table_b, ts_b, order_b = self._seed_table_con_orden_activa(status="abierta")
+
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        fx.make_order_item(db, order_b, variant)
+        fx.make_order_item(db, order_b, variant, estado_cocina="anulado")
+
+        group_id = tables_advanced.merge_orders(db, [order_b.id])["merged_group_id"]
+
+        bill = tables_advanced.group_bill(db, group_id)
+        self.assertEqual(bill["total"], PRECIO)
+
+    def test_group_bill_a01_camino_c_excluye_pagadas_y_aplica_promocion_vigente(self):
+        """CONGELA comportamiento corregido — A-01 camino C
+        (`tables_advanced.group_bill`, Historia 2 escenario 2 / SC-005):
+        corrige `RN-ORD-64` [DUDOSA] tal como autoriza la entrada A-01,
+        "Tratamiento acordado" (2026-08-15/16), de
+        `registro-de-anomalias.md` — el commit que toque este test cita esa
+        decisión (Constitución, Principio II). Grupo con la orden A `pagada`
+        ($20.000) y la orden B `abierta` ($15.000 brutos, 10% de descuento
+        vigente sobre su categoría): antes devolvía $35.000 (todo incluido,
+        sin descuento); ahora devuelve $13.500 — ambos defectos corregidos a
+        la vez (ejemplo de
+        `contradiccion-06-cuenta-a-cobrar-tres-implementaciones.md §3`)."""
+        db, table_a, ts_a, order_a = self._seed_table_con_orden_activa(status="abierta")
+        db, table_b, ts_b, order_b = self._seed_table_con_orden_activa(db, status="abierta")
+
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant_a = fx.make_variant(db, product=product, price=Decimal("20000"))
+        variant_b = fx.make_variant(db, product=product, price=Decimal("15000"))
+        fx.make_order_item(db, order_a, variant_a)
+        fx.make_order_item(db, order_b, variant_b)
+
+        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
+        fx.make_promotion_target(db, promo, category_id=category.id)
+
+        # `merge_orders` rechaza órdenes ya terminales: las dos se fusionan
+        # mientras están 'abierta' y el status terminal de A se fija después,
+        # directo en la fila.
+        group_id = tables_advanced.merge_orders(db, [order_a.id, order_b.id])["merged_group_id"]
+        order_a.status = "pagada"
         db.commit()
 
         bill = tables_advanced.group_bill(db, group_id)
 
         order_ids = {o["order_id"] for o in bill["orders"]}
-        self.assertEqual(order_ids, {order_a.id, order_b.id, order_c.id})
-        self.assertEqual(bill["total"], PRECIO * 3)
+        self.assertEqual(order_ids, {order_a.id, order_b.id})
+        self.assertEqual(bill["total"], Decimal("13500"))
+
+    def test_group_bill_igual_a_compute_bill_para_mesa_fusionada_sola_historia_3(self):
+        """CONGELA comportamiento corregido — Historia 3 / FR-005 / SC-003:
+        para una mesa fusionada sola (fusión degenerada), el total de
+        `group_bill` coincide centavo a centavo con el que produciría
+        `table_sessions.compute_bill` para esa misma mesa sin fusionar, con
+        una combinación de status (`pagada`/`abierta`) y una promoción
+        vigente."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db, status="ocupada")
+        ts = fx.make_table_session(db, table=table)
+
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant_a = fx.make_variant(db, product=product, price=Decimal("20000"))
+        variant_b = fx.make_variant(db, product=product, price=Decimal("15000"))
+
+        order_a = fx.make_customer_order(db, ts, status="abierta")
+        fx.make_order_item(db, order_a, variant_a)
+        order_b = fx.make_customer_order(db, ts, status="abierta")
+        fx.make_order_item(db, order_b, variant_b)
+
+        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
+        fx.make_promotion_target(db, promo, category_id=category.id)
+        db.commit()
+
+        # Mismo patrón que el test anterior: se fusionan mientras están
+        # 'abierta' y el status terminal de A se fija después.
+        group_id = tables_advanced.merge_orders(db, [order_a.id, order_b.id])["merged_group_id"]
+        order_a.status = "pagada"
+        db.commit()
+
+        session_total = table_sessions_service.compute_bill(db, ts.id).total
+        group_total = tables_advanced.group_bill(db, group_id)["total"]
+
+        self.assertEqual(session_total, group_total)
+        self.assertEqual(group_total, Decimal("13500"))
 
 
 if __name__ == "__main__":
