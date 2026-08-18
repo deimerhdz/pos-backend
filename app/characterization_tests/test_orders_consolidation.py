@@ -5,11 +5,16 @@ Historia 1) — la ruta de alta directa del mesero desde la terminal.
 Documenta con el mayor cuidado de toda la spec **A-04**
 (`consolidation.py:199`, dentro de `add_item_to_table`): `load_valid_options`
 solo valida `min_select`/`max_select`/pertenencia de grupo cuando se le pasa
-`variant`; `add_item_to_table` no se lo pasa (a diferencia de
-`service.create_order`, que sí), así que el camino real del mesero se salta la
-validación de selección de opciones. Esta spec congela ese defecto tal cual,
-sin corregirlo (FR-016): el fix de una línea (`variant=variant` en
-`consolidation.py:199`) queda para una spec delta posterior.
+`variant`; `add_item_to_table` no se lo pasaba (a diferencia de
+`service.create_order`, que sí), así que el camino real del mesero se saltaba
+la validación de selección de opciones. La spec 017 congeló ese defecto tal
+cual, sin corregirlo (FR-016).
+
+**A-04 quedó corregido por `specs/020-correccion-validacion-opciones-mesero`**
+(commit que cita esa decisión, Constitución Principio II): `add_item_to_table`
+ahora pasa `variant=variant` a `load_valid_options`
+(`consolidation.py:199`), igual que ya hacía `create_order` — antes aceptaba
+en silencio una selección incompleta o que excediera `max_select`.
 
 Ejecutar solo este módulo:
 
@@ -57,17 +62,31 @@ class TestConsolidation(unittest.TestCase):
         )
         return group
 
+    def _seed_grupo_tres_sabores_que_descuenta(self, db, variant):
+        """Grupo `min_select=3`/`max_select=3` (`"elige 3 sabores"`) que
+        descuenta inventario, con 4 opciones disponibles — 3 para la
+        selección válida (Historia 1, escenario 2), 4 para la que excede el
+        máximo (Historia 1, escenario 3)."""
+        group = fx.make_option_group(db, min_select=3, max_select=3)
+        fx.link_variant_group(
+            db, variant, group, min_select=3, max_select=3,
+            quantity_per_option=Decimal("1"),
+        )
+        options = [fx.make_option(db, group=group) for _ in range(4)]
+        return group, options
+
     def _user(self):
         return fx.make_user_double()
 
     # ------------------------------------------------ add_item_to_table (T012)
 
-    def test_add_item_to_table_a04_omite_validacion_de_seleccion_de_opciones(self):
-        """CONGELA comportamiento actual — A-04 (`consolidation.py:199`): una
+    def test_add_item_to_table_a04_valida_seleccion_de_opciones_tras_la_correccion(self):
+        """CONGELA comportamiento corregido — A-04 (`consolidation.py:199`,
+        spec 020, `registro-de-anomalias.md` "Tratamiento acordado"): una
         variante con un grupo de opciones obligatorio (`min_select=1`) y
-        ninguna opción seleccionada se agrega igual, sin ningún error de
-        validación, porque `add_item_to_table` no pasa `variant` a
-        `load_valid_options`."""
+        ninguna opción seleccionada se rechaza con 422, porque
+        `add_item_to_table` ahora pasa `variant` a `load_valid_options`,
+        igual que ya hacía `create_order`."""
         db = fx.new_session()
         table = fx.make_dining_table(db)
         _, _, variant, _ = self._seed_variant_con_receta(db)
@@ -76,11 +95,77 @@ class TestConsolidation(unittest.TestCase):
         user = self._user()
 
         data = OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[])
+        with self.assertRaises(HTTPException) as ctx:
+            consolidation.add_item_to_table(db, table.id, data, user)
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_add_item_to_table_seleccion_completa_se_acepta_historia_1_escenario_2(self):
+        """Historia 1, escenario 2 (spec 020): la misma variante con un grupo
+        `min_select=3`/`max_select=3`, seleccionando los 3 sabores correctos,
+        se agrega normalmente — sin cambio frente al comportamiento de
+        siempre para una selección completa."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db)
+        _, _, variant, _ = self._seed_variant_con_receta(db)
+        _, options = self._seed_grupo_tres_sabores_que_descuenta(db, variant)
+        db.commit()
+        user = self._user()
+
+        data = OrderItemIn(
+            product_variant_id=variant.id, quantity=1,
+            option_ids=[o.id for o in options[:3]],
+        )
         order = consolidation.add_item_to_table(db, table.id, data, user)
 
         self.assertEqual(len(order.items), 1)
         self.assertEqual(order.items[0].product_variant_id, variant.id)
-        self.assertEqual(order.items[0].options, [])
+        self.assertEqual(len(order.items[0].options), 3)
+
+    def test_add_item_to_table_excede_maximo_del_grupo_rechaza_historia_1_escenario_3(self):
+        """Historia 1, escenario 3 (spec 020): la misma variante y grupo
+        (`max_select=3`), seleccionando 4 sabores, se rechaza con 422 — el
+        mismo mecanismo de `min_select`/`max_select` cubre tanto elegir de
+        menos (escenario 1) como de más."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db)
+        _, _, variant, _ = self._seed_variant_con_receta(db)
+        _, options = self._seed_grupo_tres_sabores_que_descuenta(db, variant)
+        db.commit()
+        user = self._user()
+
+        data = OrderItemIn(
+            product_variant_id=variant.id, quantity=1,
+            option_ids=[o.id for o in options],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            consolidation.add_item_to_table(db, table.id, data, user)
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_add_item_to_table_y_create_order_convergen_tras_la_correccion_historia_2_escenario_1(self):
+        """Historia 2, escenario 1 (spec 020, research.md Decisión 3): el
+        mismo escenario de selección vacía en un grupo `min_select=1` que
+        descuenta inventario, ejecutado por separado vía `add_item_to_table`
+        y vía `create_order`, produce el mismo `status_code` en ambos —
+        cierra la divergencia que motivaba A-04."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db)
+        _, _, variant, _ = self._seed_variant_con_receta(db)
+        self._seed_grupo_obligatorio_que_descuenta(db, variant)
+        db.commit()
+        user = self._user()
+
+        data_add = OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[])
+        with self.assertRaises(HTTPException) as ctx_add:
+            consolidation.add_item_to_table(db, table.id, data_add, user)
+
+        data_create = OrderCreate(
+            channel=OrderChannel.COUNTER,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[])],
+        )
+        with self.assertRaises(HTTPException) as ctx_create:
+            service.create_order(db, data_create, uuid4())
+
+        self.assertEqual(ctx_add.exception.status_code, ctx_create.exception.status_code)
 
     # ------------------------------------------ create_order, contraste (T013)
 
