@@ -150,6 +150,18 @@ class OrderItemResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CurrentPaymentAttemptSummary(BaseModel):
+    """Resumen del intento de pago vigente de una orden, para el comensal
+    (spec 024). **Nunca** incluye `rejection_reason` (Clarification 3) — el
+    detalle del motivo solo lo ve el cajero, vía
+    `GET /orders/{order_id}/payment-attempts` (`PaymentAttemptResponse`)."""
+    id: UUID
+    status: str
+    payment_method_name: str
+    is_cash: bool
+    receipt_file_url: str | None = None
+
+
 class OrderResponse(BaseModel):
     id: UUID
     channel: str
@@ -162,8 +174,41 @@ class OrderResponse(BaseModel):
     notes: str | None = None
     created_at: datetime
     items: list[OrderItemResponse] = Field(default_factory=list)
+    # Intento de pago más reciente (spec 024) — `None` si nunca se inició
+    # ninguno. Mientras no haya uno `confirmado`, la orden sigue "pendiente de
+    # pago" para el comensal (Key Entity `Orden`, no es una columna de status).
+    current_payment_attempt: CurrentPaymentAttemptSummary | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Intentos de pago (spec 024) ----------
+class PaymentAttemptResponse(BaseModel):
+    """Vista de staff/cajero — a diferencia de `CurrentPaymentAttemptSummary`,
+    **sí** incluye `rejection_reason` (FR-016)."""
+    id: UUID
+    order_id: UUID
+    payment_method_id: UUID
+    payment_method_name: str
+    is_cash: bool
+    status: str
+    amount_received: Decimal | None = None
+    change_amount: Decimal | None = None
+    receipt_file_url: str | None = None
+    rejection_reason: str | None = None
+    resolved_by_user_id: UUID | None = None
+    resolved_at: datetime | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaymentAttemptRejectIn(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
+class PaymentAttemptConfirmCashIn(BaseModel):
+    amount_received: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
 
 
 # ---------- Preparación ----------

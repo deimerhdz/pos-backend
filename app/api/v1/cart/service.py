@@ -17,6 +17,12 @@ from app.core.config import settings
 from app.core.crud import get_or_404
 from app.core.qr_context import close_participant
 from app.core.qr_token import mint_session_token
+from app.core.storage import (
+    CONTENT_TYPE_EXTENSIONS,
+    build_object_key,
+    generate_presigned_put_url,
+    public_url_for,
+)
 from app.api.v1.table_sessions.service import try_release_if_empty
 from app.models.dining_table import DiningTable
 from app.models.table_session import TableSession
@@ -25,7 +31,9 @@ from app.models.cart import Cart
 from app.models.cart_item import CartItem, CartItemOption
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
+from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.option import Option
+from app.models.payment import PaymentMethod
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.api.v1.catalog.line_pricing import (
@@ -42,9 +50,16 @@ from app.api.v1.cart.schemas import (
     CartItemOptionResponse,
     CartItemResponse,
     CartResponse,
+    ReceiptPresignOut,
     SessionOpenResponse,
     SessionTableInfo,
 )
+
+#: Estados no terminales de `CustomerOrder` — mientras el comensal tenga una
+#: orden en alguno de estos, no puede crear otra (spec 024, FR-005/FR-006;
+#: research.md spec 024, Decisión 8, mismo criterio de "terminal" que ya usa
+#: `checkout.TERMINAL`/`mark_order_ready`).
+_NON_TERMINAL_ORDER_STATUSES = ("recibida", "abierta", "bloqueada")
 
 logger = logging.getLogger(__name__)
 
@@ -401,7 +416,11 @@ def list_my_orders(db: Session, participant_id: UUID) -> list[CustomerOrder]:
     navegador, que es justo lo que se pierde al recargar o cambiar de móvil."""
     return db.execute(
         select(CustomerOrder)
-        .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
+        .options(
+            selectinload(CustomerOrder.items).selectinload(OrderItem.options),
+            selectinload(CustomerOrder.payment_attempts)
+            .selectinload(OrderPaymentAttempt.payment_method),
+        )
         .where(CustomerOrder.participant_id == participant_id)
         .order_by(CustomerOrder.created_at.desc())
     ).scalars().all()
@@ -483,6 +502,20 @@ def submit_cart(db: Session, participant: SessionParticipant) -> CustomerOrder:
     if not cart.items:
         raise HTTPException(status.HTTP_409_CONFLICT, "El carrito está vacío")
 
+    # spec 024, FR-005: no permitir una segunda orden activa del mismo
+    # comensal. "Activa" = no terminal (research.md spec 024, Decisión 8).
+    active_order = db.execute(
+        select(CustomerOrder.id).where(
+            CustomerOrder.participant_id == participant.id,
+            CustomerOrder.status.in_(_NON_TERMINAL_ORDER_STATUSES),
+        )
+    ).scalar_one_or_none()
+    if active_order is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Ya tienes una orden activa; espera a que finalice antes de enviar otra.",
+        )
+
     check_availability(db, _cart_consumption(db, cart), extra_context="envío de pedido")
 
     try:
@@ -526,7 +559,11 @@ def submit_cart(db: Session, participant: SessionParticipant) -> CustomerOrder:
 
     return db.execute(
         select(CustomerOrder)
-        .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
+        .options(
+            selectinload(CustomerOrder.items).selectinload(OrderItem.options),
+            selectinload(CustomerOrder.payment_attempts)
+            .selectinload(OrderPaymentAttempt.payment_method),
+        )
         .where(CustomerOrder.id == order.id)
     ).scalar_one()
 
@@ -539,3 +576,136 @@ def remove_item(db: Session, participant_id: UUID, item_id: UUID) -> CartRespons
     db.delete(item)
     db.commit()
     return get_cart(db, participant_id)
+
+
+# --------------------------------------------------------- Pagos del comensal (spec 024)
+
+def list_payment_methods(db: Session) -> list[PaymentMethod]:
+    """Métodos de pago activos del tenant (FR-004) — un método desactivado
+    nunca aparece aquí, aunque el comensal ya tuviera la pantalla abierta."""
+    return db.execute(
+        select(PaymentMethod)
+        .where(PaymentMethod.active.is_(True))
+        .order_by(PaymentMethod.name)
+    ).scalars().all()
+
+
+def _load_own_order(db: Session, participant_id: UUID, order_id: UUID) -> CustomerOrder:
+    order = db.get(CustomerOrder, order_id)
+    if order is None or order.participant_id != participant_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Pedido no encontrado")
+    return order
+
+
+def create_payment_attempt(
+    db: Session, participant_id: UUID, order_id: UUID, payment_method_id: UUID
+) -> OrderPaymentAttempt:
+    """Crea un intento de pago nuevo para una orden propia (FR-008 efectivo,
+    FR-012 transferencia). FR-015a: no se permite si ya hay uno `pendiente`
+    — el índice único parcial `idx_pending_payment_attempt_per_order` es la
+    garantía última; este chequeo solo da un 409 con mensaje claro en vez de
+    dejar que la violación de índice llegue como error crudo."""
+    order = _load_own_order(db, participant_id, order_id)
+    if order.status != "recibida":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"La orden no admite un nuevo intento de pago (status={order.status})",
+        )
+    get_or_404(db, PaymentMethod, payment_method_id, "Método de pago no encontrado")
+
+    existing_pending = db.execute(
+        select(OrderPaymentAttempt.id).where(
+            OrderPaymentAttempt.order_id == order_id,
+            OrderPaymentAttempt.status == "pendiente",
+        )
+    ).scalar_one_or_none()
+    if existing_pending is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Ya hay un intento de pago pendiente de revisión para esta orden",
+        )
+
+    try:
+        attempt = OrderPaymentAttempt(order_id=order_id, payment_method_id=payment_method_id)
+        db.add(attempt)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error creando intento de pago")
+        raise
+
+    db.refresh(attempt)
+    return attempt
+
+
+def _load_own_pending_attempt(
+    db: Session, participant_id: UUID, attempt_id: UUID
+) -> OrderPaymentAttempt:
+    attempt = db.get(OrderPaymentAttempt, attempt_id)
+    if attempt is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Intento de pago no encontrado")
+    order = db.get(CustomerOrder, attempt.order_id)
+    if order is None or order.participant_id != participant_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Intento de pago no encontrado")
+    if attempt.status != "pendiente":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"El intento de pago ya fue resuelto (status={attempt.status})",
+        )
+    return attempt
+
+
+def presign_receipt(
+    db: Session, tenant_schema: str, participant_id: UUID, attempt_id: UUID, content_type: str
+) -> ReceiptPresignOut:
+    """Presign directo contra `app/core/storage.py`, sin pasar por
+    `POST /uploads/presign` (gateado por `require_tenant_admin`, inaccesible
+    para el comensal — research.md spec 024, Decisión 6)."""
+    attempt = _load_own_pending_attempt(db, participant_id, attempt_id)
+    method = get_or_404(
+        db, PaymentMethod, attempt.payment_method_id, "Método de pago no encontrado"
+    )
+    if method.is_cash:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Un pago en efectivo no lleva comprobante")
+
+    extension = CONTENT_TYPE_EXTENSIONS.get(content_type)
+    if extension is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"content_type no soportado: {content_type}",
+        )
+
+    key = build_object_key(tenant_schema, "comprobantes", extension)
+    return ReceiptPresignOut(
+        upload_url=generate_presigned_put_url(key, content_type),
+        key=key,
+        public_url=public_url_for(key),
+        expires_in=settings.R2_PRESIGN_EXPIRE_SECONDS,
+    )
+
+
+def attach_receipt(
+    db: Session, participant_id: UUID, attempt_id: UUID, file_url: str
+) -> OrderPaymentAttempt:
+    """Asocia el archivo ya subido a R2 con el intento (FR-012). Un
+    comprobante por intento — un reintento crea un intento nuevo, no
+    reemplaza el archivo de uno existente."""
+    attempt = _load_own_pending_attempt(db, participant_id, attempt_id)
+    method = get_or_404(
+        db, PaymentMethod, attempt.payment_method_id, "Método de pago no encontrado"
+    )
+    if method.is_cash:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Un pago en efectivo no lleva comprobante")
+    if attempt.receipt_file_url:
+        raise HTTPException(status.HTTP_409_CONFLICT, "El intento ya tiene un comprobante adjunto")
+
+    try:
+        attempt.receipt_file_url = file_url
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error adjuntando comprobante de pago")
+        raise
+
+    db.refresh(attempt)
+    return attempt

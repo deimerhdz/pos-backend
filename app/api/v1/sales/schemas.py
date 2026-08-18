@@ -20,6 +20,16 @@ class PaymentMethodCreate(BaseModel):
     # Si se omite, se deriva de `is_cash` (cash / other).
     type: PaymentMethodType | None = None
     is_cash: bool = False
+    # Datos de pago que el comensal necesita ver para transferir (cuenta,
+    # titular, teléfono, código...); sin esquema fijo — "según el método"
+    # (spec 024, FR-002). Solo tiene sentido si type != "cash".
+    payment_info: dict[str, str] | None = None
+
+
+class PaymentMethodUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=100)
+    payment_info: dict[str, str] | None = None
+    active: bool | None = None
 
 
 class PaymentMethodResponse(BaseModel):
@@ -28,6 +38,7 @@ class PaymentMethodResponse(BaseModel):
     type: str
     is_cash: bool
     active: bool
+    payment_info: dict[str, str] | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

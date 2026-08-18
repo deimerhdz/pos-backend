@@ -381,13 +381,21 @@ class TestCartService(unittest.TestCase):
     def test_list_my_orders_mas_reciente_primero(self):
         """CONGELA comportamiento actual: `list_my_orders` devuelve los
         pedidos del comensal ordenados por `created_at` descendente (más
-        reciente primero)."""
+        reciente primero).
+
+        Actualizado por spec 024-pagos-ordenes-mesa (FR-005/FR-006, Principio
+        III): `order1` se marca `pagada` antes de enviar `order2` porque,
+        desde esta spec, un comensal no puede tener dos órdenes activas a la
+        vez — el propio orden de creación que este test verifica no cambia,
+        solo se agrega el paso que finaliza la primera para poder enviar la
+        segunda. El resto de la suite (231 tests) sigue en verde."""
         db, table, ts, participant = self._seed_session()
         variant, _, _ = self._seed_variant(db)
 
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
         order1 = service.submit_cart(db, participant)
         order1.created_at = datetime(2020, 1, 1)
+        order1.status = "pagada"
         db.commit()
 
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))

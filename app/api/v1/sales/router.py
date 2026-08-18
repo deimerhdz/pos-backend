@@ -14,7 +14,7 @@ from app.models.payment import PaymentMethod
 from app.models.sale import Sale
 from app.api.v1.sales import service
 from app.api.v1.sales.schemas import (
-    PaymentMethodCreate, PaymentMethodResponse,
+    PaymentMethodCreate, PaymentMethodResponse, PaymentMethodUpdate,
     SaleCreate, SaleResponse,
 )
 
@@ -35,11 +35,26 @@ def create_payment_method(body: PaymentMethodCreate, db: Session = Depends(get_d
         method_type = body.type.value
     else:
         method_type = "cash" if body.is_cash else "other"
-    pm = PaymentMethod(name=body.name, type=method_type, is_cash=(method_type == "cash"))
+    pm = PaymentMethod(
+        name=body.name, type=method_type, is_cash=(method_type == "cash"),
+        payment_info=body.payment_info,
+    )
     db.add(pm)
     db.commit()
     db.refresh(pm)
     return pm
+
+
+@router.patch(
+    "/payment-methods/{payment_method_id}",
+    response_model=PaymentMethodResponse,
+    summary="Editar/activar/desactivar un método de pago (spec 024)",
+)
+def update_payment_method(
+    payment_method_id: UUID, body: PaymentMethodUpdate,
+    db: Session = Depends(get_db), _: User = Depends(require_tenant_admin),
+):
+    return service.update_payment_method(db, payment_method_id, body)
 
 
 # ============================ Ventas ============================

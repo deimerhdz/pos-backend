@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .order_item import OrderItem
     from .order_cancel_log import OrderCancelLog
+    from .order_payment_attempt import OrderPaymentAttempt
 
 
 class CustomerOrder(UUIDPrimaryKeyMixin, Base):
@@ -73,6 +74,23 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
     cancel_logs: Mapped[List["OrderCancelLog"]] = relationship(
         back_populates="order", cascade="all, delete-orphan"
     )
+
+    # Historial completo de intentos de pago (spec 024, FR-016) — nunca se
+    # borran, solo lectura desde aquí.
+    payment_attempts: Mapped[List["OrderPaymentAttempt"]] = relationship(
+        back_populates="order"
+    )
+
+    @property
+    def current_payment_attempt(self) -> Optional["OrderPaymentAttempt"]:
+        """El intento de pago más reciente (o `None` si no hay ninguno) —
+        base de `OrderResponse.current_payment_attempt` (spec 024). No es lo
+        mismo que "el confirmado": mientras no exista uno con
+        `status == 'confirmado'`, la orden sigue pendiente de pago para el
+        comensal, sin importar cuántos intentos rechazados haya antes."""
+        if not self.payment_attempts:
+            return None
+        return max(self.payment_attempts, key=lambda a: a.created_at)
 
     __table_args__ = (
         CheckConstraint(

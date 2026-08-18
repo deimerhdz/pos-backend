@@ -106,3 +106,48 @@ class CartResponse(BaseModel):
 class MyOrderCancelIn(BaseModel):
     motivo: str = Field(..., min_length=1, max_length=500,
                         examples=["Me equivoqué de sabor"])
+
+
+# ---------- Pagos del comensal (spec 024) ----------
+class DinerPaymentMethod(BaseModel):
+    """Método de pago tal como lo ve el comensal — solo los que el tenant
+    tiene `active` (FR-004); nunca expone el flag `active` en sí."""
+    id: UUID
+    name: str
+    type: str
+    is_cash: bool
+    payment_info: dict[str, str] | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaymentAttemptCreateIn(BaseModel):
+    payment_method_id: UUID
+
+
+class DinerPaymentAttempt(BaseModel):
+    """Intento de pago tal como lo ve el comensal — **nunca** incluye
+    `rejection_reason` (Clarification 3)."""
+    id: UUID
+    order_id: UUID
+    payment_method_id: UUID
+    status: str
+    receipt_file_url: str | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReceiptPresignIn(BaseModel):
+    content_type: str = Field(..., min_length=1, max_length=100, examples=["image/jpeg"])
+
+
+class ReceiptPresignOut(BaseModel):
+    upload_url: str
+    key: str
+    public_url: str
+    expires_in: int
+
+
+class ReceiptAttachIn(BaseModel):
+    file_url: str = Field(..., min_length=1, max_length=500)
