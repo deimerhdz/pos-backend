@@ -16,6 +16,7 @@ Ejecutar solo este módulo:
 from datetime import datetime, time, timezone
 from decimal import Decimal
 import unittest
+from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -49,6 +50,13 @@ class TestCartService(unittest.TestCase):
         product = cart_fixtures.make_product(db, category=category)
         kw.setdefault("price", Decimal("8000"))
         return cart_fixtures.make_variant(db, product=product, **kw), product, category
+
+    def _seed_efectivo(self, db):
+        """spec 025: `submit_cart` exige un método de pago activo — la
+        mayoría de estos tests solo necesitan que exista uno, sin ejercitar
+        ninguna regla de negocio sobre él (Principio III, actualización
+        explícita citando esta spec)."""
+        return cart_fixtures.make_payment_method(db, name=f"efectivo-{uuid4()}", is_cash=True)
 
     # ------------------------------------------------------- unique_display_label (T009)
 
@@ -381,17 +389,29 @@ class TestCartService(unittest.TestCase):
     def test_list_my_orders_mas_reciente_primero(self):
         """CONGELA comportamiento actual: `list_my_orders` devuelve los
         pedidos del comensal ordenados por `created_at` descendente (más
-        reciente primero)."""
+        reciente primero).
+
+        Actualizado por spec 024-pagos-ordenes-mesa (FR-005/FR-006, Principio
+        III): `order1` se marca `pagada` antes de enviar `order2` porque,
+        desde esta spec, un comensal no puede tener dos órdenes activas a la
+        vez — el propio orden de creación que este test verifica no cambia,
+        solo se agrega el paso que finaliza la primera para poder enviar la
+        segunda. Actualizado de nuevo por spec 025-revision-pago-antes-envio:
+        `submit_cart` exige `payment_method_id` (el pedido nace con su
+        primer intento de pago adjunto) — el resto de la suite sigue en
+        verde."""
         db, table, ts, participant = self._seed_session()
         variant, _, _ = self._seed_variant(db)
+        efectivo = self._seed_efectivo(db)
 
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
-        order1 = service.submit_cart(db, participant)
+        order1 = service.submit_cart(db, participant, efectivo.id)
         order1.created_at = datetime(2020, 1, 1)
+        order1.status = "pagada"
         db.commit()
 
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
-        order2 = service.submit_cart(db, participant)
+        order2 = service.submit_cart(db, participant, efectivo.id)
         order2.created_at = datetime(2020, 1, 2)
         db.commit()
 
@@ -404,11 +424,15 @@ class TestCartService(unittest.TestCase):
     def test_cancel_my_order_recibida_se_cancela(self):
         """CONGELA comportamiento actual: un pedido en 'recibida' (sin
         ítems en cocina, porque aún no se confirmó) se cancela sin
-        restricción."""
+        restricción.
+
+        Actualizado por spec 025-revision-pago-antes-envio: `submit_cart`
+        exige `payment_method_id`."""
         db, table, ts, participant = self._seed_session()
         variant, _, _ = self._seed_variant(db)
+        efectivo = self._seed_efectivo(db)
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
-        order = service.submit_cart(db, participant)
+        order = service.submit_cart(db, participant, efectivo.id)
         self.assertEqual(order.status, "recibida")
 
         cancelled = service.cancel_my_order(db, participant, order.id, "Me equivoqué de sabor")
@@ -419,11 +443,15 @@ class TestCartService(unittest.TestCase):
         """CONGELA comportamiento actual: un pedido cuyos ítems ya están
         'en_preparacion' (staff ya confirmó y cocina ya empezó) responde 409
         al intento de cancelación del propio comensal, tal como documenta el
-        docstring de `cancel_my_order`."""
+        docstring de `cancel_my_order`.
+
+        Actualizado por spec 025-revision-pago-antes-envio: `submit_cart`
+        exige `payment_method_id`."""
         db, table, ts, participant = self._seed_session()
         variant, _, _ = self._seed_variant(db)
+        efectivo = self._seed_efectivo(db)
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
-        order = service.submit_cart(db, participant)
+        order = service.submit_cart(db, participant, efectivo.id)
         order.status = "abierta"
         order.items[0].estado_cocina = "en_preparacion"
         db.commit()
@@ -458,20 +486,27 @@ class TestCartService(unittest.TestCase):
         una `CustomerOrder` 'recibida'; el carrito queda 'confirmado' y un
         carrito 'abierto' nuevo puede crearse después para el mismo
         comensal — posible gracias a la remoción del índice único parcial en
-        el fixture (research.md §3)."""
+        el fixture (research.md §3).
+
+        Actualizado por spec 025-revision-pago-antes-envio: `submit_cart`
+        exige `payment_method_id` — el pedido nace con su primer intento de
+        pago adjunto (`current_payment_attempt`)."""
         db, table, ts, participant = self._seed_session()
         variant, _, _ = self._seed_variant(db, price=Decimal("4000"))
+        efectivo = self._seed_efectivo(db)
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=2))
         old_cart = db.execute(
             select(Cart).where(Cart.participant_id == participant.id, Cart.status == "abierto")
         ).scalar_one()
 
-        order = service.submit_cart(db, participant)
+        order = service.submit_cart(db, participant, efectivo.id)
 
         self.assertIsInstance(order, CustomerOrder)
         self.assertEqual(order.status, "recibida")
         self.assertEqual(len(order.items), 1)
         self.assertEqual(order.items[0].quantity, 2)
+        self.assertEqual(order.current_payment_attempt.payment_method_id, efectivo.id)
+        self.assertEqual(order.current_payment_attempt.status, "pendiente")
 
         db.refresh(old_cart)
         self.assertEqual(old_cart.status, "confirmado")
@@ -488,12 +523,14 @@ class TestCartService(unittest.TestCase):
 
     def test_submit_cart_vacio_409(self):
         """CONGELA comportamiento actual: enviar un carrito sin ítems
-        responde 409 ("El carrito está vacío")."""
+        responde 409 ("El carrito está vacío") — se evalúa antes que
+        cualquier validación de pago (contracts/submit-cart-with-payment.md,
+        spec 025)."""
         db, table, ts, participant = self._seed_session()
         cart_fixtures.make_cart(db, participant=participant)
 
         with self.assertRaises(HTTPException) as ctx:
-            service.submit_cart(db, participant)
+            service.submit_cart(db, participant, uuid4())
         self.assertEqual(ctx.exception.status_code, 409)
 
 

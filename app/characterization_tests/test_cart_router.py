@@ -31,7 +31,7 @@ from app.api.v1.cart import router as cart_router
 from app.api.v1.cart import service
 from app.api.v1.cart.schemas import (
     CartItemIn, CartItemUpdate, CartResponse, MyOrderCancelIn,
-    SessionOpenIn, SessionOpenResponse,
+    SessionOpenIn, SessionOpenResponse, SubmitCartIn,
 )
 from app.core.config import settings
 from app.core.qr_context import QrContext
@@ -217,11 +217,16 @@ class TestCartRouter(unittest.TestCase):
         """CONGELA comportamiento actual: `events.order_created` se publica
         DESPUÉS de que la transacción de `service.submit_cart` ya hizo
         commit — en el momento de la llamada, una consulta SQL fresca sobre
-        `db` ya ve el pedido `recibida` y el carrito anterior `confirmado`."""
+        `db` ya ve el pedido `recibida` y el carrito anterior `confirmado`.
+
+        Actualizado por spec 025-revision-pago-antes-envio: el endpoint
+        exige un cuerpo `SubmitCartIn` con `payment_method_id`."""
         db, table, ts, participant = self._seed_session()
         variant = self._seed_variant(db)
+        efectivo = cart_fixtures.make_payment_method(db, name="Efectivo", is_cash=True)
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
         ctx = self._ctx(db, table, ts, participant)
+        body = SubmitCartIn(payment_method_id=efectivo.id)
 
         from sqlalchemy import select
         from app.models.cart import Cart
@@ -240,7 +245,7 @@ class TestCartRouter(unittest.TestCase):
 
         with mock.patch("app.core.events.order_created", side_effect=_spy) as spy, \
              mock.patch.object(settings, "RATE_LIMIT_ENABLED", False):
-            result = asyncio.run(cart_router.submit_cart(_FakeRequest(), ctx))
+            result = asyncio.run(cart_router.submit_cart(body, _FakeRequest(), ctx))
 
         spy.assert_called_once()
         self.assertEqual(seen["order_status"], "recibida")
@@ -255,8 +260,9 @@ class TestCartRouter(unittest.TestCase):
         responde 304, sin cuerpo — el mecanismo de caché de `json_or_304`."""
         db, table, ts, participant = self._seed_session()
         variant = self._seed_variant(db)
+        efectivo = cart_fixtures.make_payment_method(db, name="Efectivo", is_cash=True)
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
-        service.submit_cart(db, participant)
+        service.submit_cart(db, participant, efectivo.id)
         ctx = self._ctx(db, table, ts, participant)
 
         resp1 = cart_router.my_orders(_FakeRequest(), ctx=ctx)
@@ -276,10 +282,11 @@ class TestCartRouter(unittest.TestCase):
         responde 409)."""
         db, table, ts, participant = self._seed_session()
         variant = self._seed_variant(db)
+        efectivo = cart_fixtures.make_payment_method(db, name="Efectivo", is_cash=True)
         ctx = self._ctx(db, table, ts, participant)
 
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
-        order = service.submit_cart(db, participant)
+        order = service.submit_cart(db, participant, efectivo.id)
 
         resp = cart_router.cancel_my_order(
             order.id, MyOrderCancelIn(motivo="Me arrepentí"), ctx=ctx
@@ -287,7 +294,7 @@ class TestCartRouter(unittest.TestCase):
         self.assertEqual(resp.status, "cancelada")
 
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
-        order2 = service.submit_cart(db, participant)
+        order2 = service.submit_cart(db, participant, efectivo.id)
         order2.status = "abierta"
         order2.items[0].estado_cocina = "en_preparacion"
         db.commit()

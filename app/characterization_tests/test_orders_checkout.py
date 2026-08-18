@@ -289,7 +289,14 @@ class TestCheckout(unittest.TestCase):
         spec.md Historia 2, escenario 4): pedido 'recibida' con ítems
         válidos → pasa a 'abierta' y descuenta inventario exactamente una
         vez; con stock insuficiente de un insumo, la transacción entera
-        revierte y el pedido sigue 'recibida'."""
+        revierte y el pedido sigue 'recibida'.
+
+        Actualizado por spec 024-pagos-ordenes-mesa (FR-017, Principio III):
+        `confirm_order` ahora exige un intento de pago `confirmado` antes de
+        evaluar stock — cada orden de este test siembra uno (efectivo,
+        confirmado) para poder seguir ejercitando exactamente el mismo
+        camino de inventario que este test venía verificando. El resto de la
+        suite (231 tests) sigue en verde."""
         db = fx.new_session()
         ts = fx.make_table_session(db)
         category = fx.make_category(db)
@@ -297,9 +304,11 @@ class TestCheckout(unittest.TestCase):
         variant = fx.make_variant(db, product=product, price=PRECIO)
         insumo = fx.make_inventory_item(db, current_stock=Decimal("5"))
         fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
+        metodo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
 
         order = fx.make_customer_order(db, ts, status="recibida", channel="qr")
         fx.make_order_item(db, order, variant, quantity=1, estado_cocina="pendiente")
+        fx.make_payment_attempt(db, order, metodo, status="confirmado")
         db.commit()
         user = self._user()
 
@@ -315,6 +324,7 @@ class TestCheckout(unittest.TestCase):
         # Stock insuficiente para un segundo pedido (necesita 10, sobran 3).
         order2 = fx.make_customer_order(db, ts, status="recibida", channel="qr")
         fx.make_order_item(db, order2, variant, quantity=5, estado_cocina="pendiente")
+        fx.make_payment_attempt(db, order2, metodo, status="confirmado")
         db.commit()
 
         with self.assertRaises(HTTPException) as ctx:

@@ -48,6 +48,7 @@ __all__ = [
     "make_dining_table", "make_table_session", "make_participant",
     "make_cart", "make_cart_item", "make_customer_order",
     "make_promotion", "make_promotion_target", "make_combo_item",
+    "make_payment_method", "make_payment_attempt",
     "frozen_now",
     "build_session_context", "patched_qr_context", "patched_session_context",
     "FakeRedisBucket",
@@ -65,6 +66,8 @@ from app.models.cart_item import CartItem
 from app.models.customer_order import CustomerOrder
 from app.models.product_variant import ProductVariant
 from app.models.promotion import Promotion, PromotionTarget, PromotionComboItem
+from app.models.payment import PaymentMethod
+from app.models.order_payment_attempt import OrderPaymentAttempt
 
 
 # --------------------------------------------------------------- Esquema SQLite
@@ -97,6 +100,8 @@ _CART_TABLE_NAMES = [
     "promotion_combo_items",
     "order_cancel_logs",
     "audit_logs",
+    "payment_methods",
+    "order_payment_attempts",
 ]
 
 _TABLE_NAMES = _CATALOG_TABLE_NAMES + _CART_TABLE_NAMES
@@ -140,6 +145,15 @@ class _BoolOr:
 _PARTIAL_UNIQUE_INDEXES = {
     "table_sessions": "idx_active_session_per_table",
     "carts": "idx_open_cart_per_participant",
+    # spec 024: sin remover esto no se puede sembrar más de un
+    # `OrderPaymentAttempt` por orden (p.ej. uno rechazado + uno nuevo
+    # pendiente, US5) — el índice se crearía como UNIQUE incondicional.
+    "order_payment_attempts": "idx_pending_payment_attempt_per_order",
+    # spec 025: sin remover esto no se puede sembrar, a propósito, más de una
+    # orden no-terminal del mismo comensal en un test que necesite dos
+    # participantes/dos órdenes (T006) — el índice se crearía como UNIQUE
+    # incondicional sobre `participant_id`.
+    "customer_orders": "idx_active_order_per_participant",
 }
 
 
@@ -308,6 +322,36 @@ def make_combo_item(
     return obj
 
 
+def make_payment_method(db: Session, **kw) -> PaymentMethod:
+    """`kw.setdefault(is_cash=True)` por defecto; los tests de transferencia
+    (spec 024) pasan `is_cash=False, type="transfer", payment_info={...}`."""
+    kw.setdefault("id", _uid())
+    kw.setdefault("name", f"metodo-{kw['id']}")
+    kw.setdefault("is_cash", True)
+    kw.setdefault("type", "cash" if kw["is_cash"] else "other")
+    kw.setdefault("active", True)
+    obj = PaymentMethod(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def make_payment_attempt(
+    db: Session, order: CustomerOrder, method: PaymentMethod, **kw
+) -> OrderPaymentAttempt:
+    """`kw.setdefault(status="pendiente")` — los tests de US2/US3/US4/US5
+    sobreescriben para sembrar intentos ya `confirmado`/`rechazado`."""
+    kw.setdefault("id", _uid())
+    kw.setdefault("order_id", order.id)
+    kw.setdefault("payment_method_id", method.id)
+    kw.setdefault("status", "pendiente")
+    kw.setdefault("created_at", datetime.now())
+    obj = OrderPaymentAttempt(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
 # --------------------------------------------------------------- Reloj fijado (A-08)
 
 class frozen_now:
@@ -357,16 +401,18 @@ def build_session_context(
     db: Session,
     *,
     tenant_id: int = 1,
+    tenant_schema: str = "tenant_test",
     table: DiningTable,
     table_session: TableSession,
     participant: SessionParticipant,
 ) -> SessionContext:
     """`SessionContext` real (mismo dataclass de producción) poblado a mano.
-    Se pasa como `ctx=` directamente a las 7 funciones de endpoint que hoy lo
+    Se pasa como `ctx=` directamente a las funciones de endpoint que hoy lo
     reciben vía `Depends(get_session_context)` — `Depends` no se resuelve al
     llamar la función Python directamente, así que no hace falta ningún
-    parche para estas 7 (research.md §1)."""
-    tenant = SimpleNamespace(id=tenant_id)
+    parche para estas (research.md §1). `tenant_schema` (spec 024) lo usa
+    `presign_receipt` (`cart/service.py`) para construir la key de R2."""
+    tenant = SimpleNamespace(id=tenant_id, schema=tenant_schema)
     return SessionContext(
         db=db,
         tenant=tenant,

@@ -1,5 +1,5 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy import String, Boolean, Numeric, ForeignKey, DateTime, func, CheckConstraint
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import Optional, TYPE_CHECKING
@@ -22,6 +22,12 @@ class PaymentMethod(UUIDPrimaryKeyMixin, Base):
     type: Mapped[str] = mapped_column(String(20), nullable=False, server_default="other")
 
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Datos de pago que el comensal necesita ver para transferir (cuenta,
+    # titular, teléfono, código, u otro identificador "según el método" — sin
+    # esquema fijo, spec 024). `None` para efectivo y para métodos existentes
+    # hasta que se editen (research.md spec 024, Decisión 2).
+    payment_info: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         CheckConstraint(

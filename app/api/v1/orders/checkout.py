@@ -29,6 +29,8 @@ from app.models.sale import Sale
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import EN_CURSO, OrderItem
 from app.models.order_cancel_log import OrderCancelLog
+from app.models.order_payment_attempt import OrderPaymentAttempt
+from app.models.payment import PaymentMethod
 from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
 from app.api.v1.orders.consumption import deduct_order_items, reverse_order_items
 from app.api.v1.orders.schemas import (
@@ -61,7 +63,11 @@ def _item_options(db: Session, item: OrderItem) -> list[Option]:
 def _reload_order(db: Session, order_id: UUID) -> CustomerOrder:
     return db.execute(
         select(CustomerOrder)
-        .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
+        .options(
+            selectinload(CustomerOrder.items).selectinload(OrderItem.options),
+            selectinload(CustomerOrder.payment_attempts)
+            .selectinload(OrderPaymentAttempt.payment_method),
+        )
         .where(CustomerOrder.id == order_id)
     ).scalar_one()
 
@@ -327,6 +333,21 @@ def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
             f"Solo se confirman pedidos en 'recibida' (status={order.status})",
         )
 
+    # spec 024, FR-017: una orden solo avanza a comanda con un intento de pago
+    # confirmado. Se verifica antes de tocar inventario a propósito — si el
+    # pago no está confirmado, esta llamada no debe tener ningún efecto
+    # secundario (research.md spec 024, Decisión 5).
+    has_confirmed_payment = db.execute(
+        select(OrderPaymentAttempt.id).where(
+            OrderPaymentAttempt.order_id == order.id,
+            OrderPaymentAttempt.status == "confirmado",
+        )
+    ).scalar_one_or_none()
+    if has_confirmed_payment is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "La orden no tiene un pago confirmado"
+        )
+
     try:
         entries = [
             (it, _item_options(db, it))
@@ -565,3 +586,152 @@ def release_table(
 
     db.refresh(table)
     return table
+
+
+# ------------------------------------------------------- Intentos de pago (spec 024)
+# Revisión del cajero: aprobar/rechazar comprobante, confirmar efectivo (US2/US3).
+# `confirm_order` (arriba) es el único punto que hace avanzar la orden a comanda;
+# estas tres funciones solo resuelven el intento, nunca tocan `CustomerOrder.status`
+# ni descuentan inventario (contracts/cashier-payment-review.md).
+
+def _order_total(db: Session, order_id: UUID) -> Decimal:
+    """Total cobrable de la orden (líneas no anuladas), mismo criterio que
+    `compute_bill` — usado para validar FR-010a (monto recibido >= total)."""
+    items = db.execute(
+        select(OrderItem).where(
+            OrderItem.order_id == order_id, OrderItem.estado_cocina != "anulado"
+        )
+    ).scalars().all()
+    return sum((Decimal(it.unit_price) * it.quantity for it in items), start=Decimal("0"))
+
+
+def _load_pending_attempt_for_update(db: Session, attempt_id: UUID) -> OrderPaymentAttempt:
+    """Bloqueo pesimista sobre el intento, solo si sigue `pendiente` — mismo
+    patrón que `confirm_order` usa sobre la orden (research.md spec 024,
+    Decisión 9). Garantiza FR-018/SC-007: una segunda resolución casi
+    simultánea del mismo intento no tiene efecto."""
+    attempt = db.execute(
+        select(OrderPaymentAttempt)
+        .where(OrderPaymentAttempt.id == attempt_id)
+        .with_for_update(of=OrderPaymentAttempt)
+    ).scalar_one_or_none()
+    if attempt is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Intento de pago no encontrado")
+    if attempt.status != "pendiente":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"El intento de pago ya fue resuelto (status={attempt.status})",
+        )
+    return attempt
+
+
+def list_payment_attempts(db: Session, order_id: UUID) -> list[OrderPaymentAttempt]:
+    """Historial completo de intentos de una orden, para cajero/back-office
+    (FR-016) — incluye rechazados, con su motivo."""
+    get_or_404(db, CustomerOrder, order_id, "Order not found")
+    return db.execute(
+        select(OrderPaymentAttempt)
+        .options(selectinload(OrderPaymentAttempt.payment_method))
+        .where(OrderPaymentAttempt.order_id == order_id)
+        .order_by(OrderPaymentAttempt.created_at)
+    ).scalars().all()
+
+
+def approve_payment_attempt(db: Session, attempt_id: UUID, user: User) -> OrderPaymentAttempt:
+    """Aprueba un comprobante de transferencia (US2, Acceptance Scenario 4)."""
+    try:
+        attempt = _load_pending_attempt_for_update(db, attempt_id)
+        method = get_or_404(db, PaymentMethod, attempt.payment_method_id, "Payment method not found")
+        if method.is_cash:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Un método en efectivo se confirma con confirm-cash, no con approve",
+            )
+        if not attempt.receipt_file_url:
+            raise HTTPException(status.HTTP_409_CONFLICT, "El intento no tiene comprobante todavía")
+
+        attempt.status = "confirmado"
+        attempt.resolved_by_user_id = user.id
+        attempt.resolved_at = datetime.now(timezone.utc)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Error aprobando comprobante de pago")
+        raise
+
+    db.refresh(attempt)
+    return attempt
+
+
+def reject_payment_attempt(
+    db: Session, attempt_id: UUID, reason: str, user: User
+) -> OrderPaymentAttempt:
+    """Rechaza un comprobante con motivo obligatorio (FR-014, US2 Acceptance
+    Scenario 5-6). El motivo queda visible solo para cajero/back-office
+    (Clarification 3) — el router del comensal nunca lo serializa."""
+    try:
+        attempt = _load_pending_attempt_for_update(db, attempt_id)
+        method = get_or_404(db, PaymentMethod, attempt.payment_method_id, "Payment method not found")
+        if method.is_cash:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Un método en efectivo se confirma con confirm-cash, no se rechaza",
+            )
+
+        attempt.status = "rechazado"
+        attempt.rejection_reason = reason
+        attempt.resolved_by_user_id = user.id
+        attempt.resolved_at = datetime.now(timezone.utc)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Error rechazando comprobante de pago")
+        raise
+
+    db.refresh(attempt)
+    return attempt
+
+
+def confirm_cash_payment_attempt(
+    db: Session, attempt_id: UUID, amount_received: Decimal, user: User
+) -> OrderPaymentAttempt:
+    """Confirma un pago en efectivo y calcula el cambio (FR-009/FR-010,
+    US3). FR-010a: impide confirmar si `amount_received < total_orden`."""
+    try:
+        attempt = _load_pending_attempt_for_update(db, attempt_id)
+        method = get_or_404(db, PaymentMethod, attempt.payment_method_id, "Payment method not found")
+        if not method.is_cash:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Un método de transferencia se aprueba/rechaza, no se confirma con confirm-cash",
+            )
+
+        total = _order_total(db, attempt.order_id)
+        if amount_received < total:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"El monto recibido ({amount_received}) es menor al total de la orden ({total})",
+            )
+
+        attempt.amount_received = amount_received
+        attempt.change_amount = amount_received - total
+        attempt.status = "confirmado"
+        attempt.resolved_by_user_id = user.id
+        attempt.resolved_at = datetime.now(timezone.utc)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Error confirmando pago en efectivo")
+        raise
+
+    db.refresh(attempt)
+    return attempt

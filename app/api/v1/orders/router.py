@@ -15,6 +15,7 @@ from app.core.qr_token import mint_qr_token
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem
+from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.api.v1.orders import service
 from app.api.v1.orders.consolidation import consolidate_table, add_item_to_table
 from app.api.v1.orders import kitchen
@@ -27,6 +28,7 @@ from app.api.v1.orders.schemas import (
     OrderItemResponse, KitchenTransitionIn, VoidItemIn,
     BlockIn, CancelIn, PayIn, BillResponse,
     TableStatusUpdate, MoveOrderIn, MergeOrdersIn, MergeResponse, GroupBillResponse,
+    PaymentAttemptResponse, PaymentAttemptRejectIn, PaymentAttemptConfirmCashIn,
 )
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -39,7 +41,11 @@ _ORDERS_ADAPTER = TypeAdapter(list[OrderResponse])
 def _load_order(db: Session, order_id: UUID) -> CustomerOrder:
     order = db.execute(
         select(CustomerOrder)
-        .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
+        .options(
+            selectinload(CustomerOrder.items).selectinload(OrderItem.options),
+            selectinload(CustomerOrder.payment_attempts)
+            .selectinload(OrderPaymentAttempt.payment_method),
+        )
         .where(CustomerOrder.id == order_id)
     ).scalar_one_or_none()
     if order is None:
@@ -182,6 +188,53 @@ def confirm_order(
     )
     events.bill_changed(tenant.id, table_session_id=order.table_session_id)
     return order
+
+
+# ============================ Intentos de pago (cajero, spec 024) ============================
+@router.get(
+    "/{order_id}/payment-attempts",
+    response_model=list[PaymentAttemptResponse],
+    summary="Historial de intentos de pago de una orden (cajero/back-office)",
+)
+def list_payment_attempts(
+    order_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    return checkout.list_payment_attempts(db, order_id)
+
+
+@router.post(
+    "/payment-attempts/{attempt_id}/approve",
+    response_model=PaymentAttemptResponse,
+    summary="Aprobar un comprobante de transferencia (cajero)",
+)
+def approve_payment_attempt(
+    attempt_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    return checkout.approve_payment_attempt(db, attempt_id, user)
+
+
+@router.post(
+    "/payment-attempts/{attempt_id}/reject",
+    response_model=PaymentAttemptResponse,
+    summary="Rechazar un comprobante de transferencia con motivo (cajero)",
+)
+def reject_payment_attempt(
+    attempt_id: UUID, body: PaymentAttemptRejectIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    return checkout.reject_payment_attempt(db, attempt_id, body.reason, user)
+
+
+@router.post(
+    "/payment-attempts/{attempt_id}/confirm-cash",
+    response_model=PaymentAttemptResponse,
+    summary="Confirmar un pago en efectivo y calcular el cambio (cajero)",
+)
+def confirm_cash_payment_attempt(
+    attempt_id: UUID, body: PaymentAttemptConfirmCashIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    return checkout.confirm_cash_payment_attempt(db, attempt_id, body.amount_received, user)
 
 
 # ============================ Consolidación (mesero) ============================
@@ -428,7 +481,9 @@ def list_orders(
     """La terminal sondea esto, así que responde con `ETag`: mientras nada
     cambie el navegador revalida y recibe un 304, sin cuerpo ni re-render."""
     q = select(CustomerOrder).options(
-        selectinload(CustomerOrder.items).selectinload(OrderItem.options)
+        selectinload(CustomerOrder.items).selectinload(OrderItem.options),
+        selectinload(CustomerOrder.payment_attempts)
+        .selectinload(OrderPaymentAttempt.payment_method),
     ).order_by(CustomerOrder.created_at.desc())
     if status_filter is not None:
         q = q.where(CustomerOrder.status == status_filter)

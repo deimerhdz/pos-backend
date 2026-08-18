@@ -11,7 +11,7 @@ from sqlalchemy import cast, func, select, String
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql import Select
 
-from app.core.crud import get_or_404
+from app.core.crud import ensure_unique, get_or_404
 from app.core.models import User
 from app.models.invoice import Invoice
 from app.models.product_variant import ProductVariant
@@ -23,10 +23,55 @@ from app.models.sale import Sale, SaleItem
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.sales.consumption import deduct_sale
 from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
-from app.api.v1.sales.schemas import SaleCreate
+from app.api.v1.sales.schemas import SaleCreate, PaymentMethodUpdate
 from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
+
+
+# ============================ Métodos de pago (spec 024) ============================
+
+def update_payment_method(
+    db: Session, payment_method_id: UUID, data: PaymentMethodUpdate
+) -> PaymentMethod:
+    """Edita nombre/datos de pago/estado de un método (spec 024, US1).
+
+    Al desactivar (`active: False`), exige que quede al menos un método activo
+    en el tenant (FR-003) — se cuenta dentro de la misma transacción,
+    excluyendo el propio método (research.md spec 024, Decisión 10). Editar
+    `payment_info`/`name` no toca ningún `OrderPaymentAttempt` ya creado con
+    este método: el intento solo referencia `payment_method_id`, nunca copia
+    estos datos."""
+    method = get_or_404(db, PaymentMethod, payment_method_id, "Payment method not found")
+
+    if data.name is not None and data.name != method.name:
+        ensure_unique(
+            db, PaymentMethod, PaymentMethod.name, data.name,
+            "Payment method already exists", exclude_id=payment_method_id,
+        )
+        method.name = data.name
+
+    if data.payment_info is not None:
+        method.payment_info = data.payment_info
+
+    if data.active is not None and data.active != method.active:
+        if data.active is False:
+            active_count = db.execute(
+                select(func.count()).select_from(PaymentMethod).where(
+                    PaymentMethod.active.is_(True),
+                    PaymentMethod.id != payment_method_id,
+                )
+            ).scalar_one()
+            if active_count == 0:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "Debe quedar al menos un método de pago activo.",
+                )
+        method.active = data.active
+
+    db.commit()
+    db.refresh(method)
+    return method
 
 
 def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: str = "") -> Sale:

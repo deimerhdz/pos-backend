@@ -54,6 +54,7 @@ __all__ = [
     "make_cart", "make_cart_item",
     "make_promotion", "make_promotion_target", "make_combo_item",
     "make_cash_register", "make_cash_shift", "make_payment_method",
+    "make_payment_attempt",
     "make_tenant_double", "make_user_double",
     "force_flush_integrity_error",
 ]
@@ -69,6 +70,7 @@ from app.models.cart_item import CartItem
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem
 from app.models.order_item_void_log import OrderItemVoidLog
+from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.product_variant import ProductVariant
 from app.models.promotion import Promotion, PromotionTarget, PromotionComboItem
 from app.models.cash_register import CashRegister
@@ -120,9 +122,29 @@ _ORDERS_TABLE_NAMES = [
     "invoices",
     "invoice_counters",
     "audit_logs",
+    "order_payment_attempts",
 ]
 
 _TABLE_NAMES = _CATALOG_TABLE_NAMES + _ORDERS_TABLE_NAMES
+
+# spec 024: sin remover esto no se puede sembrar más de un
+# `OrderPaymentAttempt` por orden (p.ej. uno rechazado + uno nuevo pendiente,
+# o dos rechazados + uno confirmado) — sobre SQLite el índice se crearía como
+# UNIQUE incondicional (mismo mecanismo que `cart_fixtures._PARTIAL_UNIQUE_INDEXES`,
+# research.md spec 015 §3).
+_PARTIAL_UNIQUE_INDEXES = {
+    "order_payment_attempts": "idx_pending_payment_attempt_per_order",
+}
+
+
+def _remove_partial_unique_indexes() -> None:
+    for table_name, index_name in _PARTIAL_UNIQUE_INDEXES.items():
+        for table in Base.metadata.tables.values():
+            if table.name != table_name:
+                continue
+            for idx in list(table.indexes):
+                if idx.name == index_name:
+                    table.indexes.discard(idx)
 
 
 # `sale_items.options` es `postgresql.JSONB` (`app/models/sale.py`). La versión
@@ -158,8 +180,11 @@ def new_session() -> Session:
     auditoría que `orders` necesita). No remueve ningún índice único parcial
     (`idx_active_session_per_table`, `idx_open_cart_per_participant`,
     `idx_open_shift_per_register`): ningún escenario de esta spec siembra dos
-    filas activas que colisionen con ellos."""
+    filas activas que colisionen con ellos. Sí remueve
+    `idx_pending_payment_attempt_per_order` (spec 024): esos tests siembran
+    varios intentos de pago no-pendientes por orden a propósito."""
     _patch_sqlite_incompatible_server_defaults()
+    _remove_partial_unique_indexes()
     tables = [t for t in Base.metadata.tables.values() if t.name in _TABLE_NAMES]
     engine = create_engine("sqlite:///:memory:")
     conn = engine.connect().execution_options(schema_translate_map={"tenant": None})
@@ -374,6 +399,23 @@ def make_payment_method(db: Session, **kw) -> PaymentMethod:
     kw.setdefault("type", "cash" if kw["is_cash"] else "other")
     kw.setdefault("active", True)
     obj = PaymentMethod(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def make_payment_attempt(
+    db: Session, order: CustomerOrder, method: PaymentMethod, **kw
+) -> OrderPaymentAttempt:
+    """`kw.setdefault(status="pendiente")` (spec 024) — los tests de
+    aprobar/rechazar/confirmar-efectivo/gate de `confirm_order` sobreescriben
+    según el escenario."""
+    kw.setdefault("id", _uid())
+    kw.setdefault("order_id", order.id)
+    kw.setdefault("payment_method_id", method.id)
+    kw.setdefault("status", "pendiente")
+    kw.setdefault("created_at", datetime.now())
+    obj = OrderPaymentAttempt(**kw)
     db.add(obj)
     db.flush()
     return obj
