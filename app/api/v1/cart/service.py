@@ -10,6 +10,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core import events
@@ -487,9 +488,18 @@ def leave_session(db: Session, participant: SessionParticipant) -> None:
     db.commit()
 
 
-def submit_cart(db: Session, participant: SessionParticipant) -> CustomerOrder:
+def submit_cart(
+    db: Session,
+    participant: SessionParticipant,
+    payment_method_id: UUID,
+    receipt_file_url: str | None = None,
+) -> CustomerOrder:
     """Envía el carrito del comensal como pedido: crea una `CustomerOrder` en
-    estado `recibida` con sus líneas y cierra el carrito.
+    estado `recibida` con sus líneas **y** su primer `OrderPaymentAttempt`, en
+    una sola transacción (spec 025, contracts/submit-cart-with-payment.md).
+    Antes de esta llamada no existe ningún registro del pedido — no hay
+    ningún estado intermedio "sin pago" que el staff pueda ver
+    (research.md spec 025, Decisión 1/3).
 
     **No toca inventario.** El descuento ocurre cuando el staff confirma el pedido
     (`POST /orders/{id}/confirm`); hasta entonces el comensal puede cancelarlo sin
@@ -504,6 +514,11 @@ def submit_cart(db: Session, participant: SessionParticipant) -> CustomerOrder:
 
     # spec 024, FR-005: no permitir una segunda orden activa del mismo
     # comensal. "Activa" = no terminal (research.md spec 024, Decisión 8).
+    # spec 025: además de este chequeo de aplicación (mensaje claro en el
+    # camino feliz), `idx_active_order_per_participant` es la garantía de
+    # última instancia ante una confirmación duplicada casi simultánea
+    # (FR-013, research.md Decisión 4) — capturada más abajo, alrededor del
+    # `commit()`.
     active_order = db.execute(
         select(CustomerOrder.id).where(
             CustomerOrder.participant_id == participant.id,
@@ -514,6 +529,21 @@ def submit_cart(db: Session, participant: SessionParticipant) -> CustomerOrder:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "Ya tienes una orden activa; espera a que finalice antes de enviar otra.",
+        )
+
+    method = get_or_404(db, PaymentMethod, payment_method_id, "Método de pago no encontrado")
+    if not method.active:
+        raise HTTPException(status.HTTP_409_CONFLICT, "El método de pago ya no está disponible")
+    if method.is_cash:
+        if receipt_file_url is not None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Un pago en efectivo no lleva comprobante",
+            )
+    elif not receipt_file_url:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Este método de pago exige cargar un comprobante",
         )
 
     check_availability(db, _cart_consumption(db, cart), extra_context="envío de pedido")
@@ -547,11 +577,27 @@ def submit_cart(db: Session, participant: SessionParticipant) -> CustomerOrder:
             for o in ci.options:
                 db.add(OrderItemOption(order_item_id=item.id, option_id=o.option_id))
 
+        db.add(OrderPaymentAttempt(
+            order_id=order.id,
+            payment_method_id=payment_method_id,
+            receipt_file_url=receipt_file_url,
+        ))
+
         cart.status = "confirmado"
         db.commit()
     except HTTPException:
         db.rollback()
         raise
+    except IntegrityError:
+        # Carrera entre dos envíos casi simultáneos del mismo comensal
+        # (FR-013) — `idx_active_order_per_participant` la resolvió por
+        # nosotros; se traduce al mismo 409 del chequeo de aplicación de
+        # arriba, sin dejar ningún pedido a medias.
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Ya tienes una orden activa; espera a que finalice antes de enviar otra.",
+        )
     except Exception:
         db.rollback()
         logger.exception("Error enviando el pedido del comensal")
@@ -588,6 +634,32 @@ def list_payment_methods(db: Session) -> list[PaymentMethod]:
         .where(PaymentMethod.active.is_(True))
         .order_by(PaymentMethod.name)
     ).scalars().all()
+
+
+def presign_payment_receipt(
+    db: Session, tenant_schema: str, participant_id: UUID, content_type: str
+) -> ReceiptPresignOut:
+    """Presign genérico, sin ligar a ningún `attempt_id` (spec 025, US3/US4,
+    contracts/payment-receipt-presign.md, research.md Decisión 2) — a
+    diferencia de `presign_receipt`, se usa *antes* de que exista cualquier
+    orden o intento al que asociar el archivo. Mismas primitivas de
+    `app/core/storage.py`, sin ninguna validación de recurso previo: el único
+    comensal autenticado (`participant_id`, del `x-session-token`) ya es
+    suficiente contexto."""
+    extension = CONTENT_TYPE_EXTENSIONS.get(content_type)
+    if extension is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"content_type no soportado: {content_type}",
+        )
+
+    key = build_object_key(tenant_schema, "comprobantes", extension)
+    return ReceiptPresignOut(
+        upload_url=generate_presigned_put_url(key, content_type),
+        key=key,
+        public_url=public_url_for(key),
+        expires_in=settings.R2_PRESIGN_EXPIRE_SECONDS,
+    )
 
 
 def _load_own_order(db: Session, participant_id: UUID, order_id: UUID) -> CustomerOrder:

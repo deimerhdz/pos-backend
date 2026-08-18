@@ -151,3 +151,18 @@ class ReceiptPresignOut(BaseModel):
 
 class ReceiptAttachIn(BaseModel):
     file_url: str = Field(..., min_length=1, max_length=500)
+
+
+# ---------- Revisión y pago antes de enviar (spec 025) ----------
+class SubmitCartIn(BaseModel):
+    """Cuerpo de `POST /cart/submit` — el pedido nace junto con su primer
+    intento de pago (contracts/submit-cart-with-payment.md)."""
+    payment_method_id: UUID
+    receipt_file_url: str | None = Field(None, max_length=500)
+
+
+class PaymentReceiptPresignIn(ReceiptPresignIn):
+    """Mismo shape que `ReceiptPresignIn` (`content_type`), sin campos
+    nuevos — reexportada con su propio nombre porque alimenta un endpoint
+    distinto (`POST /cart/payment-receipt/presign`, no ligado a ningún
+    `attempt_id`, contracts/payment-receipt-presign.md)."""

@@ -1,6 +1,8 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy import String, Integer, ForeignKey, DateTime, func, CheckConstraint
+from sqlalchemy import (
+    String, Integer, ForeignKey, DateTime, func, CheckConstraint, Index, text,
+)
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import Optional, List
 from datetime import datetime
@@ -103,5 +105,17 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
         # Ya NO hay índice único de "una orden abierta por mesa": la mesa puede
         # tener varios pedidos simultáneos (uno por comensal, o varias rondas del
         # mismo). La agrupación para cobrar la da `table_session_id`.
+        #
+        # A lo sumo una orden activa por comensal (spec 025, FR-013) — mismo
+        # predicado que `_NON_TERMINAL_ORDER_STATUSES`
+        # (`app/api/v1/cart/service.py`). Postgres no considera dos NULL
+        # iguales: las órdenes de mostrador/mesero (participant_id NULL) no
+        # se ven afectadas.
+        Index(
+            "idx_active_order_per_participant",
+            "participant_id",
+            unique=True,
+            postgresql_where=text("status NOT IN ('pagada', 'cancelada')"),
+        ),
         {"schema": "tenant"},
     )

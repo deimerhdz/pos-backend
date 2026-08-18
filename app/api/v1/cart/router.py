@@ -28,6 +28,7 @@ from app.api.v1.cart.schemas import (
     CartItemIn, CartItemUpdate, CartResponse, MyOrderCancelIn,
     DinerPaymentMethod, PaymentAttemptCreateIn, DinerPaymentAttempt,
     ReceiptPresignIn, ReceiptPresignOut, ReceiptAttachIn,
+    SubmitCartIn, PaymentReceiptPresignIn,
 )
 
 router = APIRouter(prefix="/cart", tags=["cart"])
@@ -137,15 +138,20 @@ def leave(x_session_token: str | None = Header(None, alias="x-session-token")):
     "/submit",
     response_model=OrderResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Enviar el carrito como pedido (queda 'recibida', sin descontar stock)",
+    summary="Enviar el carrito como pedido, con su método de pago (spec 025)",
 )
 async def submit_cart(
-    request: Request, ctx: SessionContext = Depends(get_session_context),
+    body: SubmitCartIn, request: Request,
+    ctx: SessionContext = Depends(get_session_context),
 ):
-    """El pedido queda pendiente de que el staff lo confirme; hasta entonces no
-    compromete inventario y el comensal puede cancelarlo sin coste."""
+    """El pedido nace junto con su primer intento de pago — no queda pendiente
+    de que el staff lo confirme sin pago resuelto; hasta que el staff lo
+    confirme no compromete inventario y el comensal puede cancelarlo sin
+    coste (spec 025, contracts/submit-cart-with-payment.md)."""
     await rate_limit(request, "cart_submit", table_id=ctx.table_id)
-    order = service.submit_cart(ctx.db, ctx.participant)
+    order = service.submit_cart(
+        ctx.db, ctx.participant, body.payment_method_id, body.receipt_file_url
+    )
     # Después del COMMIT del servicio, nunca dentro: si la transacción fallara no
     # puede haber salido un evento anunciando un pedido que no existe.
     events.order_created(
@@ -204,6 +210,20 @@ def cancel_my_order(
 )
 def list_payment_methods(ctx: SessionContext = Depends(get_session_context)):
     return service.list_payment_methods(ctx.db)
+
+
+@router.post(
+    "/payment-receipt/presign",
+    response_model=ReceiptPresignOut,
+    summary="Pedir una URL firmada para subir el comprobante antes de enviar el pedido (spec 025)",
+)
+def presign_payment_receipt(
+    body: PaymentReceiptPresignIn,
+    ctx: SessionContext = Depends(get_session_context),
+):
+    return service.presign_payment_receipt(
+        ctx.db, ctx.tenant.schema, ctx.participant.id, body.content_type
+    )
 
 
 @router.post(

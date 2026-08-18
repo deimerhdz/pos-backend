@@ -4,6 +4,12 @@
 No es un characterization test: `submit_cart` no valida esto hoy (research.md
 spec 024, Decisión 8) — es una restricción nueva.
 
+Ampliado por spec 025-revision-pago-antes-envio (T011): `submit_cart` ahora
+exige `payment_method_id` (el pedido nace con su primer intento de pago
+adjunto) y el edge case de confirmación duplicada (FR-013, SC-006) — doble
+toque/reintento de red sobre la misma sesión, que solo debe dejar **una**
+`CustomerOrder`.
+
 Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_cart_single_active_order -v
@@ -12,9 +18,11 @@ from decimal import Decimal
 import unittest
 
 from fastapi import HTTPException
+from sqlalchemy import func, select
 
 from app.characterization_tests import cart_fixtures as fx
 from app.api.v1.cart import service
+from app.models.customer_order import CustomerOrder
 
 
 class TestCartSingleActiveOrder(unittest.TestCase):
@@ -28,13 +36,14 @@ class TestCartSingleActiveOrder(unittest.TestCase):
         variant = fx.make_variant(db, product=product, price=Decimal("8000"))
         cart = fx.make_cart(db, participant=participant)
         fx.make_cart_item(db, cart, variant)
+        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
         db.commit()
-        return db, participant, variant
+        return db, participant, variant, efectivo
 
     def test_segunda_orden_con_la_primera_pendiente_falla_409(self):
         """Acceptance Scenario 1 (US6)."""
-        db, participant, variant = self._seed_session_con_carrito()
-        first = service.submit_cart(db, participant)
+        db, participant, variant, efectivo = self._seed_session_con_carrito()
+        first = service.submit_cart(db, participant, efectivo.id)
         self.assertEqual(first.status, "recibida")
 
         # Nuevo carrito abierto tras el submit (mismo patrón que
@@ -45,14 +54,14 @@ class TestCartSingleActiveOrder(unittest.TestCase):
         db.commit()
 
         with self.assertRaises(HTTPException) as ctx:
-            service.submit_cart(db, participant)
+            service.submit_cart(db, participant, efectivo.id)
         self.assertEqual(ctx.exception.status_code, 409)
 
     def test_segunda_orden_tras_finalizar_la_primera_se_permite(self):
         """Acceptance Scenario 2 (US6): 'finalizada' = pagada o cancelada
         (research.md spec 024, Decisión 8)."""
-        db, participant, variant = self._seed_session_con_carrito()
-        first = service.submit_cart(db, participant)
+        db, participant, variant, efectivo = self._seed_session_con_carrito()
+        first = service.submit_cart(db, participant, efectivo.id)
         first.status = "pagada"
         db.commit()
 
@@ -60,13 +69,13 @@ class TestCartSingleActiveOrder(unittest.TestCase):
         fx.make_cart_item(db, cart2, variant)
         db.commit()
 
-        second = service.submit_cart(db, participant)
+        second = service.submit_cart(db, participant, efectivo.id)
         self.assertNotEqual(second.id, first.id)
         self.assertEqual(second.status, "recibida")
 
     def test_segunda_orden_tras_cancelar_la_primera_se_permite(self):
-        db, participant, variant = self._seed_session_con_carrito()
-        first = service.submit_cart(db, participant)
+        db, participant, variant, efectivo = self._seed_session_con_carrito()
+        first = service.submit_cart(db, participant, efectivo.id)
         first.status = "cancelada"
         db.commit()
 
@@ -74,8 +83,44 @@ class TestCartSingleActiveOrder(unittest.TestCase):
         fx.make_cart_item(db, cart2, variant)
         db.commit()
 
-        second = service.submit_cart(db, participant)
+        second = service.submit_cart(db, participant, efectivo.id)
         self.assertEqual(second.status, "recibida")
+
+    # ------------------------------------------- Confirmación duplicada (T011)
+
+    def test_confirmacion_duplicada_misma_sesion_falla_409_una_sola_orden(self):
+        """FR-013, SC-006, edge case "confirmación duplicada": doble
+        toque/reintento de red — dos llamadas seguidas de `submit_cart` sobre
+        la misma sesión de base de datos, cada una sobre su propio carrito no
+        vacío (un doble toque real reenvía el mismo formulario dos veces; el
+        carrito del comensal no cambia entre ambos toques, pero
+        `_load_open_cart` ya cerró el primero en 'confirmado' — se siembra un
+        segundo con los mismos ítems para aislar la validación que este test
+        cubre, la de "orden activa", de la de "carrito abierto"). La segunda
+        falla 409 (chequeo de aplicación, mismo camino que el resto de este
+        módulo) y al final solo existe **una** `CustomerOrder` para el
+        comensal — la garantía última la da
+        `idx_active_order_per_participant` (data-model.md/research.md
+        Decisión 4), pero aquí basta el chequeo de aplicación porque ambas
+        llamadas comparten sesión."""
+        db, participant, variant, efectivo = self._seed_session_con_carrito()
+
+        service.submit_cart(db, participant, efectivo.id)
+
+        cart2 = fx.make_cart(db, participant=participant)
+        fx.make_cart_item(db, cart2, variant)
+        db.commit()
+
+        with self.assertRaises(HTTPException) as ctx:
+            service.submit_cart(db, participant, efectivo.id)
+        self.assertEqual(ctx.exception.status_code, 409)
+
+        count = db.execute(
+            select(func.count(CustomerOrder.id)).where(
+                CustomerOrder.participant_id == participant.id
+            )
+        ).scalar_one()
+        self.assertEqual(count, 1)
 
 
 if __name__ == "__main__":

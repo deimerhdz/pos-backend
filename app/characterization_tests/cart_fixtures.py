@@ -149,6 +149,11 @@ _PARTIAL_UNIQUE_INDEXES = {
     # `OrderPaymentAttempt` por orden (p.ej. uno rechazado + uno nuevo
     # pendiente, US5) — el índice se crearía como UNIQUE incondicional.
     "order_payment_attempts": "idx_pending_payment_attempt_per_order",
+    # spec 025: sin remover esto no se puede sembrar, a propósito, más de una
+    # orden no-terminal del mismo comensal en un test que necesite dos
+    # participantes/dos órdenes (T006) — el índice se crearía como UNIQUE
+    # incondicional sobre `participant_id`.
+    "customer_orders": "idx_active_order_per_participant",
 }
 
 

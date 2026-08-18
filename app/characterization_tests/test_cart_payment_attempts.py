@@ -6,17 +6,28 @@ No son characterization tests: el flujo de pago del comensal es comportamiento
 enteramente nuevo (research.md spec 024 — el `cart` de hoy no tiene ningún paso
 de pago). Se verifican contra `spec.md`/`contracts/diner-payment-flow.md`.
 
+Ampliado por spec 025-revision-pago-antes-envio (T008, T010, T018, T019): el
+pedido nace junto con su primer intento de pago, en `submit_cart` — dejan de
+existir dos llamadas HTTP separadas para lo mismo (crear la orden, y luego su
+primer intento). Se verifica contra
+`contracts/submit-cart-with-payment.md`/`contracts/payment-receipt-presign.md`.
+
 Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_cart_payment_attempts -v
 """
+from decimal import Decimal
 import unittest
+from unittest import mock
 
 from fastapi import HTTPException
+from sqlalchemy import func, select
 
 from app.characterization_tests import cart_fixtures as fx
 from app.characterization_tests import orders_fixtures as ofx
 from app.api.v1.cart import service
+from app.models.customer_order import CustomerOrder
+from app.models.order_payment_attempt import OrderPaymentAttempt
 
 
 class TestCartPaymentAttempts(unittest.TestCase):
@@ -29,6 +40,22 @@ class TestCartPaymentAttempts(unittest.TestCase):
         participant = fx.make_participant(db, table_session=ts)
         order = fx.make_customer_order(db, participant, status=order_status)
         return db, participant, order
+
+    def _seed_session_con_carrito(self):
+        """Comensal con sesión abierta y un carrito no vacío, sin ninguna
+        `CustomerOrder` todavía — el punto de partida de `submit_cart`
+        (spec 025)."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db)
+        ts = fx.make_table_session(db, table=table)
+        participant = fx.make_participant(db, table_session=ts)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=Decimal("8000"))
+        cart = fx.make_cart(db, participant=participant)
+        fx.make_cart_item(db, cart, variant)
+        db.commit()
+        return db, participant, variant
 
     # ------------------------------------------------- list_payment_methods (US2)
 
@@ -198,6 +225,148 @@ class TestCartPaymentAttempts(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             service.create_payment_attempt(db, participant.id, order.id, nequi.id)
         self.assertEqual(ctx.exception.status_code, 409)
+
+    # ------------------------------------------------- US1: revisión antes de enviar (T008)
+
+    def test_sin_completar_pago_no_existe_ninguna_orden_y_metodos_solo_activos(self):
+        """FR-001/FR-002/FR-003, Acceptance Scenarios 1-3 (US1): mientras el
+        comensal arma su carrito y revisa cómo pagar, no existe **ninguna**
+        `CustomerOrder` para él — ausencia de fila, no un estado nuevo
+        (research.md Decisión 3) — y `list_payment_methods` (spec 024, sin
+        cambios) solo devuelve métodos `active=True`."""
+        db, participant, variant = self._seed_session_con_carrito()
+        fx.make_payment_method(db, name="Efectivo", is_cash=True, active=True)
+        fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer", active=True)
+        fx.make_payment_method(db, name="Daviplata", is_cash=False, type="transfer", active=False)
+        db.commit()
+
+        count = db.execute(
+            select(func.count(CustomerOrder.id)).where(
+                CustomerOrder.participant_id == participant.id
+            )
+        ).scalar_one()
+        self.assertEqual(count, 0)
+
+        methods = service.list_payment_methods(db)
+        names = {m.name for m in methods}
+        self.assertEqual(names, {"Efectivo", "Nequi"})
+
+    # ------------------------------------------------- US2: efectivo (T010)
+
+    def test_submit_cart_efectivo_crea_orden_e_intento_pendiente(self):
+        """FR-004, Acceptance Scenario 1 (US2): elegir efectivo y confirmar
+        crea la orden junto con su primer intento, pendiente de que el
+        cajero registre el monto recibido."""
+        db, participant, variant = self._seed_session_con_carrito()
+        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
+        db.commit()
+
+        order = service.submit_cart(db, participant, efectivo.id)
+
+        self.assertEqual(order.status, "recibida")
+        attempt = order.current_payment_attempt
+        self.assertEqual(attempt.status, "pendiente")
+        self.assertTrue(attempt.is_cash)
+        self.assertIsNone(attempt.receipt_file_url)
+
+    def test_submit_cart_efectivo_con_receipt_file_url_falla_422(self):
+        """FR-004: un pago en efectivo no admite comprobante."""
+        db, participant, variant = self._seed_session_con_carrito()
+        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
+        db.commit()
+
+        with self.assertRaises(HTTPException) as ctx:
+            service.submit_cart(
+                db, participant, efectivo.id, receipt_file_url="https://example.invalid/a.jpg"
+            )
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    # ------------------------------------------------- US3: transferencia (T018)
+
+    def test_presign_payment_receipt_sin_attempt_id_no_crea_ninguna_orden(self):
+        """contracts/payment-receipt-presign.md: el presign genérico no
+        exige ningún `attempt_id` (no hay ningún recurso todavía al que
+        asociarlo) y, tras llamarlo, sigue sin existir ninguna
+        `CustomerOrder` — el archivo se sube a R2 antes de que el pedido
+        exista."""
+        db, participant, variant = self._seed_session_con_carrito()
+        db.commit()
+
+        presign = service.presign_payment_receipt(db, "tenant_test", participant.id, "image/jpeg")
+        self.assertTrue(presign.upload_url)
+        self.assertTrue(presign.public_url.endswith(".jpg"))
+
+        count = db.execute(
+            select(func.count(CustomerOrder.id)).where(
+                CustomerOrder.participant_id == participant.id
+            )
+        ).scalar_one()
+        self.assertEqual(count, 0)
+
+    def test_submit_cart_transferencia_con_receipt_file_url_crea_orden(self):
+        """FR-005/FR-006/FR-007, Acceptance Scenario 1 (US3): con el
+        comprobante ya subido, `submit_cart` crea la orden con
+        `current_payment_attempt.receipt_file_url` igual al `public_url` del
+        presign."""
+        db, participant, variant = self._seed_session_con_carrito()
+        nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
+        db.commit()
+        presign = service.presign_payment_receipt(db, "tenant_test", participant.id, "image/jpeg")
+
+        order = service.submit_cart(
+            db, participant, nequi.id, receipt_file_url=presign.public_url
+        )
+
+        self.assertEqual(order.current_payment_attempt.receipt_file_url, presign.public_url)
+
+    def test_submit_cart_transferencia_sin_receipt_file_url_falla_422(self):
+        """FR-006, Acceptance Scenario 3 (US3): no se crea el pedido de una
+        transferencia sin comprobante."""
+        db, participant, variant = self._seed_session_con_carrito()
+        nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
+        db.commit()
+
+        with self.assertRaises(HTTPException) as ctx:
+            service.submit_cart(db, participant, nequi.id)
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    # ------------------------------------------------- FR-012: reintento sin volver a subir (T019)
+
+    def test_reintento_tras_fallo_de_commit_no_deja_nada_y_reintento_crea_orden(self):
+        """FR-012, edge case "reintento tras fallo de creación": si
+        `submit_cart` falla después de que el comprobante ya se subió, no
+        queda ninguna `CustomerOrder` ni `OrderPaymentAttempt` a medias; un
+        reintento con el mismo `public_url` (sin volver a llamar al presign)
+        sí crea la orden."""
+        db, participant, variant = self._seed_session_con_carrito()
+        nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
+        db.commit()
+        presign = service.presign_payment_receipt(db, "tenant_test", participant.id, "image/jpeg")
+
+        with mock.patch.object(
+            db, "commit", side_effect=Exception("fallo forzado por test")
+        ):
+            with self.assertRaises(Exception):
+                service.submit_cart(
+                    db, participant, nequi.id, receipt_file_url=presign.public_url
+                )
+
+        self.assertEqual(
+            db.execute(
+                select(func.count(CustomerOrder.id)).where(
+                    CustomerOrder.participant_id == participant.id
+                )
+            ).scalar_one(),
+            0,
+        )
+        self.assertEqual(
+            db.execute(select(func.count(OrderPaymentAttempt.id))).scalar_one(), 0
+        )
+
+        order = service.submit_cart(
+            db, participant, nequi.id, receipt_file_url=presign.public_url
+        )
+        self.assertEqual(order.current_payment_attempt.receipt_file_url, presign.public_url)
 
 
 if __name__ == "__main__":

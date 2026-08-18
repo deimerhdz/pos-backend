@@ -244,6 +244,57 @@ class TestOrdersPaymentGate(unittest.TestCase):
         rechazado = next(a for a in attempts if a.status == "rechazado")
         self.assertEqual(rechazado.rejection_reason, "el monto no coincide")
 
+    # ---------------------------------- Orden creada por spec 025 (T020)
+
+    def test_approve_y_reintento_tras_rechazo_sobre_orden_de_submit_cart(self):
+        """spec 025-revision-pago-antes-envio, Acceptance Scenario 4 (US3):
+        una orden creada por `cart.service.submit_cart(..., receipt_file_url=...)`
+        (en vez de sembrada directamente con `fx.make_customer_order` +
+        `fx.make_payment_attempt`, como el resto de este módulo) sigue
+        pudiendo resolverse con `checkout.approve_payment_attempt`/
+        `reject_payment_attempt`, sin cambios — incluido el reintento tras
+        rechazo (`POST /cart/orders/{order_id}/payment-attempts`, spec 024
+        Historia 5, sin cambios en esta spec)."""
+        from app.api.v1.cart import service as cart_service
+
+        db = fx.new_session()
+        table = fx.make_dining_table(db)
+        ts = fx.make_table_session(db, table=table)
+        participant = fx.make_participant(db, table_session=ts)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
+        fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
+        cart = fx.make_cart(db, participant=participant)
+        fx.make_cart_item(db, cart, variant)
+        nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
+        db.commit()
+
+        order = cart_service.submit_cart(
+            db, participant, nequi.id, receipt_file_url="https://example.invalid/a.jpg"
+        )
+        first_attempt_id = order.current_payment_attempt.id
+
+        rejected = checkout.reject_payment_attempt(
+            db, first_attempt_id, "el monto no coincide", self._user()
+        )
+        self.assertEqual(rejected.status, "rechazado")
+
+        # Reintento tras rechazo: crea un intento nuevo sobre la misma orden
+        # (spec 024, Historia 5) — endpoint separado, sin tocar en esta spec.
+        second = cart_service.create_payment_attempt(db, participant.id, order.id, nequi.id)
+        presign = cart_service.presign_receipt(
+            db, "tenant_test", participant.id, second.id, "image/jpeg"
+        )
+        cart_service.attach_receipt(db, participant.id, second.id, presign.public_url)
+
+        approved = checkout.approve_payment_attempt(db, second.id, self._user())
+        self.assertEqual(approved.status, "confirmado")
+
+        result = checkout.confirm_order(db, order.id, self._user())
+        self.assertEqual(result.status, "abierta")
+
 
 if __name__ == "__main__":
     unittest.main()
