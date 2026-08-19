@@ -310,15 +310,15 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
 
 # --------------------------------------------------------------- Confirmación
 
-def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
-    """`recibida` → `abierta`: el staff acepta el pedido que envió el comensal y
-    **aquí es donde se compromete el inventario**.
-
-    Es el único punto de descuento de los pedidos por QR. La validación de stock es
-    la real (con lock por fila, en orden canónico de id para no deadlockear); el
-    chequeo del carrito era solo preventivo y pudo quedar obsoleto. Si falta stock
-    de un solo insumo, la transacción entera hace rollback y el pedido sigue
-    `recibida`, listo para reintentar o cancelar."""
+def _confirm_order_impl(db: Session, order_id: UUID, user: User) -> CustomerOrder:
+    """Lógica de `recibida` → `abierta` (descuento de inventario incluido), sin
+    `commit`/`rollback` propios — quien la invoque decide la frontera de la
+    transacción. Extraída de `confirm_order` (spec 026, FR-001/FR-002,
+    research.md Decisión 1) para que `confirm_cash_payment_attempt` y
+    `approve_payment_attempt` puedan ejecutarla dentro de su propia transacción
+    y así confirmar el pago y enviar el pedido a cocina de forma atómica: si
+    falta stock, el `rollback` del llamador revierte también la confirmación
+    del pago, sin dejar nada a medias."""
     order = db.execute(
         select(CustomerOrder)
         .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
@@ -348,19 +348,39 @@ def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
             status.HTTP_409_CONFLICT, "La orden no tiene un pago confirmado"
         )
 
+    entries = [
+        (it, _item_options(db, it))
+        for it in order.items
+        if it.estado_cocina != "anulado"
+    ]
+    if not entries:
+        raise HTTPException(status.HTTP_409_CONFLICT, "El pedido no tiene ítems")
+
+    deduct_order_items(db, entries, user.id, reference_id=order.id)
+
+    order.status = "abierta"
+    order.version += 1
+    return order
+
+
+def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
+    """`recibida` → `abierta`: el staff acepta el pedido que envió el comensal y
+    **aquí es donde se compromete el inventario**.
+
+    Es el único punto de descuento de los pedidos por QR (`_confirm_order_impl`).
+    La validación de stock es la real (con lock por fila, en orden canónico de id
+    para no deadlockear); el chequeo del carrito era solo preventivo y pudo quedar
+    obsoleto. Si falta stock de un solo insumo, la transacción entera hace
+    rollback y el pedido sigue `recibida`, listo para reintentar o cancelar.
+
+    Endpoint público (`POST /orders/{id}/confirm`) sin cambios de contrato. Desde
+    spec 026, el flujo normal de la Terminal de Mesas ya no lo invoca
+    manualmente — confirmar el pago (`confirm_cash_payment_attempt`/
+    `approve_payment_attempt`) dispara esta misma lógica automáticamente. Se
+    mantiene expuesto como vía de recuperación (spec 026, research.md
+    Decisión 2)."""
     try:
-        entries = [
-            (it, _item_options(db, it))
-            for it in order.items
-            if it.estado_cocina != "anulado"
-        ]
-        if not entries:
-            raise HTTPException(status.HTTP_409_CONFLICT, "El pedido no tiene ítems")
-
-        deduct_order_items(db, entries, user.id, reference_id=order.id)
-
-        order.status = "abierta"
-        order.version += 1
+        _confirm_order_impl(db, order_id, user)
         db.commit()
     except HTTPException:
         db.rollback()
@@ -638,7 +658,12 @@ def list_payment_attempts(db: Session, order_id: UUID) -> list[OrderPaymentAttem
 
 
 def approve_payment_attempt(db: Session, attempt_id: UUID, user: User) -> OrderPaymentAttempt:
-    """Aprueba un comprobante de transferencia (US2, Acceptance Scenario 4)."""
+    """Aprueba un comprobante de transferencia (US2, Acceptance Scenario 4).
+
+    Spec 026, FR-001: aprobar el comprobante confirma el intento de pago y, en
+    la misma transacción, envía el pedido a cocina (`_confirm_order_impl`) — si
+    falta stock, ninguna de las dos cosas queda registrada (FR-002,
+    research.md Decisión 1)."""
     try:
         attempt = _load_pending_attempt_for_update(db, attempt_id)
         method = get_or_404(db, PaymentMethod, attempt.payment_method_id, "Payment method not found")
@@ -653,6 +678,7 @@ def approve_payment_attempt(db: Session, attempt_id: UUID, user: User) -> OrderP
         attempt.status = "confirmado"
         attempt.resolved_by_user_id = user.id
         attempt.resolved_at = datetime.now(timezone.utc)
+        _confirm_order_impl(db, attempt.order_id, user)
         db.commit()
     except HTTPException:
         db.rollback()
@@ -702,7 +728,12 @@ def confirm_cash_payment_attempt(
     db: Session, attempt_id: UUID, amount_received: Decimal, user: User
 ) -> OrderPaymentAttempt:
     """Confirma un pago en efectivo y calcula el cambio (FR-009/FR-010,
-    US3). FR-010a: impide confirmar si `amount_received < total_orden`."""
+    US3). FR-010a: impide confirmar si `amount_received < total_orden`.
+
+    Spec 026, FR-001: confirmar el efectivo confirma el intento de pago y, en
+    la misma transacción, envía el pedido a cocina (`_confirm_order_impl`) — si
+    falta stock, ninguna de las dos cosas queda registrada (FR-002,
+    research.md Decisión 1)."""
     try:
         attempt = _load_pending_attempt_for_update(db, attempt_id)
         method = get_or_404(db, PaymentMethod, attempt.payment_method_id, "Payment method not found")
@@ -724,6 +755,7 @@ def confirm_cash_payment_attempt(
         attempt.status = "confirmado"
         attempt.resolved_by_user_id = user.id
         attempt.resolved_at = datetime.now(timezone.utc)
+        _confirm_order_impl(db, attempt.order_id, user)
         db.commit()
     except HTTPException:
         db.rollback()
