@@ -48,6 +48,7 @@ class ProductService:
                 preparation_type=data.preparation_type.value,
                 image_url=data.image_url,
                 available=data.available,
+                tracks_inventory=data.tracks_inventory,
             )
             db.add(product)
             db.flush()
@@ -85,6 +86,8 @@ class ProductService:
             product.active = data.active
         if data.available is not None:
             product.available = data.available
+        if data.tracks_inventory is not None:
+            product.tracks_inventory = data.tracks_inventory
         db.commit()
         db.refresh(product)
         if old_key:

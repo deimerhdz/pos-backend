@@ -38,6 +38,15 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Boolean, nullable=False, default=True, server_default="true"
     )
 
+    # Si el producto exige/aplica la validación y el descuento de inventario de sus
+    # presentaciones (spec 003). Default True a nivel de ORM a propósito: protege
+    # cualquier construcción de Product(...) que no mencione este campo (tests,
+    # scripts) preservando el comportamiento anterior a esta spec. El default False
+    # que pide el formulario nuevo vive solo en ProductCreate (spec 027).
+    tracks_inventory: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+
     # Los grupos de opciones cuelgan de la VARIANTE (`variant_option_groups`), no de
     # aquí: cuántos sabores se eligen y cuánto descuenta cada uno cambian con el tamaño.
     variants: Mapped[List["ProductVariant"]] = relationship(

@@ -97,6 +97,13 @@ def plan_line_consumption(
     separados son auditables ("2 de fresa, 1 de fresa premium"), uno fusionado no.
     `record_movement` los aplica en secuencia sobre la fila ya bloqueada.
     """
+    if not _tracks_inventory(db, variant_id):
+        # Producto sin inventario (spec 027): esta es la única función que consumen
+        # directamente deduct_order_item/reverse_order_item/deduct_sale para el
+        # descuento real — sin este corte, insumos "abandonados" de una
+        # configuración anterior seguirían generando movimientos de inventario
+        # aunque el switch ya esté apagado.
+        return []
     qty = Decimal(quantity)
 
     lines: list[ConsumptionLine] = [
@@ -153,6 +160,17 @@ def variant_label(db: Session, variant_id: UUID) -> str:
     return f"{row[0]} · {row[1]}" if row else str(variant_id)
 
 
+def _tracks_inventory(db: Session, variant_id: UUID) -> bool:
+    """Si el producto de esta variante maneja inventario (spec 027). `True` si la
+    variante no se encuentra — nunca exime en silencio una variante inexistente."""
+    value = db.execute(
+        select(Product.tracks_inventory)
+        .join(ProductVariant, ProductVariant.product_id == Product.id)
+        .where(ProductVariant.id == variant_id)
+    ).scalar_one_or_none()
+    return True if value is None else value
+
+
 def ensure_lines_consume_inventory(
     db: Session, entries: Sequence[tuple[UUID, int, Sequence[Option]]]
 ) -> None:
@@ -177,6 +195,10 @@ def ensure_lines_consume_inventory(
     sin_eleccion: list[str] = []
 
     for variant_id, quantity, options in entries:
+        if not _tracks_inventory(db, variant_id):
+            # Producto sin inventario (spec 027): exento de esta validación, sin
+            # importar si la presentación tiene o no receta/grupos configurados.
+            continue
         if required_consumption(db, variant_id, quantity, options):
             continue
         etiqueta = variant_label(db, variant_id)

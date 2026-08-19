@@ -233,6 +233,50 @@ class EnsureLinesConsumeInventoryTests(unittest.TestCase):
             ensure_lines_consume_inventory(self.db, [(variant.id, 1, [])])
         self.assertIn("variantes_sin_opcion", ctx.exception.detail)
 
+    def test_spec_027_fr005_producto_sin_inventario_sin_receta_no_bloquea(self):
+        """FR-005 (spec 027): un producto con `tracks_inventory=False` queda exento
+        de RN-CAT-34 aunque no tenga ninguna receta ni grupo configurado — al
+        contrario que `test_rn_cat_34_variante_sin_receta_ni_grupo_bloquea_con_409_sin_receta`,
+        que cubre el mismo caso con `tracks_inventory=True` (default)."""
+        product = f.make_product(self.db, tracks_inventory=False)
+        variant = f.make_variant(self.db, product=product)
+        ensure_lines_consume_inventory(self.db, [(variant.id, 1, [])])  # no lanza
+        self.assertEqual(plan_line_consumption(self.db, variant.id, 1, []), [])
+
+    def test_spec_027_fr006_producto_con_inventario_explicito_sigue_bloqueando_sin_receta(self):
+        """FR-006 (spec 027): guarda de regresión de que `tracks_inventory=True`
+        (explícito, o heredado del default de la Fase Foundational) no relaja
+        RN-CAT-34 para nadie — mismo comportamiento que
+        `test_rn_cat_34_variante_sin_receta_ni_grupo_bloquea_con_409_sin_receta`,
+        reafirmado aquí con el producto marcado explícitamente."""
+        product = f.make_product(self.db, tracks_inventory=True)
+        variant = f.make_variant(self.db, product=product)
+        with self.assertRaises(HTTPException) as ctx:
+            ensure_lines_consume_inventory(self.db, [(variant.id, 1, [])])
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("no tiene receta configurada", ctx.exception.detail["error"])
+
+    def test_spec_027_fr005_fr008_producto_sin_inventario_con_insumos_abandonados_no_descuenta(self):
+        """El caso más importante de spec 027 (research.md Decisión 1/2): un
+        producto con `tracks_inventory=False` que TODAVÍA tiene receta guardada
+        (insumos "abandonados" de cuando el switch estaba activado, FR-008) no debe
+        ni bloquear la venta NI generar ningún movimiento de inventario. Un arreglo
+        que solo tocara `ensure_lines_consume_inventory` pasaría este caso pero
+        `plan_line_consumption` seguiría devolviendo la línea de receta — que es
+        exactamente lo que `deduct_order_item`/`deduct_sale` aplicarían como
+        movimiento real."""
+        product = f.make_product(self.db, tracks_inventory=False)
+        variant = f.make_variant(self.db, product=product)
+        insumo = f.make_inventory_item(self.db)
+        f.make_recipe_item(self.db, variant, insumo, quantity=Decimal("1"))
+
+        ensure_lines_consume_inventory(self.db, [(variant.id, 3, [])])  # no lanza
+        self.assertEqual(
+            plan_line_consumption(self.db, variant.id, 3, []), [],
+            "la receta guardada NO debe traducirse en ninguna línea de consumo "
+            "mientras el producto no maneje inventario",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
