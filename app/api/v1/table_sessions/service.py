@@ -29,7 +29,7 @@ from app.api.v1.sales.builder import build_sale, ensure_open_shift
 from app.api.v1.promotions import service as promotions
 from app.api.v1.table_sessions.schemas import (
     BillingMode, CloseSessionIn, CloseSessionResponse,
-    SessionBillLine, SessionBillResponse, TableSessionResponse,
+    SessionBillItem, SessionBillLine, SessionBillResponse, TableSessionResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -170,6 +170,18 @@ def compute_bill(db: Session, table_session_id: UUID) -> SessionBillResponse:
             participant_id=pid,
             display_label=labels.get(pid) if pid else None,
             subtotal=subtotal,
+            # spec 026, FR-006: expone lo que este cálculo ya tenía en memoria
+            # (líneas y descuento) — no cambia ningún valor, solo lo serializa.
+            items=[
+                SessionBillItem(
+                    description=line.description,
+                    quantity=line.quantity,
+                    unit_price=line.unit_price,
+                    line_total=line.line_total,
+                )
+                for line in lines
+            ],
+            discount=promo_discount + combo_discount,
         ))
 
     return SessionBillResponse(

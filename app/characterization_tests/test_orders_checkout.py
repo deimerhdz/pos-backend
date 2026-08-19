@@ -285,18 +285,30 @@ class TestCheckout(unittest.TestCase):
     # -------------------------------------------------------- confirm_order (T028)
 
     def test_confirm_order_descuenta_una_vez_y_stock_insuficiente_revierte(self):
-        """CONGELA comportamiento actual (`checkout.confirm_order:307-355`,
-        spec.md Historia 2, escenario 4): pedido 'recibida' con ítems
-        válidos → pasa a 'abierta' y descuenta inventario exactamente una
-        vez; con stock insuficiente de un insumo, la transacción entera
-        revierte y el pedido sigue 'recibida'.
+        """CONGELA comportamiento actual (`checkout.confirm_order:366-390` +
+        `checkout._confirm_order_impl:313-363`, spec.md Historia 2, escenario
+        4): pedido 'recibida' con ítems válidos → pasa a 'abierta' y descuenta
+        inventario exactamente una vez; con stock insuficiente de un insumo,
+        la transacción entera revierte y el pedido sigue 'recibida'.
 
         Actualizado por spec 024-pagos-ordenes-mesa (FR-017, Principio III):
         `confirm_order` ahora exige un intento de pago `confirmado` antes de
         evaluar stock — cada orden de este test siembra uno (efectivo,
         confirmado) para poder seguir ejercitando exactamente el mismo
-        camino de inventario que este test venía verificando. El resto de la
-        suite (231 tests) sigue en verde."""
+        camino de inventario que este test venía verificando.
+
+        Actualizado de nuevo por spec 026-mejoras-ux-comanda (FR-001,
+        Principio III): la lógica de `confirm_order` se extrajo a
+        `_confirm_order_impl` (sin `commit`/`rollback` propios) para que
+        `confirm_cash_payment_attempt`/`approve_payment_attempt` puedan
+        invocarla dentro de su propia transacción y fusionar la confirmación
+        del pago con el envío a cocina (spec 026, research.md Decisión 1).
+        El comportamiento observable del endpoint público `confirm_order` que
+        este test ejercita —llamado aquí directamente, no a través de un
+        intento de pago— **no cambia**: mismas aserciones, sin ninguna
+        modificación, siguen pasando sin tocar (evidencia de que el resto de
+        la suite de characterization tests, 240 tests, sigue en verde tras el
+        refactor)."""
         db = fx.new_session()
         ts = fx.make_table_session(db)
         category = fx.make_category(db)

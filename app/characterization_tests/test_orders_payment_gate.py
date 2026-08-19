@@ -8,6 +8,14 @@ efectivo por intento y el gate de `confirm_order` son comportamiento nuevo
 `spec.md`/`contracts/cashier-payment-review.md`/`contracts/order-confirm-gate.md`,
 no contra un comportamiento heredado.
 
+Extendido por spec 026-mejoras-ux-comanda (FR-001/FR-002, research.md
+Decisión 1): `confirm_cash_payment_attempt`/`approve_payment_attempt` ahora
+disparan `_confirm_order_impl` (antes `confirm_order`, llamado manualmente
+aparte) dentro de su propia transacción — confirmar el pago y enviar el
+pedido a cocina ocurren en una sola llamada. Por eso `_seed_order_recibida`
+siembra receta+inventario por defecto: cualquier confirmación exitosa ahora
+también descuenta inventario, no solo cambia el estado del intento de pago.
+
 Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_orders_payment_gate -v
@@ -16,9 +24,11 @@ from decimal import Decimal
 import unittest
 
 from fastapi import HTTPException
+from sqlalchemy import select
 
 from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import checkout
+from app.models.inventory_movement import InventoryMovement
 
 PRECIO = Decimal("18000")
 
@@ -26,7 +36,11 @@ PRECIO = Decimal("18000")
 class TestOrdersPaymentGate(unittest.TestCase):
     # ------------------------------------------------------------- Helpers
 
-    def _seed_order_recibida(self, *, precio=PRECIO):
+    def _seed_order_recibida(self, *, precio=PRECIO, stock=Decimal("1000")):
+        """spec 026: siempre siembra receta+inventario con stock amplio, para
+        que confirmar el pago (que ahora también descuenta inventario) no
+        falle por falta de receta en los tests que no están probando
+        justamente eso (ver `_seed_order_recibida_sin_receta` más abajo)."""
         db = fx.new_session()
         table = fx.make_dining_table(db)
         ts = fx.make_table_session(db, table=table)
@@ -34,6 +48,8 @@ class TestOrdersPaymentGate(unittest.TestCase):
         category = fx.make_category(db)
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=precio)
+        insumo = fx.make_inventory_item(db, current_stock=stock)
+        fx.make_recipe_item(db, variant, insumo, quantity=Decimal("1"))
         order = fx.make_customer_order(db, ts, participant=participant, status="recibida")
         fx.make_order_item(db, order, variant, estado_cocina="pendiente")
         db.commit()
@@ -150,7 +166,9 @@ class TestOrdersPaymentGate(unittest.TestCase):
 
     def test_segunda_resolucion_del_mismo_intento_falla_409(self):
         """FR-018/SC-007: ante dos resoluciones casi simultáneas del mismo
-        intento, solo la primera surte efecto."""
+        intento, solo la primera surte efecto. Reforzado por spec 026,
+        FR-001: tampoco duplica el envío a cocina (un solo movimiento de
+        inventario)."""
         db, order = self._seed_order_recibida()
         efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
         attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
@@ -160,6 +178,11 @@ class TestOrdersPaymentGate(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("20000"), self._user())
         self.assertEqual(ctx.exception.status_code, 409)
+
+        movimientos = db.execute(
+            select(InventoryMovement).where(InventoryMovement.reference_id == order.id)
+        ).scalars().all()
+        self.assertEqual(len(movimientos), 1)
 
     # ------------------------------------------------- confirm_order gate (US4)
 
@@ -190,41 +213,110 @@ class TestOrdersPaymentGate(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
 
     def test_confirm_order_ok_con_intento_confirmado(self):
-        """Acceptance Scenario 3 (US4): con un intento confirmado, el flujo
-        normal de `confirm_order` sigue igual (descuenta inventario, pasa a
-        'abierta')."""
+        """Acceptance Scenario 3 (US4), actualizado por spec 026 FR-001: con
+        un intento de pago recién confirmado en efectivo, la orden queda
+        'abierta' (inventario descontado) en la MISMA llamada a
+        `confirm_cash_payment_attempt` — ya no hace falta una segunda llamada
+        manual a `confirm_order` (research.md spec 026, Decisión 1).
+        `confirm_order` sigue expuesto como vía de recuperación (Decisión 2),
+        pero sobre una orden que ya está 'abierta' no tiene nada que hacer."""
         db, order = self._seed_order_recibida()
-        insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
-        variant_id = order.items[0].product_variant_id
-        from app.models.product_variant import ProductVariant
-        variant = db.get(ProductVariant, variant_id)
-        fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
         efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
         attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
         db.commit()
-        checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("20000"), self._user())
+
+        result = checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("20000"), self._user()
+        )
+        self.assertEqual(result.status, "confirmado")
+        db.refresh(order)
+        self.assertEqual(order.status, "abierta")
+
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.confirm_order(db, order.id, self._user())
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    def test_confirm_order_dos_veces_seguidas_la_segunda_no_tiene_efecto(self):
+        """Acceptance Scenario 4 (US4): `confirm_order`, llamado directamente
+        (vía de recuperación, spec 026 research.md Decisión 2) sobre una
+        orden con un intento ya confirmado, sigue siendo idempotente — solo
+        la primera llamada tiene efecto."""
+        db, order = self._seed_order_recibida()
+        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
+        fx.make_payment_attempt(db, order, efectivo, status="confirmado")
+        db.commit()
 
         result = checkout.confirm_order(db, order.id, self._user())
         self.assertEqual(result.status, "abierta")
 
-    def test_confirm_order_dos_veces_seguidas_la_segunda_no_tiene_efecto(self):
-        """Acceptance Scenario 4 (US4): doble clic / dos cajeros casi
-        simultáneos — solo la primera confirmación es válida."""
-        db, order = self._seed_order_recibida()
-        insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
-        variant_id = order.items[0].product_variant_id
-        from app.models.product_variant import ProductVariant
-        variant = db.get(ProductVariant, variant_id)
-        fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
-        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
-        attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
-        db.commit()
-        checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("20000"), self._user())
-
-        checkout.confirm_order(db, order.id, self._user())
         with self.assertRaises(HTTPException) as ctx:
             checkout.confirm_order(db, order.id, self._user())
         self.assertEqual(ctx.exception.status_code, 409)
+
+    # ------------------------------------------------- Fusión pago→cocina (spec 026, FR-001/FR-002)
+
+    def test_confirm_cash_envia_a_cocina_en_la_misma_llamada(self):
+        """spec 026, FR-001 (US1, escenario 1): confirmar el efectivo
+        descuenta inventario y deja la orden 'abierta' en la misma llamada,
+        sin ninguna acción manual adicional."""
+        db, order = self._seed_order_recibida()
+        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
+        attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
+        db.commit()
+
+        checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("20000"), self._user())
+
+        db.refresh(order)
+        self.assertEqual(order.status, "abierta")
+        movimientos = db.execute(
+            select(InventoryMovement).where(InventoryMovement.reference_id == order.id)
+        ).scalars().all()
+        self.assertEqual(len(movimientos), 1)
+
+    def test_approve_envia_a_cocina_en_la_misma_llamada(self):
+        """spec 026, FR-001 (US1, escenario 2): aprobar un comprobante de
+        transferencia descuenta inventario y deja la orden 'abierta' en la
+        misma llamada."""
+        db, order = self._seed_order_recibida()
+        nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
+        attempt = fx.make_payment_attempt(
+            db, order, nequi, status="pendiente", receipt_file_url="https://example.invalid/a.jpg"
+        )
+        db.commit()
+
+        checkout.approve_payment_attempt(db, attempt.id, self._user())
+
+        db.refresh(order)
+        self.assertEqual(order.status, "abierta")
+        movimientos = db.execute(
+            select(InventoryMovement).where(InventoryMovement.reference_id == order.id)
+        ).scalars().all()
+        self.assertEqual(len(movimientos), 1)
+
+    def test_confirm_cash_stock_insuficiente_no_confirma_el_pago(self):
+        """spec 026, FR-002 (US1, escenario 3): si el descuento automático de
+        inventario falla por falta de stock, el intento de pago NO queda
+        confirmado y la orden NO avanza — ninguna de las dos cosas ocurre a
+        medias (research.md Decisión 1: un solo `commit`/`rollback` cubre
+        ambos cambios)."""
+        db, order = self._seed_order_recibida(stock=Decimal("0"))
+        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
+        attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
+        db.commit()
+
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("20000"), self._user())
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        db.refresh(attempt)
+        db.refresh(order)
+        self.assertEqual(attempt.status, "pendiente")
+        self.assertIsNone(attempt.change_amount)
+        self.assertEqual(order.status, "recibida")
+        movimientos = db.execute(
+            select(InventoryMovement).where(InventoryMovement.reference_id == order.id)
+        ).scalars().all()
+        self.assertEqual(len(movimientos), 0)
 
     # ------------------------------------------------- Historial (FR-016)
 
@@ -292,8 +384,10 @@ class TestOrdersPaymentGate(unittest.TestCase):
         approved = checkout.approve_payment_attempt(db, second.id, self._user())
         self.assertEqual(approved.status, "confirmado")
 
-        result = checkout.confirm_order(db, order.id, self._user())
-        self.assertEqual(result.status, "abierta")
+        # spec 026, FR-001: aprobar ya deja la orden 'abierta' en la misma
+        # llamada — no hace falta una segunda llamada manual a confirm_order.
+        db.refresh(order)
+        self.assertEqual(order.status, "abierta")
 
 
 if __name__ == "__main__":

@@ -75,12 +75,27 @@ class AssignmentsIn(BaseModel):
     assignments: list[ItemAssignmentIn] = Field(..., min_length=1)
 
 
+class SessionBillItem(BaseModel):
+    """Ítem consumido por un comensal, para el detalle de la cuenta (spec 026,
+    FR-006) — mismos datos que ya calcula `checkout.order_sale_lines`, solo
+    expuestos; no cambia cómo se valoran."""
+    description: str
+    quantity: Decimal
+    unit_price: Decimal
+    line_total: Decimal
+
+
 class SessionBillLine(BaseModel):
     """Lo que debe un comensal. `participant_id` nulo agrupa lo que añadió el
     staff sin asignar a nadie."""
     participant_id: UUID | None = None
     display_label: str | None = None
     subtotal: Decimal
+    #: Detalle de ítems y descuento ya aplicado (spec 026, FR-006) — mismos
+    #: valores que `compute_bill` ya calculaba internamente para llegar a
+    #: `subtotal`, ahora expuestos en vez de descartarse.
+    items: list[SessionBillItem] = Field(default_factory=list)
+    discount: Decimal = Decimal("0")
 
 
 class SessionBillResponse(BaseModel):

@@ -228,6 +228,33 @@ class TestTableSessionsService(unittest.TestCase):
         # Solo el pedido 'abierta' entra en la cuenta; cancelada/pagada, no.
         self.assertEqual(resp.order_ids, [order_abierta.id])
 
+    def test_compute_bill_expone_items_y_descuento_por_comensal(self):
+        """spec 026, FR-006: no es CONGELA — comportamiento nuevo. `compute_bill`
+        ya calculaba las líneas y el descuento de cada comensal para llegar al
+        `subtotal`; ahora esos mismos valores también se serializan en
+        `SessionBillLine.items`/`discount`, sin cambiar ningún cálculo."""
+        db, table, ts = self._seed_bare_session()
+        ana = fx.make_participant(db, table_session=ts, display_name="Ana", display_label="Ana")
+
+        cat = fx.make_category(db)
+        prod = fx.make_product(db, category=cat)
+        variant = fx.make_variant(db, product=prod, price=Decimal("10000"))
+        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
+        fx.make_promotion_target(db, promo, category_id=cat.id)
+
+        order = fx.make_customer_order(db, ts, status="abierta")
+        fx.make_order_item(db, order, variant, participant_id=ana.id, estado_cocina="listo", quantity=2)
+        db.commit()
+
+        resp = service.compute_bill(db, ts.id)
+
+        line = next(l for l in resp.split if l.participant_id == ana.id)
+        self.assertEqual(line.discount, Decimal("2000.00"))  # 10% de 20.000
+        self.assertEqual(len(line.items), 1)
+        self.assertEqual(line.items[0].quantity, Decimal("2"))
+        self.assertEqual(line.items[0].unit_price, Decimal("10000.00"))
+        self.assertEqual(line.items[0].line_total, Decimal("20000.00"))
+
     # -------------------------------------------------- close_session unified (T022)
 
     def test_close_session_unified_camino_feliz(self):
