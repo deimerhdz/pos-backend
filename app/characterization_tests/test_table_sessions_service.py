@@ -486,6 +486,130 @@ class TestTableSessionsService(unittest.TestCase):
         self.assertEqual(nuevo.status, "open")
         self.assertEqual(nuevo.table_session_id, ts.id)
 
+    # ------------------------------------------- release_paid_session (T030)
+
+    def test_release_paid_session_409_si_queda_algo_por_cobrar(self):
+        """Comportamiento nuevo (spec 028, T027): `release_paid_session` es la
+        inversa de `close_session` — rechaza con 409 si todavía queda algo
+        billable (un pedido ni pagado ni cancelado) en la sesión, y no toca
+        nada."""
+        s = self._seed_billable_session()
+        db, ts = s["db"], s["ts"]
+
+        with self.assertRaises(HTTPException) as ctx:
+            service.release_paid_session(db, ts.id, s["cashier"])
+        self.assertEqual(ctx.exception.status_code, 409)
+        db.refresh(ts)
+        self.assertEqual(ts.status, "active")
+
+    def test_release_paid_session_409_con_cocina_en_curso_sobre_pedido_pagado(self):
+        """Aun sin nada billable, la comida puede seguir en curso en cocina
+        sobre un pedido ya 'pagada' (se cobró antes de que terminara de
+        prepararse, p.ej. vía `checkout.checkout_and_send`):
+        `release_paid_session` sigue rechazando, porque reusa
+        `_assert_closable` sobre **todos** los pedidos de la sesión —no solo
+        los billables, que ya no incluirían este— para que el chequeo de
+        cocina en curso siga aplicando."""
+        db, table, ts = self._seed_bare_session()
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="pagada")
+        fx.make_order_item(db, order, variant, estado_cocina="en_preparacion")
+        cashier = fx.make_user_double()
+        db.commit()
+
+        with self.assertRaises(HTTPException) as ctx:
+            service.release_paid_session(db, ts.id, cashier)
+        self.assertEqual(ctx.exception.status_code, 409)
+        db.refresh(ts)
+        self.assertEqual(ts.status, "active")
+
+    def test_release_paid_session_libera_la_mesa_cuando_todo_esta_pagado_y_listo(self):
+        """Camino feliz: nada billable y la comida del único pedido 'pagada'
+        ya está 'listo' → cierra la sesión en cascada y libera la mesa, igual
+        que `close_session` pero sin ninguna venta que emitir."""
+        db, table, ts = self._seed_bare_session()
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="pagada")
+        fx.make_order_item(db, order, variant, estado_cocina="listo")
+        cashier = fx.make_user_double()
+        db.commit()
+
+        resp = service.release_paid_session(db, ts.id, cashier)
+
+        self.assertEqual(resp.status, "libre")
+        self.assertEqual(resp.dining_table_id, table.id)
+        db.refresh(ts)
+        db.refresh(table)
+        self.assertEqual(ts.status, "closed")
+        self.assertEqual(table.status, "libre")
+
+    def test_release_paid_session_libera_una_mesa_pagada_por_qr_aunque_la_orden_siga_abierta(self):
+        """Regresión (spec 028): `approve_payment_attempt`/
+        `confirm_cash_payment_attempt` (`orders/checkout.py`) ya generan la
+        `Sale`/`Invoice` al confirmar un pago QR, pero DEJAN la orden en
+        `status="abierta"` a propósito —no `"pagada"`— para que siga siendo
+        consumo activo visible mientras cocina la termina (`activeOrders`/
+        `tableOrders` del frontend excluyen `"pagada"`; marcarla así de
+        inmediato haría ver la mesa como libre con el pedido aún en
+        preparación). Antes de este fix, `has_billable_orders`/
+        `_billable_orders` solo miraban `status`, así que ese pedido nunca
+        dejaba de contar como "por cobrar" y la mesa jamás se liberaba —ni
+        por el barrido ni por "Liberar Mesa"— aunque ya estuviera pagada y
+        facturada: el bug reportado en producción. Se reproduce sembrando una
+        `Sale` real asociada al pedido, sin pasar por `status="pagada"`."""
+        db, table, ts = self._seed_bare_session()
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="abierta")
+        fx.make_order_item(db, order, variant, estado_cocina="listo")
+        cashier = fx.make_user_double()
+        shift = fx.make_cash_shift(db)
+        db.add(Sale(
+            cash_shift_id=shift.id,
+            customer_order_id=order.id,
+            table_session_id=ts.id,
+            dining_table_id=table.id,
+            user_id=cashier.id,
+            status="paid",
+        ))
+        db.commit()
+
+        resp = service.release_paid_session(db, ts.id, cashier)
+
+        self.assertEqual(resp.status, "libre")
+        db.refresh(ts)
+        db.refresh(table)
+        self.assertEqual(ts.status, "closed")
+        self.assertEqual(table.status, "libre")
+
+    def test_release_paid_session_doble_intento_409_en_el_segundo(self):
+        """Mismo mecanismo de lock por fila que `close_session` — reproducido
+        sin concurrencia real (mismo patrón que el resto de este módulo, que
+        no ejercita hilos): tras el primer `release_paid_session` la sesión ya
+        no está 'active', así que un segundo intento sobre la misma sesión es
+        409 y no repite el cierre ni vuelve a tocar la mesa."""
+        db, table, ts = self._seed_bare_session()
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="pagada")
+        fx.make_order_item(db, order, variant, estado_cocina="listo")
+        cashier = fx.make_user_double()
+        db.commit()
+
+        service.release_paid_session(db, ts.id, cashier)
+
+        with self.assertRaises(HTTPException) as ctx:
+            service.release_paid_session(db, ts.id, cashier)
+        self.assertEqual(ctx.exception.status_code, 409)
+        db.refresh(table)
+        self.assertEqual(table.status, "libre")
+
 
 if __name__ == "__main__":
     unittest.main()

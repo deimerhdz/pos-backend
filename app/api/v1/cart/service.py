@@ -531,6 +531,25 @@ def submit_cart(
             "Ya tienes una orden activa; espera a que finalice antes de enviar otra.",
         )
 
+    # spec 028, FR-013 (T015): simetría inversa de la comanda de
+    # mostrador/mesero (`orders.service.create_order`, T014) — una mesa no
+    # mezcla orígenes de pedido a la vez. Si el staff ya abrió una comanda
+    # manual activa en esta sesión, el pedido por QR no puede coexistir con
+    # ella.
+    active_manual_order = db.execute(
+        select(CustomerOrder.id).where(
+            CustomerOrder.table_session_id == participant.table_session_id,
+            CustomerOrder.channel.in_(("counter", "waiter")),
+            CustomerOrder.status.in_(_NON_TERMINAL_ORDER_STATUSES),
+        )
+    ).scalar_one_or_none()
+    if active_manual_order is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Esta mesa ya tiene una comanda de mostrador/mesero activa; "
+            "ciérrala antes de enviar un pedido por QR.",
+        )
+
     method = get_or_404(db, PaymentMethod, payment_method_id, "Método de pago no encontrado")
     if not method.active:
         raise HTTPException(status.HTTP_409_CONFLICT, "El método de pago ya no está disponible")
