@@ -102,6 +102,12 @@ _CART_TABLE_NAMES = [
     "audit_logs",
     "payment_methods",
     "order_payment_attempts",
+    # spec 028: `has_billable_orders` (vía `try_release_if_empty`, que este
+    # módulo ejercita a través de `leave_session`) ahora también consulta
+    # `sales.customer_order_id` — sin esta tabla, esa consulta revienta con
+    # "no such table: sales" aunque el escenario probado no cree ninguna
+    # venta.
+    "sales",
 ]
 
 _TABLE_NAMES = _CATALOG_TABLE_NAMES + _CART_TABLE_NAMES

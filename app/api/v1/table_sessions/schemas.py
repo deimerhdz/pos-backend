@@ -150,3 +150,12 @@ class CloseSessionIn(BaseModel):
 class CloseSessionResponse(BaseModel):
     table_session: TableSessionResponse
     sale_ids: list[UUID] = Field(default_factory=list)
+
+
+class ReleaseSessionResponse(BaseModel):
+    """Respuesta de `POST /table-sessions/{id}/release` (spec 028, T027/T028):
+    la sesión ya estaba completamente pagada (nada billable pendiente), así
+    que aquí solo se confirma que la mesa quedó libre — no hay venta que
+    reportar, a diferencia de `CloseSessionResponse`."""
+    dining_table_id: UUID
+    status: str

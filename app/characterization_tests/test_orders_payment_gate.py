@@ -29,6 +29,7 @@ from sqlalchemy import select
 from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import checkout
 from app.models.inventory_movement import InventoryMovement
+from app.models.sale import Sale
 
 PRECIO = Decimal("18000")
 
@@ -36,12 +37,15 @@ PRECIO = Decimal("18000")
 class TestOrdersPaymentGate(unittest.TestCase):
     # ------------------------------------------------------------- Helpers
 
-    def _seed_order_recibida(self, *, precio=PRECIO, stock=Decimal("1000")):
+    def _seed_order_recibida(self, *, precio=PRECIO, stock=Decimal("1000"), autoflush=True):
         """spec 026: siempre siembra receta+inventario con stock amplio, para
         que confirmar el pago (que ahora también descuenta inventario) no
         falle por falta de receta en los tests que no están probando
-        justamente eso (ver `_seed_order_recibida_sin_receta` más abajo)."""
-        db = fx.new_session()
+        justamente eso (ver `_seed_order_recibida_sin_receta` más abajo).
+
+        `autoflush=False` reproduce la sesión real de producción (spec 028):
+        ver `test_confirm_cash_y_approve_funcionan_con_autoflush_false`."""
+        db = fx.new_session(autoflush=autoflush)
         table = fx.make_dining_table(db)
         ts = fx.make_table_session(db, table=table)
         participant = fx.make_participant(db, table_session=ts)
@@ -58,6 +62,12 @@ class TestOrdersPaymentGate(unittest.TestCase):
     def _user(self):
         return fx.make_user_double()
 
+    def _shift(self, db):
+        """Spec 028: aprobar/confirmar ya factura en la misma llamada, así
+        que necesita un turno de caja abierto (mismo requisito que
+        `pay_order`/`checkout_and_send`)."""
+        return fx.make_cash_shift(db)
+
     # ------------------------------------------------- approve/reject (US2)
 
     def test_approve_confirma_intento_de_transferencia(self):
@@ -69,9 +79,14 @@ class TestOrdersPaymentGate(unittest.TestCase):
         )
         db.commit()
 
-        result = checkout.approve_payment_attempt(db, attempt.id, self._user())
+        result = checkout.approve_payment_attempt(db, attempt.id, self._shift(db).id, self._user())
         self.assertEqual(result.status, "confirmado")
         self.assertIsNotNone(result.resolved_at)
+        # spec 028: aprobar ya genera la venta/factura en la misma llamada.
+        db.refresh(order)
+        sale = db.execute(select(Sale).where(Sale.customer_order_id == order.id)).scalar_one()
+        self.assertEqual(sale.status, "paid")
+        self.assertIsNotNone(sale.invoice)
 
     def test_approve_409_sin_comprobante_todavia(self):
         db, order = self._seed_order_recibida()
@@ -80,7 +95,7 @@ class TestOrdersPaymentGate(unittest.TestCase):
         db.commit()
 
         with self.assertRaises(HTTPException) as ctx:
-            checkout.approve_payment_attempt(db, attempt.id, self._user())
+            checkout.approve_payment_attempt(db, attempt.id, self._shift(db).id, self._user())
         self.assertEqual(ctx.exception.status_code, 409)
 
     def test_reject_exige_motivo_y_lo_registra(self):
@@ -105,7 +120,7 @@ class TestOrdersPaymentGate(unittest.TestCase):
         db.commit()
 
         with self.assertRaises(HTTPException) as ctx:
-            checkout.approve_payment_attempt(db, attempt.id, self._user())
+            checkout.approve_payment_attempt(db, attempt.id, self._shift(db).id, self._user())
         self.assertEqual(ctx.exception.status_code, 409)
 
     # ------------------------------------------------- confirm-cash (US3)
@@ -119,10 +134,18 @@ class TestOrdersPaymentGate(unittest.TestCase):
         db.commit()
 
         result = checkout.confirm_cash_payment_attempt(
-            db, attempt.id, Decimal("20000"), self._user()
+            db, attempt.id, Decimal("20000"), self._shift(db).id, self._user()
         )
         self.assertEqual(result.status, "confirmado")
         self.assertEqual(result.change_amount, Decimal("2000"))
+        # spec 028: confirmar ya genera la venta/factura en la misma llamada
+        # — mismo cambio calculado en ambos lados (Sale.change_given y
+        # attempt.change_amount coinciden por construcción).
+        db.refresh(order)
+        sale = db.execute(select(Sale).where(Sale.customer_order_id == order.id)).scalar_one()
+        self.assertEqual(sale.status, "paid")
+        self.assertEqual(sale.change_given, Decimal("2000"))
+        self.assertIsNotNone(sale.invoice)
 
     def test_confirm_cash_monto_exacto_cambio_cero(self):
         """Acceptance Scenario 2 (US3)."""
@@ -132,7 +155,7 @@ class TestOrdersPaymentGate(unittest.TestCase):
         db.commit()
 
         result = checkout.confirm_cash_payment_attempt(
-            db, attempt.id, Decimal("18000"), self._user()
+            db, attempt.id, Decimal("18000"), self._shift(db).id, self._user()
         )
         self.assertEqual(result.change_amount, Decimal("0"))
 
@@ -145,7 +168,9 @@ class TestOrdersPaymentGate(unittest.TestCase):
         db.commit()
 
         with self.assertRaises(HTTPException) as ctx:
-            checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("15000"), self._user())
+            checkout.confirm_cash_payment_attempt(
+                db, attempt.id, Decimal("15000"), self._shift(db).id, self._user()
+            )
         self.assertEqual(ctx.exception.status_code, 422)
         # No quedó confirmado ni con cambio calculado.
         db.refresh(attempt)
@@ -159,7 +184,9 @@ class TestOrdersPaymentGate(unittest.TestCase):
         db.commit()
 
         with self.assertRaises(HTTPException) as ctx:
-            checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("20000"), self._user())
+            checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("20000"), self._shift(db).id, self._user()
+        )
         self.assertEqual(ctx.exception.status_code, 409)
 
     # ------------------------------------------------- FR-018/SC-007: doble resolución
@@ -174,9 +201,13 @@ class TestOrdersPaymentGate(unittest.TestCase):
         attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
         db.commit()
 
-        checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("20000"), self._user())
+        checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("20000"), self._shift(db).id, self._user()
+        )
         with self.assertRaises(HTTPException) as ctx:
-            checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("20000"), self._user())
+            checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("20000"), self._shift(db).id, self._user()
+        )
         self.assertEqual(ctx.exception.status_code, 409)
 
         movimientos = db.execute(
@@ -226,7 +257,7 @@ class TestOrdersPaymentGate(unittest.TestCase):
         db.commit()
 
         result = checkout.confirm_cash_payment_attempt(
-            db, attempt.id, Decimal("20000"), self._user()
+            db, attempt.id, Decimal("20000"), self._shift(db).id, self._user()
         )
         self.assertEqual(result.status, "confirmado")
         db.refresh(order)
@@ -264,7 +295,9 @@ class TestOrdersPaymentGate(unittest.TestCase):
         attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
         db.commit()
 
-        checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("20000"), self._user())
+        checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("20000"), self._shift(db).id, self._user()
+        )
 
         db.refresh(order)
         self.assertEqual(order.status, "abierta")
@@ -284,7 +317,7 @@ class TestOrdersPaymentGate(unittest.TestCase):
         )
         db.commit()
 
-        checkout.approve_payment_attempt(db, attempt.id, self._user())
+        checkout.approve_payment_attempt(db, attempt.id, self._shift(db).id, self._user())
 
         db.refresh(order)
         self.assertEqual(order.status, "abierta")
@@ -292,6 +325,44 @@ class TestOrdersPaymentGate(unittest.TestCase):
             select(InventoryMovement).where(InventoryMovement.reference_id == order.id)
         ).scalars().all()
         self.assertEqual(len(movimientos), 1)
+
+    def test_confirm_cash_y_approve_funcionan_con_autoflush_false(self):
+        """Regresión (spec 028): la sesión real de producción
+        (`app/core/db.py::with_db`) usa `autoflush=False`, a diferencia del
+        default de esta suite (`fx.new_session()`, `autoflush=True`) — que
+        por eso nunca detectó que `confirm_cash_payment_attempt` y
+        `approve_payment_attempt` mutaban `attempt.status = "confirmado"` y
+        llamaban a `_confirm_order_impl` sin un `db.flush()` de por medio: su
+        chequeo `has_confirmed_payment` es una `SELECT` fresca que, sin
+        flush, no ve el `UPDATE` todavía pendiente y siempre rechazaba con
+        409 "La orden no tiene un pago confirmado" — en producción, **cada
+        intento de confirmar un pago fallaba**. Este test reproduce la
+        configuración real de la sesión para que esa regresión no pueda
+        volver a colarse sin que la suite la detecte."""
+        db, order = self._seed_order_recibida(autoflush=False)
+        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
+        attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
+        db.commit()
+
+        result = checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("20000"), self._shift(db).id, self._user()
+        )
+        self.assertEqual(result.status, "confirmado")
+        self.assertEqual(result.change_amount, Decimal("2000"))
+        db.refresh(order)
+        self.assertEqual(order.status, "abierta")
+
+        db2, order2 = self._seed_order_recibida(autoflush=False)
+        nequi = fx.make_payment_method(db2, name="Nequi", is_cash=False, type="transfer")
+        attempt2 = fx.make_payment_attempt(
+            db2, order2, nequi, status="pendiente", receipt_file_url="https://example.invalid/a.jpg"
+        )
+        db2.commit()
+
+        result2 = checkout.approve_payment_attempt(db2, attempt2.id, self._shift(db2).id, self._user())
+        self.assertEqual(result2.status, "confirmado")
+        db2.refresh(order2)
+        self.assertEqual(order2.status, "abierta")
 
     def test_confirm_cash_stock_insuficiente_no_confirma_el_pago(self):
         """spec 026, FR-002 (US1, escenario 3): si el descuento automático de
@@ -305,7 +376,9 @@ class TestOrdersPaymentGate(unittest.TestCase):
         db.commit()
 
         with self.assertRaises(HTTPException) as ctx:
-            checkout.confirm_cash_payment_attempt(db, attempt.id, Decimal("20000"), self._user())
+            checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("20000"), self._shift(db).id, self._user()
+        )
         self.assertEqual(ctx.exception.status_code, 400)
 
         db.refresh(attempt)
@@ -381,7 +454,7 @@ class TestOrdersPaymentGate(unittest.TestCase):
         )
         cart_service.attach_receipt(db, participant.id, second.id, presign.public_url)
 
-        approved = checkout.approve_payment_attempt(db, second.id, self._user())
+        approved = checkout.approve_payment_attempt(db, second.id, self._shift(db).id, self._user())
         self.assertEqual(approved.status, "confirmado")
 
         # spec 026, FR-001: aprobar ya deja la orden 'abierta' en la misma

@@ -35,11 +35,12 @@ from sqlalchemy import select
 
 from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import checkout
-from app.api.v1.orders.schemas import BlockIn, CancelIn, PayIn
+from app.api.v1.orders.schemas import BlockIn, CancelIn, CheckoutAndSendIn, PayIn
 from app.api.v1.sales.schemas import PaymentIn
 from app.api.v1.promotions import service as promotions
 from app.models.audit_log import AuditLog
 from app.models.inventory_movement import InventoryMovement
+from app.models.sale import Sale
 
 PRECIO = Decimal("10000")
 
@@ -480,6 +481,113 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(result.status, "libre")
         db.refresh(ts)
         self.assertEqual(ts.status, "closed")
+
+    # -------------------------------------------------- checkout_and_send (T020)
+
+    def _seed_hold_order_con_receta(self, *, stock=Decimal("1000"), recipe_qty=Decimal("2")):
+        """Mesa ocupada + sesión + orden 'recibida' (como si hubiera nacido con
+        `hold_for_payment=True`, T013), con una variante con receta y turno de
+        caja abierto listo para cobrar."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db, status="ocupada")
+        ts = fx.make_table_session(db, table=table)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        insumo = fx.make_inventory_item(db, current_stock=stock)
+        fx.make_recipe_item(db, variant, insumo, quantity=recipe_qty)
+        order = fx.make_customer_order(db, ts, status="recibida", channel="waiter")
+        fx.make_order_item(db, order, variant, quantity=1, estado_cocina="pendiente")
+        register = fx.make_cash_register(db)
+        shift = fx.make_cash_shift(db, register=register)
+        method = fx.make_payment_method(db)
+        db.commit()
+        return dict(
+            db=db, table=table, ts=ts, variant=variant, insumo=insumo,
+            order=order, shift=shift, method=method,
+        )
+
+    def test_checkout_and_send_cobra_descuenta_y_abre_a_cocina(self):
+        """Comportamiento nuevo (spec 028, T016): orden 'recibida' (nacida con
+        `hold_for_payment=True`) + turno de caja abierto → `checkout_and_send`
+        cobra (crea el `Sale`), descuenta inventario y pasa la orden a
+        'abierta' — todo en una sola llamada, sin pasar por
+        `OrderPaymentAttempt` (eso es exclusivo del flujo QR)."""
+        s = self._seed_hold_order_con_receta()
+        db, order, insumo = s["db"], s["order"], s["insumo"]
+        shift, method = s["shift"], s["method"]
+        cashier = self._user()
+
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=shift.id,
+            payments=[self._pago(method.id, PRECIO)],
+        )
+        sale = checkout.checkout_and_send(db, order.id, data, cashier)
+
+        self.assertEqual(sale.total, PRECIO)
+        self.assertEqual(sale.customer_name, "Consumidor Final")
+        db.refresh(order)
+        self.assertEqual(order.status, "abierta")
+        self.assertEqual(order.version, 1)
+        movimientos = db.execute(
+            select(InventoryMovement).where(InventoryMovement.reference_id == order.id)
+        ).scalars().all()
+        self.assertEqual(len(movimientos), 1)
+        db.refresh(insumo)
+        self.assertEqual(Decimal(insumo.current_stock), Decimal("998"))
+
+    def test_checkout_and_send_version_desactualizada_409_sin_doble_venta(self):
+        """Idempotencia / doble clic (spec 028, T016): una segunda llamada con
+        la misma `version` ya vencida (la orden avanzó en la primera) es 409
+        y no crea una segunda venta — mismo criterio que el lock optimista de
+        `block_order`."""
+        s = self._seed_hold_order_con_receta()
+        db, order = s["db"], s["order"]
+        shift, method = s["shift"], s["method"]
+        cashier = self._user()
+
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=shift.id,
+            payments=[self._pago(method.id, PRECIO)],
+        )
+        checkout.checkout_and_send(db, order.id, data, cashier)
+
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.checkout_and_send(db, order.id, data, cashier)
+        self.assertEqual(ctx.exception.status_code, 409)
+
+        ventas = db.execute(
+            select(Sale).where(Sale.customer_order_id == order.id)
+        ).scalars().all()
+        self.assertEqual(len(ventas), 1)
+
+    def test_checkout_and_send_stock_insuficiente_revierte_todo(self):
+        """spec 028, T016: sin stock suficiente para descontar al enviar a
+        cocina, la transacción entera revierte — la orden sigue 'recibida' y
+        no queda ni venta ni movimiento de inventario a medias (mismo
+        criterio de atomicidad que `_confirm_order_impl`, congelado en
+        `test_confirm_order_descuenta_una_vez_y_stock_insuficiente_revierte`)."""
+        s = self._seed_hold_order_con_receta(stock=Decimal("1"), recipe_qty=Decimal("2"))
+        db, order, insumo = s["db"], s["order"], s["insumo"]
+        shift, method = s["shift"], s["method"]
+        cashier = self._user()
+
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=shift.id,
+            payments=[self._pago(method.id, PRECIO)],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.checkout_and_send(db, order.id, data, cashier)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        db.refresh(order)
+        self.assertEqual(order.status, "recibida")
+        ventas = db.execute(
+            select(Sale).where(Sale.customer_order_id == order.id)
+        ).scalars().all()
+        self.assertEqual(ventas, [])
+        db.refresh(insumo)
+        self.assertEqual(Decimal(insumo.current_stock), Decimal("1"))
 
 
 if __name__ == "__main__":

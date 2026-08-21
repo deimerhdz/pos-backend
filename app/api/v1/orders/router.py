@@ -26,9 +26,10 @@ from app.api.v1.orders.schemas import (
     TableCreate, TableUpdate, TableResponse, TableQrTokenResponse,
     OrderCreate, OrderResponse, OrderItemIn,
     OrderItemResponse, KitchenTransitionIn, VoidItemIn,
-    BlockIn, CancelIn, PayIn, BillResponse,
+    BlockIn, CancelIn, CheckoutAndSendIn, PayIn, BillResponse,
     TableStatusUpdate, MoveOrderIn, MergeOrdersIn, MergeResponse, GroupBillResponse,
-    PaymentAttemptResponse, PaymentAttemptRejectIn, PaymentAttemptConfirmCashIn,
+    PaymentAttemptResponse, PaymentAttemptApproveIn, PaymentAttemptRejectIn,
+    PaymentAttemptConfirmCashIn,
 )
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -208,9 +209,10 @@ def list_payment_attempts(
     summary="Aprobar un comprobante de transferencia (cajero)",
 )
 def approve_payment_attempt(
-    attempt_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user),
+    attempt_id: UUID, body: PaymentAttemptApproveIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ):
-    return checkout.approve_payment_attempt(db, attempt_id, user)
+    return checkout.approve_payment_attempt(db, attempt_id, body.cash_shift_id, user)
 
 
 @router.post(
@@ -234,7 +236,9 @@ def confirm_cash_payment_attempt(
     attempt_id: UUID, body: PaymentAttemptConfirmCashIn,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ):
-    return checkout.confirm_cash_payment_attempt(db, attempt_id, body.amount_received, user)
+    return checkout.confirm_cash_payment_attempt(
+        db, attempt_id, body.amount_received, body.cash_shift_id, user
+    )
 
 
 # ============================ Consolidación (mesero) ============================
@@ -400,6 +404,38 @@ def pay_order(
         # Cobro pedido a pedido desde el mostrador, no cierre de sesión de mesa.
         billing_mode="counter",
     )
+    return sale
+
+
+@router.post(
+    "/{order_id}/checkout-and-send",
+    response_model=SaleResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Cobrar y enviar a cocina en un solo paso (comanda 'hold_for_payment')",
+)
+def checkout_and_send(
+    order_id: UUID, body: CheckoutAndSendIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
+):
+    """Solo para comandas creadas con `hold_for_payment=True` (status
+    'recibida'): cobra la orden y, en la misma transacción, la envía a cocina
+    (descuenta inventario) — spec 028, T016."""
+    sale = checkout.checkout_and_send(db, order_id, body, user)
+    order = db.get(CustomerOrder, order_id)
+    events.payment_completed(
+        tenant.id,
+        sale_id=sale.id,
+        table_session_id=order.table_session_id if order else None,
+        total=sale.total,
+        customer_name=order.customer_name if order else None,
+        billing_mode="counter",
+    )
+    if order is not None:
+        events.order_confirmed(
+            tenant.id, order_id=order.id, table_session_id=order.table_session_id
+        )
+        events.bill_changed(tenant.id, table_session_id=order.table_session_id)
     return sale
 
 

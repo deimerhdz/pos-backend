@@ -114,6 +114,90 @@ class TestService(unittest.TestCase):
         db.refresh(table)
         self.assertEqual(table.status, "ocupada")
 
+    # ------------------------------------- create_order hold_for_payment (T019)
+
+    def test_create_order_hold_for_payment_nace_recibida_sin_descontar(self):
+        """Comportamiento nuevo (spec 028, T013): con `hold_for_payment=True`
+        la comanda nace 'recibida' (no 'abierta') y no descuenta inventario —
+        el descuento se mueve a `checkout.checkout_and_send`, al cobrar."""
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.COUNTER,
+            hold_for_payment=True,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        order = service.create_order(db, data, uuid4())
+
+        self.assertEqual(order.status, "recibida")
+        movimientos = db.execute(
+            select(InventoryMovement).where(InventoryMovement.reference_id == order.id)
+        ).scalars().all()
+        self.assertEqual(movimientos, [])
+        db.refresh(insumo)
+        self.assertEqual(Decimal(insumo.current_stock), Decimal("1000"))
+
+    def test_create_order_hold_for_payment_con_channel_qr_400(self):
+        """spec 028, T013: `hold_for_payment` es exclusivo de mostrador/mesero
+        — combinado con `channel='qr'` es 400 (ese canal ya tiene su propio
+        flujo 'recibida' vía `/cart/submit`)."""
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.QR,
+            hold_for_payment=True,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    # ------------------------ mezcla de orígenes QR/mostrador (spec 028, T014)
+
+    def test_create_order_bloqueado_por_pedido_qr_activo_en_la_mesa_409(self):
+        """spec 028, FR-013 (T014): una mesa no mezcla orígenes de pedido a la
+        vez. Si ya hay un pedido QR activo (no terminal) en la sesión de
+        mesa, una comanda de mostrador/mesero no puede abrirse encima —
+        simetría directa de `cart.service.submit_cart` (T015)."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db, status="ocupada")
+        ts = fx.make_table_session(db, table=table)
+        fx.make_customer_order(db, ts, channel="qr", status="recibida")
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.WAITER,
+            dining_table_id=table.id,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    def test_create_order_permite_si_el_pedido_qr_ya_es_terminal(self):
+        """Contraste del test anterior: un pedido QR 'pagada' ya no es
+        'activo', así que no bloquea una comanda nueva de mostrador/mesero en
+        la misma mesa."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db, status="ocupada")
+        ts = fx.make_table_session(db, table=table)
+        fx.make_customer_order(db, ts, channel="qr", status="pagada")
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.WAITER,
+            dining_table_id=table.id,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        order = service.create_order(db, data, uuid4())
+        self.assertEqual(order.status, "abierta")
+
 
 if __name__ == "__main__":
     unittest.main()

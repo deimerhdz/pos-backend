@@ -16,7 +16,8 @@ from app.core.models import Tenant, User
 from app.api.v1.table_sessions import service
 from app.api.v1.table_sessions.schemas import (
     AssignmentsIn, CloseSessionIn, CloseSessionResponse, ParticipantCreateIn,
-    ParticipantResponse, SessionBillResponse, TableSessionResponse,
+    ParticipantResponse, ReleaseSessionResponse, SessionBillResponse,
+    TableSessionResponse,
 )
 
 router = APIRouter(prefix="/table-sessions", tags=["table-sessions"])
@@ -136,3 +137,21 @@ def close_session(
         invoice_prefix=tenant.invoice_prefix or "",
         tenant_id=tenant.id,
     )
+
+
+@router.post(
+    "/{table_session_id}/release",
+    response_model=ReleaseSessionResponse,
+    summary="Liberar una sesión ya completamente pagada (sin nada por cobrar)",
+)
+def release_paid_session(
+    table_session_id: UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
+):
+    """Para el modo híbrido (spec 028, T027/T028): cuando cada comanda se cobró
+    por separado (`POST /orders/{id}/checkout-and-send`) y no queda ninguna
+    venta pendiente, `close_session` no aplica —exige algo billable—; este
+    endpoint solo cierra la sesión y libera la mesa."""
+    return service.release_paid_session(db, table_session_id, user, tenant_id=tenant.id)

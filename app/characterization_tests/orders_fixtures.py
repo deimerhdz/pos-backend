@@ -173,7 +173,7 @@ def _patch_sqlite_incompatible_server_defaults() -> None:
             col.server_default = None
 
 
-def new_session() -> Session:
+def new_session(*, autoflush: bool = True) -> Session:
     """Sesión SQLAlchemy real sobre SQLite en memoria, con el esquema ampliado
     (catálogo, reexportado de `fixtures.py`, más el superconjunto de
     mesas/sesión/comensales/pedidos/carrito/promociones/caja/ventas/factura/
@@ -182,7 +182,14 @@ def new_session() -> Session:
     `idx_open_shift_per_register`): ningún escenario de esta spec siembra dos
     filas activas que colisionen con ellos. Sí remueve
     `idx_pending_payment_attempt_per_order` (spec 024): esos tests siembran
-    varios intentos de pago no-pendientes por orden a propósito."""
+    varios intentos de pago no-pendientes por orden a propósito.
+
+    `autoflush` por defecto es `True` (el default de SQLAlchemy) para no
+    cambiar el comportamiento de ningún test existente. La sesión real de
+    producción (`app/core/db.py::with_db`) usa `autoflush=False` — pásalo
+    explícitamente cuando el test necesite reproducir ese comportamiento
+    (p. ej. detectar un `db.flush()` faltante entre una mutación y una
+    `SELECT` que dependa de verla en la misma transacción, spec 028)."""
     _patch_sqlite_incompatible_server_defaults()
     _remove_partial_unique_indexes()
     tables = [t for t in Base.metadata.tables.values() if t.name in _TABLE_NAMES]
@@ -190,7 +197,7 @@ def new_session() -> Session:
     conn = engine.connect().execution_options(schema_translate_map={"tenant": None})
     Base.metadata.create_all(bind=conn, tables=tables)
     conn.commit()
-    return Session(bind=conn)
+    return Session(bind=conn, autoflush=autoflush)
 
 
 def _uid() -> uuid.UUID:

@@ -120,6 +120,13 @@ class OrderCreate(BaseModel):
     customer_name: str | None = Field(None, max_length=255)
     notes: str | None = Field(None, max_length=500)
     items: list[OrderItemIn] = Field(..., min_length=1)
+    #: Terminal de Mesas modo híbrido (spec 028): comanda de mostrador/mesero
+    #: que nace en 'recibida' en lugar de 'abierta' — el staff cobra primero
+    #: (`POST /orders/{id}/checkout-and-send`) y recién ahí se descuenta
+    #: inventario y se envía a cocina. Solo aplica a `channel` counter/waiter;
+    #: combinado con `channel=qr` es 400 (ese canal ya tiene su propio flujo
+    #: `recibida` vía `/cart/submit`).
+    hold_for_payment: bool = False
 
 
 class OrderItemOptionResponse(BaseModel):
@@ -207,8 +214,17 @@ class PaymentAttemptRejectIn(BaseModel):
     reason: str = Field(..., min_length=1, max_length=500)
 
 
+class PaymentAttemptApproveIn(BaseModel):
+    """Spec 028: aprobar ya genera la venta/factura en la misma llamada, así
+    que necesita el turno de caja donde registrarla — mismo campo que
+    `PayIn`/`CheckoutAndSendIn`."""
+    cash_shift_id: UUID
+
+
 class PaymentAttemptConfirmCashIn(BaseModel):
     amount_received: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+    # Spec 028: ver `PaymentAttemptApproveIn`.
+    cash_shift_id: UUID
 
 
 # ---------- Preparación ----------
@@ -237,6 +253,23 @@ class PayIn(BaseModel):
     tax: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
     tip: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
     payments: list[PaymentIn] = Field(..., min_length=1)
+
+
+class CheckoutAndSendIn(BaseModel):
+    """Cobra y envía a cocina, en un solo paso, una comanda creada con
+    `hold_for_payment=True` (`POST /orders/{order_id}/checkout-and-send`).
+    Mismos campos que `PayIn` más `version` (lock optimista, igual que
+    `BlockIn`) y el nombre para la factura."""
+    version: int = Field(..., ge=0, description="Versión esperada (lock optimista).")
+    cash_shift_id: UUID
+    discount: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
+    tax: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
+    tip: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
+    payments: list[PaymentIn] = Field(..., min_length=1)
+    billing_customer_name: str | None = Field(
+        None, max_length=255,
+        description="A nombre de quién va la factura. Si se omite, 'Consumidor Final'.",
+    )
 
 
 class BillItemLine(BaseModel):
