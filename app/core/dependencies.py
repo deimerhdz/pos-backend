@@ -1,5 +1,6 @@
 import logging
 import uuid
+from datetime import timezone
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -101,6 +102,33 @@ async def get_valid_token_data(
     return token_data
 
 
+def _reject_if_session_revoked(user: User, token_data: dict) -> None:
+    """Cierre de sesiones (spec 031, FR-009/FR-017): un JWT acuñado antes del
+    último cambio de contraseña exitoso deja de aceptarse. Se evalúa **después**
+    de la relectura por id + `active==True` de RN-AUTH-07/A-23, nunca en su
+    lugar — el detalle es distinguible de "revocado por logout" y de
+    "inactivo" (research.md Decisión 1).
+    """
+    if user.tokens_valid_after is None:
+        return
+    iat = token_data.get("iat")
+    # `tokens_valid_after` es una columna DateTime naive que guarda un instante
+    # UTC (convención del proyecto, app/core/timezone.py::utc_now); `.timestamp()`
+    # sobre un naive lo interpretaría como hora local del servidor, no UTC.
+    # Se trunca a segundo entero porque PyJWT también trunca `iat` a segundo
+    # entero (`timegm(iat.utctimetuple())`): sin esto, un re-login del propio
+    # Flujo B que cae en el mismo segundo de reloj que el corte (carrera real,
+    # no solo de tests) generaría un `iat` truncado hacia abajo que compararía
+    # como "anterior" a un `tokens_valid_after` con fracción de segundo, y el
+    # backend rechazaría la sesión de origen que FR-017 exige preservar.
+    cutover = int(user.tokens_valid_after.replace(tzinfo=timezone.utc).timestamp())
+    if iat is not None and iat < cutover:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session revoked due to password change",
+        )
+
+
 def get_current_user(
     token_data: dict = Depends(get_valid_token_data),
     db: Session = Depends(get_db),
@@ -119,6 +147,8 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
         )
+
+    _reject_if_session_revoked(user, token_data)
 
     return user
 
@@ -153,6 +183,8 @@ def get_authenticated_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
         )
+
+    _reject_if_session_revoked(user, token_data)
 
     return user
 
