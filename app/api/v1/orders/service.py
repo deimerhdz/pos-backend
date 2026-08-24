@@ -20,8 +20,8 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.crud import get_or_404
 from app.models.product_variant import ProductVariant
@@ -30,6 +30,9 @@ from app.models.session_participant import SessionParticipant
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
+from app.models.order_payment_attempt import OrderPaymentAttempt
+from app.models.sale import Sale
+from app.models.table_session import TableSession
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.orders.consolidation import get_or_create_table_session_id
 from app.api.v1.orders.consumption import deduct_order_items
@@ -45,6 +48,69 @@ logger = logging.getLogger(__name__)
 #: `checkout.TERMINAL`), y `cart.service` ya importa de `table_sessions.service`,
 #: que a su vez depende de `orders.checkout`.
 _NON_TERMINAL_ORDER_STATUSES = ("recibida", "abierta", "bloqueada")
+
+
+def order_has_sale(db: Session, order_id: UUID) -> bool:
+    """¿Ya existe una `Sale` para este pedido? (spec 029, D2/D3 de research.md)
+
+    Es la señal correcta de "ya está pagado" — a diferencia de
+    `CustomerOrder.status`, que nunca llega a `"pagada"` en los caminos QR y
+    de mostrador vigentes (`checkout_and_send`/`_confirm_order_impl` dejan la
+    orden en `"abierta"` a propósito, con la venta ya emitida). Mismo patrón
+    de subconsulta ya probado en `has_billable_orders`
+    (`table_sessions/service.py`), sin tocar esa función."""
+    return db.execute(
+        select(Sale.id).where(Sale.customer_order_id == order_id).limit(1)
+    ).scalar() is not None
+
+
+def paid_order_ids(db: Session, order_ids: list[UUID]) -> set[UUID]:
+    """Versión en bloque de `order_has_sale`, para no hacer N consultas al
+    serializar un listado de pedidos (spec 029, D2 de research.md)."""
+    if not order_ids:
+        return set()
+    rows = db.execute(
+        select(Sale.customer_order_id).where(Sale.customer_order_id.in_(order_ids))
+    ).scalars().all()
+    return set(rows)
+
+
+def list_orders(
+    db: Session, status_filter: str | None = None, active_sessions_only: bool = False,
+) -> list[CustomerOrder]:
+    """Listado de comandas para la Terminal de Mesas (`GET /orders`).
+
+    `active_sessions_only=True` (spec 029, hotfix): descarta pedidos ya
+    pagados cuya `TableSession` ya cerró — sin esto, un pedido de una visita
+    ya cobrada y liberada quedaba visible para siempre (ligado a la misma
+    `dining_table_id` física) y reaparecía mezclado con la sesión nueva en
+    cuanto la mesa se ocupaba de nuevo, porque `status` nunca llega a
+    `"pagada"` en los caminos QR/mostrador vigentes (D2 de research.md).
+    Mismo patrón de subconsulta que `has_billable_orders`/`_billable_orders`
+    (`table_sessions/service.py`), expuesto aquí para el listado general.
+
+    Un pedido **sin pagar** se conserva aunque su sesión ya haya cerrado — es
+    el caso huérfano real que `billOrphan` (frontend) existe para señalar,
+    no algo que ocultar. Uno sin `table_session_id` (mostrador puro, sin
+    mesa) tampoco se toca."""
+    q = select(CustomerOrder).options(
+        selectinload(CustomerOrder.items).selectinload(OrderItem.options),
+        selectinload(CustomerOrder.payment_attempts)
+        .selectinload(OrderPaymentAttempt.payment_method),
+    ).order_by(CustomerOrder.created_at.desc())
+    if status_filter is not None:
+        q = q.where(CustomerOrder.status == status_filter)
+    if active_sessions_only:
+        inactive_sessions = select(TableSession.id).where(TableSession.status != "active")
+        pedidos_pagados = select(Sale.customer_order_id).where(Sale.customer_order_id.isnot(None))
+        q = q.where(
+            or_(
+                CustomerOrder.table_session_id.is_(None),
+                CustomerOrder.table_session_id.notin_(inactive_sessions),
+                CustomerOrder.id.notin_(pedidos_pagados),
+            )
+        )
+    return db.execute(q).scalars().all()
 
 
 def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> CustomerOrder:

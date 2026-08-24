@@ -1,7 +1,12 @@
-"""CONGELA comportamiento actual: `create_order`, la única función pública de
-`app/api/v1/orders/service.py` (specs/017-caracterizacion-orders, Historia 5)
-— la comanda directa de mostrador/mesero que nace ya `abierta` (confirmada) y
-descuenta inventario al crearse, porque no vuelve a pasar por `confirm_order`.
+"""`app/api/v1/orders/service.py`: `create_order` (CONGELA comportamiento
+actual, specs/017-caracterizacion-orders, Historia 5) más `order_has_sale`/
+`paid_order_ids`, agregadas por spec 029 — estas dos últimas no son
+characterization tests (no existía comportamiento previo que congelar), son
+la verificación de la señal "pedido ya pagado" introducida por esa spec.
+
+`create_order` es la comanda directa de mostrador/mesero que nace ya
+`abierta` (confirmada) y descuenta inventario al crearse, porque no vuelve a
+pasar por `confirm_order`.
 
 El caso de contraste directo con **A-04** (`create_order` sí pasa `variant` a
 `load_valid_options`, a diferencia de `consolidation.add_item_to_table`) ya
@@ -23,6 +28,7 @@ from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import service
 from app.api.v1.orders.schemas import OrderChannel, OrderCreate, OrderItemIn
 from app.models.inventory_movement import InventoryMovement
+from app.models.sale import Sale
 
 PRECIO = Decimal("10000")
 
@@ -197,6 +203,130 @@ class TestService(unittest.TestCase):
         )
         order = service.create_order(db, data, uuid4())
         self.assertEqual(order.status, "abierta")
+
+
+class TestOrderHasSale(unittest.TestCase):
+    """Spec 029 (D2/D3 de research.md): `order_has_sale`/`paid_order_ids` son
+    la señal real de "este pedido ya está pagado" — no `CustomerOrder.status`,
+    que nunca llega a `"pagada"` en los caminos QR/mostrador vigentes
+    (`checkout_and_send`/`_confirm_order_impl` dejan la orden en `"abierta"`
+    a propósito, con la `Sale` ya emitida)."""
+
+    def _seed_order_con_sale(self, *, order_status: str) -> tuple:
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status=order_status, channel="waiter")
+        shift = fx.make_cash_shift(db)
+        cashier = fx.make_user_double()
+        db.add(Sale(
+            cash_shift_id=shift.id,
+            customer_order_id=order.id,
+            table_session_id=ts.id,
+            user_id=cashier.id,
+            status="paid",
+        ))
+        db.commit()
+        return db, order
+
+    def test_order_has_sale_true_sobre_orden_abierta_con_sale_camino_qr_mostrador(self):
+        """El caso real que motivó la spec: `checkout_and_send`/
+        `_confirm_order_impl` dejan la orden en 'abierta' con la `Sale` ya
+        emitida — `order_has_sale` debe reconocerlo como pagado aunque
+        `status` nunca haya llegado a 'pagada'."""
+        db, order = self._seed_order_con_sale(order_status="abierta")
+
+        self.assertTrue(service.order_has_sale(db, order.id))
+
+    def test_order_has_sale_false_sobre_orden_abierta_sin_sale(self):
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        order = fx.make_customer_order(db, ts, status="abierta", channel="waiter")
+        db.commit()
+
+        self.assertFalse(service.order_has_sale(db, order.id))
+
+    def test_paid_order_ids_resuelve_en_bloque_para_una_lista_de_pedidos(self):
+        """Versión en bloque: una sola consulta para todo un listado, en vez
+        de N — el pedido sin `Sale` no aparece en el resultado."""
+        db, pagado = self._seed_order_con_sale(order_status="abierta")
+        ts = fx.make_table_session(db)
+        sin_pagar = fx.make_customer_order(db, ts, status="abierta", channel="waiter")
+        db.commit()
+
+        resultado = service.paid_order_ids(db, [pagado.id, sin_pagar.id])
+
+        self.assertEqual(resultado, {pagado.id})
+
+    def test_paid_order_ids_lista_vacia_no_consulta(self):
+        db = fx.new_session()
+        self.assertEqual(service.paid_order_ids(db, []), set())
+
+
+class TestListOrdersActiveSessionsOnly(unittest.TestCase):
+    """Spec 029, hotfix: `list_orders(active_sessions_only=True)` — un pedido
+    ya pagado de una `TableSession` ya `'closed'` (visita anterior, mesa ya
+    liberada y reabierta por QR) no debe reaparecer mezclado con la sesión
+    activa de la misma mesa física. El caso real reportado en producción:
+    liberar una mesa, volver a escanear su QR y ver los pedidos de la visita
+    vieja junto al pedido nuevo."""
+
+    def _seed(self, *, session_status: str, order_status: str, con_sale: bool):
+        db = fx.new_session()
+        ts = fx.make_table_session(db, status=session_status)
+        order = fx.make_customer_order(db, ts, status=order_status, channel="waiter")
+        if con_sale:
+            shift = fx.make_cash_shift(db)
+            cashier = fx.make_user_double()
+            db.add(Sale(
+                cash_shift_id=shift.id, customer_order_id=order.id,
+                table_session_id=ts.id, user_id=cashier.id, status="paid",
+            ))
+        db.commit()
+        return db, ts, order
+
+    def test_excluye_pedido_pagado_de_sesion_ya_cerrada(self):
+        db, _, order = self._seed(session_status="closed", order_status="abierta", con_sale=True)
+
+        resultado = service.list_orders(db, active_sessions_only=True)
+
+        self.assertNotIn(order.id, [o.id for o in resultado])
+
+    def test_conserva_pedido_sin_pagar_de_sesion_ya_cerrada_caso_huerfano(self):
+        db, _, order = self._seed(session_status="closed", order_status="abierta", con_sale=False)
+
+        resultado = service.list_orders(db, active_sessions_only=True)
+
+        self.assertIn(order.id, [o.id for o in resultado])
+
+    def test_conserva_pedido_pagado_de_sesion_activa(self):
+        db, _, order = self._seed(session_status="active", order_status="abierta", con_sale=True)
+
+        resultado = service.list_orders(db, active_sessions_only=True)
+
+        self.assertIn(order.id, [o.id for o in resultado])
+
+    def test_conserva_pedido_sin_table_session_id_mostrador_puro(self):
+        db = fx.new_session()
+        ts = fx.make_table_session(db)  # solo para satisfacer la firma del fixture
+        order = fx.make_customer_order(
+            db, ts, table_session_id=None, dining_table_id=None,
+            status="abierta", channel="counter",
+        )
+        db.commit()
+
+        resultado = service.list_orders(db, active_sessions_only=True)
+
+        self.assertIn(order.id, [o.id for o in resultado])
+
+    def test_sin_el_parametro_el_resultado_no_cambia_respecto_a_hoy(self):
+        db, _, order = self._seed(session_status="closed", order_status="abierta", con_sale=True)
+
+        resultado = service.list_orders(db)
+
+        self.assertIn(order.id, [o.id for o in resultado])
 
 
 if __name__ == "__main__":

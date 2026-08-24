@@ -185,6 +185,12 @@ class OrderResponse(BaseModel):
     # ninguno. Mientras no haya uno `confirmado`, la orden sigue "pendiente de
     # pago" para el comensal (Key Entity `Orden`, no es una columna de status).
     current_payment_attempt: CurrentPaymentAttemptSummary | None = None
+    # Computado (spec 029) — no es una columna: verdadero si ya existe una
+    # `Sale` con `customer_order_id` igual al de esta orden. Es la señal real
+    # de "ya está pagado": a diferencia de `status`, que nunca llega a
+    # "pagada" en los caminos QR/mostrador vigentes. El router lo asigna
+    # antes de serializar (`orders.service.order_has_sale`/`paid_order_ids`).
+    paid: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -262,7 +268,13 @@ class CheckoutAndSendIn(BaseModel):
     `BlockIn`) y el nombre para la factura."""
     version: int = Field(..., ge=0, description="Versión esperada (lock optimista).")
     cash_shift_id: UUID
-    discount: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
+    # spec 029 (Historia 2, FR-009/010/011): descuento manual prohibido sin
+    # excepción en la Terminal de Mesas — único valor válido es 0. El motor
+    # de promociones (`promotions.evaluate`/`combo_discount_for_lines`) sigue
+    # sumándose aparte en `checkout_and_send`, sin relación con este campo.
+    # No se toca el `discount` compartido de `sales/schemas.py` (mostrador/
+    # cierre unificado/dividido) — ese es alcance de spec 011.
+    discount: Decimal = Field(0, ge=0, le=0, max_digits=12, decimal_places=2)
     tax: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
     tip: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
     payments: list[PaymentIn] = Field(..., min_length=1)

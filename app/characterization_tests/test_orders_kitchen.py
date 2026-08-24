@@ -1,14 +1,21 @@
-"""CONGELA comportamiento actual: las 3 funciones públicas de
-`app/api/v1/orders/kitchen.py` (specs/017-caracterizacion-orders, Historia 3)
-— el ciclo de vida de preparación y anulación de un ítem, independiente del
-status de pago de la orden.
+"""Las 3 funciones públicas de `app/api/v1/orders/kitchen.py`
+(specs/017-caracterizacion-orders, Historia 3).
 
-Documenta que ninguna de las tres valida el `status` de la `CustomerOrder`
-padre salvo la validación parcial de `mark_order_ready` (**A-16**), y que sus
-transiciones internas están cerradas a una lista blanca sin vía genérica de
-asignación libre (**A-25 [PROTEGIDA]**), invariante que también verifica sobre
-las otras cuatro funciones públicas de `checkout.py` que mutan estado
-(`block_order`, `confirm_order`, `pay_order`, `cancel_order`).
+`transition_kitchen` sigue CONGELADA, independiente del status de pago de la
+orden a propósito (el flujo QR/mostrador vigente cobra antes de que cocina
+termine — bloquearla ahí rompería la operación diaria). `mark_order_ready` ya
+validaba parcialmente (**A-16**). `void_item` **dejó de estar congelada
+sobre un pedido ya pagado**: spec 029 (Historia 1, FR-005/006/007) cierra la
+porción `ACCIDENTAL` de A-16 para esta función — anular ya no se permite una
+vez existe un pago registrado (`status == "pagada"` o ya existe una `Sale`
+asociada, ver `research.md` D3 de esa spec) — decisión de negocio explícita,
+no un olvido corregido en silencio.
+
+Documenta también que las transiciones internas de las tres están cerradas a
+una lista blanca sin vía genérica de asignación libre (**A-25 [PROTEGIDA]**),
+invariante que también verifica sobre las otras cuatro funciones públicas de
+`checkout.py` que mutan estado (`block_order`, `confirm_order`, `pay_order`,
+`cancel_order`).
 
 Ejecutar solo este módulo:
 
@@ -23,6 +30,7 @@ from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import checkout, kitchen
 from app.api.v1.orders.schemas import BlockIn, CancelIn, KitchenTransitionIn, OrderItemIn, PayIn, VoidItemIn
 from app.api.v1.sales.schemas import PaymentIn
+from app.models.sale import Sale
 
 PRECIO = Decimal("10000")
 
@@ -66,13 +74,16 @@ class TestKitchen(unittest.TestCase):
             kitchen.transition_kitchen(db, item.id, KitchenTransitionIn(estado_cocina="pendiente"))
         self.assertEqual(ctx.exception.status_code, 409)
 
-    # ----------------------------- transition_kitchen / void_item ignoran orden (T036)
+    # ----------------------------- transition_kitchen ignora orden (T036, sin cambios)
 
-    def test_transition_kitchen_y_void_item_no_validan_status_de_la_orden_a16(self):
-        """CONGELA comportamiento actual — A-16 (`kitchen.py:43-60,93-176`,
-        spec.md Historia 3, escenario 2): orden ya 'pagada' con ítems aún
-        'pendiente' → tanto `transition_kitchen` como `void_item` se
-        ejecutan igual, sin ningún error por el status de la orden padre."""
+    def test_transition_kitchen_no_valida_status_de_la_orden_a16(self):
+        """CONGELA comportamiento actual — A-16 (`kitchen.py:43-60`, spec.md
+        Historia 3, escenario 2): orden ya 'pagada' con ítems aún 'pendiente'
+        → `transition_kitchen` se ejecuta igual, sin ningún error por el
+        status de la orden padre. Sin cambios por spec 029 — bloquear esto
+        rompería el flujo QR/mostrador vigente, donde cocina sigue avanzando
+        ítems después de que el pago ya se registró (ver docstring del
+        módulo)."""
         s = self._seed_item(order_status="pagada", estado_cocina="pendiente")
         db, item = s["db"], s["item"]
 
@@ -81,12 +92,50 @@ class TestKitchen(unittest.TestCase):
         )
         self.assertEqual(actualizado.estado_cocina, "en_preparacion")
 
-        s2 = self._seed_item(order_status="pagada", estado_cocina="pendiente")
-        db2, item2 = s2["db"], s2["item"]
+    # ------------------------ void_item ya no anula un pedido pagado (spec 029)
+
+    def test_void_item_409_si_orden_pagada_spec_029_a16(self):
+        """Comportamiento NUEVO (spec 029, Historia 1, FR-005/006/007 —
+        cierra la porción ACCIDENTAL de A-16 para esta función): orden ya
+        'pagada' con un ítem aún 'pendiente' → `void_item` responde 409 en
+        vez de anular, sin mutar el ítem ni registrar `OrderItemVoidLog`.
+        Antes de esta spec se comportaba igual que `transition_kitchen`
+        (test anterior) — ahora se distingue a propósito, porque anular es
+        una reversa de mercancía ya entregada/cobrada, no una transición de
+        cocina."""
+        s = self._seed_item(order_status="pagada", estado_cocina="pendiente")
+        db, item = s["db"], s["item"]
         user = self._user()
-        resultado = kitchen.void_item(db2, item2.id, VoidItemIn(motivo="prueba"), user)
-        anulado = next(it for it in resultado.items if it.id == item2.id)
-        self.assertEqual(anulado.estado_cocina, "anulado")
+
+        with self.assertRaises(HTTPException) as ctx:
+            kitchen.void_item(db, item.id, VoidItemIn(motivo="prueba"), user)
+        self.assertEqual(ctx.exception.status_code, 409)
+        db.refresh(item)
+        self.assertEqual(item.estado_cocina, "pendiente")
+
+    def test_void_item_409_si_orden_abierta_con_sale_camino_qr_mostrador_spec_029(self):
+        """Comportamiento NUEVO (spec 029): el caso real que motivó la spec,
+        distinto del anterior — `checkout_and_send`/`_confirm_order_impl`
+        dejan la orden en `status="abierta"` a propósito, con la `Sale` ya
+        emitida (nunca llega a `"pagada"`). `void_item` debe rechazar igual,
+        reconociendo el pago por la `Sale` asociada, no por `status`."""
+        s = self._seed_item(order_status="abierta", estado_cocina="listo")
+        db, item, order = s["db"], s["item"], s["order"]
+        shift = fx.make_cash_shift(db)
+        cashier = fx.make_user_double()
+        db.add(Sale(
+            cash_shift_id=shift.id,
+            customer_order_id=order.id,
+            user_id=cashier.id,
+            status="paid",
+        ))
+        db.commit()
+
+        with self.assertRaises(HTTPException) as ctx:
+            kitchen.void_item(db, item.id, VoidItemIn(motivo="prueba"), cashier)
+        self.assertEqual(ctx.exception.status_code, 409)
+        db.refresh(item)
+        self.assertEqual(item.estado_cocina, "listo")
 
     # ---------------------------------------------- mark_order_ready valida (T037)
 

@@ -39,6 +39,7 @@ from app.api.v1.orders.schemas import (
     BillResponse, BillOrderLine, BillItemLine, BillSessionLine,
 )
 from app.api.v1.promotions import service as promotions
+from app.api.v1.orders.service import order_has_sale
 
 logger = logging.getLogger(__name__)
 
@@ -540,6 +541,13 @@ def cancel_order(
     if order.status in TERMINAL:
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"La orden ya es terminal (status={order.status})"
+        )
+    # Spec 029, hotfix #4: en los caminos QR/mostrador el pago NO mueve
+    # `status` a "pagada" (research.md D2) — sin este chequeo, este endpoint
+    # podía cancelar un pedido ya cobrado y dejar su `Sale` huérfana.
+    if order_has_sale(db, order_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "El pedido ya fue pagado y no puede rechazarse"
         )
 
     deducted = order.status not in _NOT_DEDUCTED
