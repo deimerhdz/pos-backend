@@ -16,30 +16,62 @@ class PaymentMethodType(str, Enum):
 
 
 class PaymentMethodCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100, examples=["Efectivo", "Nequi"])
-    # Clasificación del método para el desglose de ventas del arqueo.
-    # Si se omite, se deriva de `is_cash` (cash / other).
-    type: PaymentMethodType | None = None
-    is_cash: bool = False
-    # Datos de pago que el comensal necesita ver para transferir (cuenta,
-    # titular, teléfono, código...); sin esquema fijo — "según el método"
-    # (spec 024, FR-002). Solo tiene sentido si type != "cash".
+    """Activa un método del catálogo del Super Admin para este tenant (spec
+    032, FR-007/FR-011). `name`/`type`/`is_cash` ya no se aceptan aquí — se
+    copian de `catalog_id` en `service.py` (research.md Decisión 5); un tenant
+    no puede crear métodos fuera del catálogo."""
+
+    catalog_id: UUID
+    # Datos de integración del método (cuenta, celular, código...); validados
+    # contra `catalog.fields` en `service.py` (FR-009). `None`/`{}` para
+    # métodos sin campos (ej. Efectivo).
     payment_info: dict[str, str] | None = None
 
 
 class PaymentMethodUpdate(BaseModel):
-    name: str | None = Field(None, min_length=1, max_length=100)
     payment_info: dict[str, str] | None = None
     active: bool | None = None
 
 
 class PaymentMethodResponse(BaseModel):
     id: UUID
+    catalog_id: UUID | None = None
     name: str
     type: str
     is_cash: bool
     active: bool
+    is_complete: bool
     payment_info: dict[str, str] | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CatalogPaymentMethodOption(BaseModel):
+    """Una entrada del catálogo de plataforma, vista desde el Tenant Admin
+    (`GET /sales/payment-methods/catalog`, FR-005/FR-006). `active` es el
+    estado del catálogo (no el de la activación del tenant); `already_activated`
+    indica si el tenant ya tiene una configuración para este `catalog_id`."""
+
+    id: UUID
+    name: str
+    fields: list[dict]
+    active: bool
+    already_activated: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaymentMethodCheckoutOption(BaseModel):
+    """Lo que el cajero ve en la pantalla de cobro (FR-012a, clarificación
+    2026-08-24 #1): nunca `payment_info` (cuenta, celular, QR — los "datos de
+    integración" que la clarificación reserva al Tenant Admin). `is_cash`/
+    `type` sí viajan: son clasificación operativa, no datos de integración —
+    el checkout los necesita para decidir si calcula cambio (mismo criterio
+    que ya usaba `payment-input.component.ts` antes de esta spec)."""
+
+    id: UUID
+    name: str
+    is_cash: bool
 
     model_config = ConfigDict(from_attributes=True)
 
