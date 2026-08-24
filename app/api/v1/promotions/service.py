@@ -34,6 +34,8 @@ from sqlalchemy.sql import Select
 
 from app.core.config import settings
 from app.core.crud import get_or_404
+from app.core.models import Tenant
+from app.core.timezone import resolve_timezone
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.promotion import (
@@ -47,10 +49,13 @@ AUTO_TYPES = ("percent", "fixed", "qty_price")
 
 # --------------------------- Hora local ---------------------------
 
-def _tz() -> ZoneInfo:
-    """Zona horaria de evaluación. Hoy es una sola para la instancia
-    (`TENANT_TIMEZONE`). Cuando `Tenant` tenga su columna `timezone`, este es el
-    único punto que cambia."""
+def _tz(tenant: Tenant | None = None) -> ZoneInfo:
+    """Zona horaria de evaluación. Si el caller ya resolvió el `tenant`
+    (spec 030, Historia 4/A-46), usa la suya; si no, conserva el respaldo
+    global de instancia (`TENANT_TIMEZONE`) — retrocompatible con los
+    callers que todavía no lo pasan."""
+    if tenant is not None:
+        return resolve_timezone(tenant)
     return ZoneInfo(settings.TENANT_TIMEZONE)
 
 

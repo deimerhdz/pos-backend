@@ -1,8 +1,9 @@
 """CRUD de promociones. La aplicación automática en la venta vive en el checkout,
 que llama a `service.evaluate` / `service.evaluate_detailed`."""
+from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
@@ -36,6 +37,7 @@ def _with_overlaps(db: Session, promo: Promotion) -> dict:
 
 @router.get("", response_model=Page[PromotionResponse], summary="Listar promociones")
 def list_promotions(
+    response: Response,
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     status_filter: str | None = Query(
@@ -45,6 +47,10 @@ def list_promotions(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
+    # A-09: el POS de staff necesita una hora de referencia sincronizada con el
+    # servidor (en vez del reloj del dispositivo) para previsualizar vigencia
+    # de promociones; este es el endpoint que ya sondea para eso.
+    response.headers["X-Server-Time"] = datetime.now(timezone.utc).isoformat()
     return paginate(db, service.list_query(search=search, status_filter=status_filter), page, size)
 
 

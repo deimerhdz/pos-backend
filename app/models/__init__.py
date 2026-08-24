@@ -32,6 +32,7 @@ from .customer_order import CustomerOrder
 from .order_item import OrderItem, OrderItemOption
 from .order_cancel_log import OrderCancelLog
 from .order_item_void_log import OrderItemVoidLog
+from .order_payment_attempt import OrderPaymentAttempt
 
 # Ventas
 from .sale import Sale, SaleItem

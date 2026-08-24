@@ -1,8 +1,9 @@
 from uuid import UUID
-from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
+
+from app.core.timezone import UtcDatetime
 
 
 class InvoiceItemResponse(BaseModel):
@@ -29,7 +30,7 @@ class InvoiceResponse(BaseModel):
     tip: Decimal
     total: Decimal
     status: str
-    issued_at: datetime
+    issued_at: UtcDatetime
     user_name: str | None = None
     cufe: str | None = None
     dian_status: str | None = None

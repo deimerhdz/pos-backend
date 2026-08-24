@@ -9,6 +9,9 @@ class TenantInfoResponse(BaseModel):
     logo_url: str | None = None
     receipt_message: str | None = None
     invoice_prefix: str | None = None
+    # Zona horaria IANA del negocio (spec 030). Solo lectura — no se agrega a
+    # TenantUpdate, ver contracts/tenant-info-endpoint.md.
+    timezone: str
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -7,7 +7,6 @@ venta con todo lo consumido; `split` emite una venta por comensal, agrupando por
 es exacto aunque un pedido mezcle comensales.
 """
 import logging
-from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -18,6 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core import events
 from app.core.crud import get_or_404
 from app.core.models import User
+from app.core.timezone import utc_now
 from app.models.customer_order import CustomerOrder
 from app.models.dining_table import DiningTable
 from app.models.order_item import EN_CURSO, OrderItem, OrderItemOption
@@ -29,7 +29,8 @@ from app.api.v1.sales.builder import build_sale, ensure_open_shift
 from app.api.v1.promotions import service as promotions
 from app.api.v1.table_sessions.schemas import (
     BillingMode, CloseSessionIn, CloseSessionResponse,
-    SessionBillLine, SessionBillResponse, TableSessionResponse,
+    ReleaseSessionResponse,
+    SessionBillItem, SessionBillLine, SessionBillResponse, TableSessionResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,11 +63,24 @@ def get_session(db: Session, table_session_id: UUID) -> TableSession:
 # ------------------------------------------------------ Liberar mesa abandonada
 
 def has_billable_orders(db: Session, table_session_id: UUID) -> bool:
-    """¿Queda algún pedido que cobrar en la sesión? `pagada`/`cancelada` no cuentan."""
+    """¿Queda algún pedido que cobrar en la sesión? `pagada`/`cancelada` no
+    cuentan, ni los que ya tienen una `Sale` asociada.
+
+    Esa última condición hace falta desde spec 028: la aprobación/confirmación
+    de un pago QR ahora factura en el mismo paso (para que exista algo que
+    reimprimir), pero deja el pedido en `status="abierta"` a propósito —no
+    `"pagada"`— para que siga siendo visible como consumo activo mientras
+    cocina lo termina (`activeOrders`/`tableOrders` del frontend excluyen
+    `"pagada"`; marcarlo así de inmediato haría ver la mesa como libre con el
+    pedido todavía en preparación). Sin este chequeo, un pedido así nunca deja
+    de contar como "por cobrar" y la mesa jamás se libera ni por el barrido ni
+    por "Liberar Mesa", aunque ya esté completamente pagado y facturado."""
+    ya_facturados = select(Sale.customer_order_id).where(Sale.customer_order_id.isnot(None))
     return db.execute(
         select(CustomerOrder.id).where(
             CustomerOrder.table_session_id == table_session_id,
             CustomerOrder.status.notin_(checkout.TERMINAL),
+            CustomerOrder.id.notin_(ya_facturados),
         ).limit(1)
     ).scalar() is not None
 
@@ -124,13 +138,19 @@ def list_sessions(db: Session, *, only_active: bool = True) -> list[TableSession
 
 
 def _billable_orders(db: Session, table_session_id: UUID) -> list[CustomerOrder]:
-    """Pedidos de la sesión que entran en la cuenta: ni cancelados ni ya pagados."""
+    """Pedidos de la sesión que entran en la cuenta: ni cancelados, ni ya
+    pagados, ni con una `Sale` ya emitida (spec 028 — mismo motivo que
+    `has_billable_orders`: evita facturar dos veces un pedido QR que ya se
+    cobró al aprobar/confirmar su pago, aunque su `status` siga en
+    `"abierta"` mientras cocina lo termina)."""
+    ya_facturados = select(Sale.customer_order_id).where(Sale.customer_order_id.isnot(None))
     return db.execute(
         select(CustomerOrder)
         .options(selectinload(CustomerOrder.items))
         .where(
             CustomerOrder.table_session_id == table_session_id,
             CustomerOrder.status.notin_(("cancelada", "pagada")),
+            CustomerOrder.id.notin_(ya_facturados),
         )
         .order_by(CustomerOrder.created_at)
     ).scalars().all()
@@ -154,7 +174,7 @@ def compute_bill(db: Session, table_session_id: UUID) -> SessionBillResponse:
             seen.add(it.participant_id)
             participant_ids.append(it.participant_id)
 
-    now = datetime.now(timezone.utc)
+    now = utc_now()
     total = Decimal("0")
     split: list[SessionBillLine] = []
     for pid in participant_ids:
@@ -170,6 +190,18 @@ def compute_bill(db: Session, table_session_id: UUID) -> SessionBillResponse:
             participant_id=pid,
             display_label=labels.get(pid) if pid else None,
             subtotal=subtotal,
+            # spec 026, FR-006: expone lo que este cálculo ya tenía en memoria
+            # (líneas y descuento) — no cambia ningún valor, solo lo serializa.
+            items=[
+                SessionBillItem(
+                    description=line.description,
+                    quantity=line.quantity,
+                    unit_price=line.unit_price,
+                    line_total=line.line_total,
+                )
+                for line in lines
+            ],
+            discount=promo_discount + combo_discount,
         ))
 
     return SessionBillResponse(
@@ -298,6 +330,72 @@ def close_session(
         table_session=TableSessionResponse.model_validate(_load(db, table_session_id)),
         sale_ids=[s.id for s in sales],
     )
+
+
+def release_paid_session(
+    db: Session, table_session_id: UUID, cashier: User,
+    *, tenant_id: int | None = None,
+) -> ReleaseSessionResponse:
+    """Libera una mesa cuya sesión ya está completamente pagada (spec 028,
+    T027) — la inversa de `close_session`: en vez de exigir algo por cobrar,
+    aquí se rechaza si **queda** algo por cobrar. Pensada para el modo híbrido
+    en el que cada comanda se cobra por separado al vuelo
+    (`checkout.checkout_and_send`), así que al final no queda ninguna venta
+    pendiente que `close_session` pudiera facturar — solo hace falta cerrar la
+    sesión y devolver la mesa a `libre`.
+
+    Aun sin nada por cobrar, la comida puede seguir en curso en cocina sobre
+    pedidos ya `pagada` (se cobró antes de que terminara de prepararse): se
+    cargan **todos** los pedidos de la sesión, no solo los billables, y se
+    reusa `_assert_closable` sin modificar para que ese chequeo de cocina
+    siga aplicando.
+    """
+    ts = _load(db, table_session_id, lock=True)
+    if ts.status != "active":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"La sesión ya está {ts.status}"
+        )
+
+    if has_billable_orders(db, ts.id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Todavía hay algo por cobrar en esta mesa; cóbralo antes de liberarla.",
+        )
+
+    orders = db.execute(
+        select(CustomerOrder)
+        .options(selectinload(CustomerOrder.items))
+        .where(CustomerOrder.table_session_id == ts.id)
+    ).scalars().all()
+    _assert_closable(db, orders)
+
+    try:
+        checkout.close_table_sessions(db, ts.dining_table_id, closed_by=cashier)
+
+        table = db.get(DiningTable, ts.dining_table_id)
+        if table is not None:
+            table.status = "libre"
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error liberando la sesión ya pagada")
+        raise
+
+    if tenant_id is not None:
+        events.session_closed(
+            tenant_id,
+            table_session_id=ts.id,
+            dining_table_id=ts.dining_table_id,
+            reason="paid",
+        )
+        if table is not None:
+            events.table_status_changed(
+                tenant_id, dining_table_id=table.id, table_number=table.number,
+                status="libre",
+            )
+
+    return ReleaseSessionResponse(dining_table_id=ts.dining_table_id, status="libre")
 
 
 def _participantes_con_consumo(orders: list[CustomerOrder]) -> set:
@@ -551,7 +649,7 @@ def _close_unified(
     for order in orders:
         lines.extend(checkout.order_sale_lines(db, order.id))
 
-    now = datetime.now(timezone.utc)
+    now = utc_now()
     promo_discount, promo_id = promotions.evaluate(db, checkout.promo_lines_for(db, lines), now)
     combo_discount = promotions.combo_discount_for_lines(db, lines, now)
     combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
@@ -638,7 +736,7 @@ def _close_split(
     # con `_nombre_cuenta`; aquí faltaba el mismo cuidado.
     sin_asignar = f"Mesa {table.number}" if table is not None else "Sin asignar"
 
-    now = datetime.now(timezone.utc)
+    now = utc_now()
     sales: list[Sale] = []
     for bloque in data.splits:
         lines = []

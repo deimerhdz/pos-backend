@@ -1,6 +1,5 @@
 """Consulta de la bitácora de auditoría (RF-076). Solo lectura, admin."""
 from uuid import UUID
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict
@@ -11,6 +10,7 @@ from app.core.db import get_db
 from app.core.dependencies import require_tenant_admin
 from app.core.models import User
 from app.core.pagination import Page, paginate
+from app.core.timezone import UtcDatetime
 from app.models.audit_log import AuditLog
 
 router = APIRouter(prefix="/audit-logs", tags=["audit"])
@@ -24,7 +24,7 @@ class AuditLogResponse(BaseModel):
     user_id: UUID | None = None
     user_name: str | None = None
     payload: dict | None = None
-    at: datetime
+    at: UtcDatetime
     model_config = ConfigDict(from_attributes=True)
 
 

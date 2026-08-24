@@ -2,7 +2,7 @@
 la liga al turno de caja y descuenta inventario (receta + opciones). Dueño de la
 transacción."""
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -11,8 +11,9 @@ from sqlalchemy import cast, func, select, String
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql import Select
 
-from app.core.crud import get_or_404
+from app.core.crud import ensure_unique, get_or_404
 from app.core.models import User
+from app.core.timezone import local_day_bounds_utc, resolve_timezone
 from app.models.invoice import Invoice
 from app.models.product_variant import ProductVariant
 from app.models.product import Product
@@ -23,10 +24,55 @@ from app.models.sale import Sale, SaleItem
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.sales.consumption import deduct_sale
 from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
-from app.api.v1.sales.schemas import SaleCreate
+from app.api.v1.sales.schemas import SaleCreate, PaymentMethodUpdate
 from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
+
+
+# ============================ Métodos de pago (spec 024) ============================
+
+def update_payment_method(
+    db: Session, payment_method_id: UUID, data: PaymentMethodUpdate
+) -> PaymentMethod:
+    """Edita nombre/datos de pago/estado de un método (spec 024, US1).
+
+    Al desactivar (`active: False`), exige que quede al menos un método activo
+    en el tenant (FR-003) — se cuenta dentro de la misma transacción,
+    excluyendo el propio método (research.md spec 024, Decisión 10). Editar
+    `payment_info`/`name` no toca ningún `OrderPaymentAttempt` ya creado con
+    este método: el intento solo referencia `payment_method_id`, nunca copia
+    estos datos."""
+    method = get_or_404(db, PaymentMethod, payment_method_id, "Payment method not found")
+
+    if data.name is not None and data.name != method.name:
+        ensure_unique(
+            db, PaymentMethod, PaymentMethod.name, data.name,
+            "Payment method already exists", exclude_id=payment_method_id,
+        )
+        method.name = data.name
+
+    if data.payment_info is not None:
+        method.payment_info = data.payment_info
+
+    if data.active is not None and data.active != method.active:
+        if data.active is False:
+            active_count = db.execute(
+                select(func.count()).select_from(PaymentMethod).where(
+                    PaymentMethod.active.is_(True),
+                    PaymentMethod.id != payment_method_id,
+                )
+            ).scalar_one()
+            if active_count == 0:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "Debe quedar al menos un método de pago activo.",
+                )
+        method.active = data.active
+
+    db.commit()
+    db.refresh(method)
+    return method
 
 
 def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: str = "") -> Sale:
@@ -140,12 +186,17 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
 
 
 def list_sales_query(
+    tenant,
     status: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     invoice_reference: str | None = None,
 ) -> Select:
-    """Construye el `Select` de ventas para el listado paginado (GET /sales)."""
+    """Construye el `Select` de ventas para el listado paginado (GET /sales).
+
+    `date_from`/`date_to` se interpretan como día calendario en la zona
+    horaria del tenant, no medianoche UTC (spec 030, FR-004,
+    contracts/date-range-filters.md)."""
     stmt = (
         select(Sale)
         .options(
@@ -158,10 +209,14 @@ def list_sales_query(
     )
     if status:
         stmt = stmt.where(Sale.status == status)
-    if date_from:
-        stmt = stmt.where(Sale.sold_at >= date_from)
-    if date_to:
-        stmt = stmt.where(Sale.sold_at < date_to + timedelta(days=1))
+    if date_from or date_to:
+        tz = resolve_timezone(tenant)
+        if date_from:
+            start, _ = local_day_bounds_utc(date_from, tz)
+            stmt = stmt.where(Sale.sold_at >= start)
+        if date_to:
+            _, end = local_day_bounds_utc(date_to, tz)
+            stmt = stmt.where(Sale.sold_at < end)
     if invoice_reference:
         # No hay columna "referencia": se reconstruye prefix + número (6 dígitos)
         # tal como se imprime en el ticket (ver Invoice.full_number).

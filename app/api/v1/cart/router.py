@@ -26,6 +26,9 @@ from app.api.v1.orders.schemas import OrderResponse
 from app.api.v1.cart.schemas import (
     SessionOpenIn, SessionOpenResponse,
     CartItemIn, CartItemUpdate, CartResponse, MyOrderCancelIn,
+    DinerPaymentMethod, PaymentAttemptCreateIn, DinerPaymentAttempt,
+    ReceiptPresignIn, ReceiptPresignOut, ReceiptAttachIn,
+    SubmitCartIn, PaymentReceiptPresignIn,
 )
 
 router = APIRouter(prefix="/cart", tags=["cart"])
@@ -135,15 +138,20 @@ def leave(x_session_token: str | None = Header(None, alias="x-session-token")):
     "/submit",
     response_model=OrderResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Enviar el carrito como pedido (queda 'recibida', sin descontar stock)",
+    summary="Enviar el carrito como pedido, con su método de pago (spec 025)",
 )
 async def submit_cart(
-    request: Request, ctx: SessionContext = Depends(get_session_context),
+    body: SubmitCartIn, request: Request,
+    ctx: SessionContext = Depends(get_session_context),
 ):
-    """El pedido queda pendiente de que el staff lo confirme; hasta entonces no
-    compromete inventario y el comensal puede cancelarlo sin coste."""
+    """El pedido nace junto con su primer intento de pago — no queda pendiente
+    de que el staff lo confirme sin pago resuelto; hasta que el staff lo
+    confirme no compromete inventario y el comensal puede cancelarlo sin
+    coste (spec 025, contracts/submit-cart-with-payment.md)."""
     await rate_limit(request, "cart_submit", table_id=ctx.table_id)
-    order = service.submit_cart(ctx.db, ctx.participant)
+    order = service.submit_cart(
+        ctx.db, ctx.participant, body.payment_method_id, body.receipt_file_url
+    )
     # Después del COMMIT del servicio, nunca dentro: si la transacción fallara no
     # puede haber salido un evento anunciando un pedido que no existe.
     events.order_created(
@@ -191,3 +199,69 @@ def cancel_my_order(
     )
     events.bill_changed(ctx.tenant.id, table_session_id=order.table_session_id)
     return order
+
+
+# ---------------------------- Pagos del comensal (spec 024) ----------------------------
+
+@router.get(
+    "/payment-methods",
+    response_model=list[DinerPaymentMethod],
+    summary="Métodos de pago activos del tenant",
+)
+def list_payment_methods(ctx: SessionContext = Depends(get_session_context)):
+    return service.list_payment_methods(ctx.db)
+
+
+@router.post(
+    "/payment-receipt/presign",
+    response_model=ReceiptPresignOut,
+    summary="Pedir una URL firmada para subir el comprobante antes de enviar el pedido (spec 025)",
+)
+def presign_payment_receipt(
+    body: PaymentReceiptPresignIn,
+    ctx: SessionContext = Depends(get_session_context),
+):
+    return service.presign_payment_receipt(
+        ctx.db, ctx.tenant.schema, ctx.participant.id, body.content_type
+    )
+
+
+@router.post(
+    "/orders/{order_id}/payment-attempts",
+    response_model=DinerPaymentAttempt,
+    status_code=status.HTTP_201_CREATED,
+    summary="Iniciar un intento de pago para una orden propia",
+)
+def create_payment_attempt(
+    order_id: UUID, body: PaymentAttemptCreateIn,
+    ctx: SessionContext = Depends(get_session_context),
+):
+    return service.create_payment_attempt(
+        ctx.db, ctx.participant.id, order_id, body.payment_method_id
+    )
+
+
+@router.post(
+    "/payment-attempts/{attempt_id}/receipt/presign",
+    response_model=ReceiptPresignOut,
+    summary="Pedir una URL firmada para subir el comprobante a R2",
+)
+def presign_receipt(
+    attempt_id: UUID, body: ReceiptPresignIn,
+    ctx: SessionContext = Depends(get_session_context),
+):
+    return service.presign_receipt(
+        ctx.db, ctx.tenant.schema, ctx.participant.id, attempt_id, body.content_type
+    )
+
+
+@router.post(
+    "/payment-attempts/{attempt_id}/receipt",
+    response_model=DinerPaymentAttempt,
+    summary="Asociar el comprobante ya subido a R2 con el intento de pago",
+)
+def attach_receipt(
+    attempt_id: UUID, body: ReceiptAttachIn,
+    ctx: SessionContext = Depends(get_session_context),
+):
+    return service.attach_receipt(ctx.db, ctx.participant.id, attempt_id, body.file_url)

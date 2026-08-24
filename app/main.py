@@ -91,8 +91,11 @@ def create_app()->FastAPI:
         allow_headers=["*"],
         # Con `allow_credentials=True` el comodín no vale aquí: hay que listar cada
         # cabecera que el JS del navegador pueda leer. `ETag` es la de la
-        # revalidación condicional; `Retry-After` la que acompaña a los 429.
-        expose_headers=["ETag", "Retry-After"],
+        # revalidación condicional; `Retry-After` la que acompaña a los 429;
+        # `X-Server-Time` (A-09) es la hora del servidor que el POS de staff usa
+        # en vez del reloj del dispositivo para previsualizar vigencia de
+        # promociones (GET /promotions).
+        expose_headers=["ETag", "Retry-After", "X-Server-Time"],
     )
 
     initialize_database()

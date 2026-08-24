@@ -1,12 +1,12 @@
 from enum import Enum
 from typing import Literal
 from uuid import UUID
-from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.api.v1.sales.schemas import PaymentIn
+from app.core.timezone import UtcDatetime
 
 
 class OrderChannel(str, Enum):
@@ -120,6 +120,13 @@ class OrderCreate(BaseModel):
     customer_name: str | None = Field(None, max_length=255)
     notes: str | None = Field(None, max_length=500)
     items: list[OrderItemIn] = Field(..., min_length=1)
+    #: Terminal de Mesas modo híbrido (spec 028): comanda de mostrador/mesero
+    #: que nace en 'recibida' en lugar de 'abierta' — el staff cobra primero
+    #: (`POST /orders/{id}/checkout-and-send`) y recién ahí se descuenta
+    #: inventario y se envía a cocina. Solo aplica a `channel` counter/waiter;
+    #: combinado con `channel=qr` es 400 (ese canal ya tiene su propio flujo
+    #: `recibida` vía `/cart/submit`).
+    hold_for_payment: bool = False
 
 
 class OrderItemOptionResponse(BaseModel):
@@ -150,6 +157,18 @@ class OrderItemResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CurrentPaymentAttemptSummary(BaseModel):
+    """Resumen del intento de pago vigente de una orden, para el comensal
+    (spec 024). **Nunca** incluye `rejection_reason` (Clarification 3) — el
+    detalle del motivo solo lo ve el cajero, vía
+    `GET /orders/{order_id}/payment-attempts` (`PaymentAttemptResponse`)."""
+    id: UUID
+    status: str
+    payment_method_name: str
+    is_cash: bool
+    receipt_file_url: str | None = None
+
+
 class OrderResponse(BaseModel):
     id: UUID
     channel: str
@@ -160,10 +179,58 @@ class OrderResponse(BaseModel):
     dining_table_id: UUID | None = None
     customer_name: str | None = None
     notes: str | None = None
-    created_at: datetime
+    created_at: UtcDatetime
     items: list[OrderItemResponse] = Field(default_factory=list)
+    # Intento de pago más reciente (spec 024) — `None` si nunca se inició
+    # ninguno. Mientras no haya uno `confirmado`, la orden sigue "pendiente de
+    # pago" para el comensal (Key Entity `Orden`, no es una columna de status).
+    current_payment_attempt: CurrentPaymentAttemptSummary | None = None
+    # Computado (spec 029) — no es una columna: verdadero si ya existe una
+    # `Sale` con `customer_order_id` igual al de esta orden. Es la señal real
+    # de "ya está pagado": a diferencia de `status`, que nunca llega a
+    # "pagada" en los caminos QR/mostrador vigentes. El router lo asigna
+    # antes de serializar (`orders.service.order_has_sale`/`paid_order_ids`).
+    paid: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Intentos de pago (spec 024) ----------
+class PaymentAttemptResponse(BaseModel):
+    """Vista de staff/cajero — a diferencia de `CurrentPaymentAttemptSummary`,
+    **sí** incluye `rejection_reason` (FR-016)."""
+    id: UUID
+    order_id: UUID
+    payment_method_id: UUID
+    payment_method_name: str
+    is_cash: bool
+    status: str
+    amount_received: Decimal | None = None
+    change_amount: Decimal | None = None
+    receipt_file_url: str | None = None
+    rejection_reason: str | None = None
+    resolved_by_user_id: UUID | None = None
+    resolved_at: UtcDatetime | None = None
+    created_at: UtcDatetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaymentAttemptRejectIn(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
+class PaymentAttemptApproveIn(BaseModel):
+    """Spec 028: aprobar ya genera la venta/factura en la misma llamada, así
+    que necesita el turno de caja donde registrarla — mismo campo que
+    `PayIn`/`CheckoutAndSendIn`."""
+    cash_shift_id: UUID
+
+
+class PaymentAttemptConfirmCashIn(BaseModel):
+    amount_received: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+    # Spec 028: ver `PaymentAttemptApproveIn`.
+    cash_shift_id: UUID
 
 
 # ---------- Preparación ----------
@@ -192,6 +259,29 @@ class PayIn(BaseModel):
     tax: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
     tip: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
     payments: list[PaymentIn] = Field(..., min_length=1)
+
+
+class CheckoutAndSendIn(BaseModel):
+    """Cobra y envía a cocina, en un solo paso, una comanda creada con
+    `hold_for_payment=True` (`POST /orders/{order_id}/checkout-and-send`).
+    Mismos campos que `PayIn` más `version` (lock optimista, igual que
+    `BlockIn`) y el nombre para la factura."""
+    version: int = Field(..., ge=0, description="Versión esperada (lock optimista).")
+    cash_shift_id: UUID
+    # spec 029 (Historia 2, FR-009/010/011): descuento manual prohibido sin
+    # excepción en la Terminal de Mesas — único valor válido es 0. El motor
+    # de promociones (`promotions.evaluate`/`combo_discount_for_lines`) sigue
+    # sumándose aparte en `checkout_and_send`, sin relación con este campo.
+    # No se toca el `discount` compartido de `sales/schemas.py` (mostrador/
+    # cierre unificado/dividido) — ese es alcance de spec 011.
+    discount: Decimal = Field(0, ge=0, le=0, max_digits=12, decimal_places=2)
+    tax: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
+    tip: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
+    payments: list[PaymentIn] = Field(..., min_length=1)
+    billing_customer_name: str | None = Field(
+        None, max_length=255,
+        description="A nombre de quién va la factura. Si se omite, 'Consumidor Final'.",
+    )
 
 
 class BillItemLine(BaseModel):

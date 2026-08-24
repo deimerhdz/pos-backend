@@ -196,7 +196,7 @@ def add_item_to_table(db: Session, table_id: UUID, data, user: User) -> Customer
         variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
         if not variant.active:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
-        options = load_valid_options(db, data.option_ids)
+        options = load_valid_options(db, data.option_ids, variant=variant)
         lines = [(variant.id, data.quantity, options, compute_line_price(variant, options), None)]
 
     try:

@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.v1.sales.schemas import PaymentIn
+from app.core.timezone import UtcDatetime
 
 
 class BillingMode(str, Enum):
@@ -22,9 +23,9 @@ class ParticipantResponse(BaseModel):
     display_name: str
     display_label: str | None = None
     status: str
-    joined_at: datetime
+    joined_at: UtcDatetime
     expires_at: datetime | None = None
-    closed_at: datetime | None = None
+    closed_at: UtcDatetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -33,8 +34,8 @@ class TableSessionResponse(BaseModel):
     id: UUID
     dining_table_id: UUID
     status: str
-    opened_at: datetime
-    closed_at: datetime | None = None
+    opened_at: UtcDatetime
+    closed_at: UtcDatetime | None = None
     closed_by_user_name: str | None = None
     billing_mode: str | None = None
     participants: list[ParticipantResponse] = Field(default_factory=list)
@@ -75,12 +76,27 @@ class AssignmentsIn(BaseModel):
     assignments: list[ItemAssignmentIn] = Field(..., min_length=1)
 
 
+class SessionBillItem(BaseModel):
+    """Ítem consumido por un comensal, para el detalle de la cuenta (spec 026,
+    FR-006) — mismos datos que ya calcula `checkout.order_sale_lines`, solo
+    expuestos; no cambia cómo se valoran."""
+    description: str
+    quantity: Decimal
+    unit_price: Decimal
+    line_total: Decimal
+
+
 class SessionBillLine(BaseModel):
     """Lo que debe un comensal. `participant_id` nulo agrupa lo que añadió el
     staff sin asignar a nadie."""
     participant_id: UUID | None = None
     display_label: str | None = None
     subtotal: Decimal
+    #: Detalle de ítems y descuento ya aplicado (spec 026, FR-006) — mismos
+    #: valores que `compute_bill` ya calculaba internamente para llegar a
+    #: `subtotal`, ahora expuestos en vez de descartarse.
+    items: list[SessionBillItem] = Field(default_factory=list)
+    discount: Decimal = Decimal("0")
 
 
 class SessionBillResponse(BaseModel):
@@ -135,3 +151,12 @@ class CloseSessionIn(BaseModel):
 class CloseSessionResponse(BaseModel):
     table_session: TableSessionResponse
     sale_ids: list[UUID] = Field(default_factory=list)
+
+
+class ReleaseSessionResponse(BaseModel):
+    """Respuesta de `POST /table-sessions/{id}/release` (spec 028, T027/T028):
+    la sesión ya estaba completamente pagada (nada billable pendiente), así
+    que aquí solo se confirma que la mesa quedó libre — no hay venta que
+    reportar, a diferencia de `CloseSessionResponse`."""
+    dining_table_id: UUID
+    status: str

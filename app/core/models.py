@@ -1,7 +1,9 @@
 import uuid
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from sqlalchemy import Integer,String,Column,DateTime, UniqueConstraint,func,Boolean,MetaData,ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm  import mapped_column,Mapped,DeclarativeBase,relationship
+from sqlalchemy.orm  import mapped_column,Mapped,DeclarativeBase,relationship,validates
 
 from typing import Optional,List
 
@@ -64,12 +66,27 @@ class Tenant(Base,TimestampMixin):
     # NULL = sin prefijo, numeración corrida.
     invoice_prefix:Mapped[Optional[str]] = mapped_column("invoice_prefix", String(20), nullable=True)
 
+    # Zona horaria IANA del negocio de este tenant (spec 030, A-46). Sin
+    # pantalla de autoservicio: se fija vía `app/scripts/set_tenant_timezone.py`.
+    # `America/Bogota` cubre a todo tenant existente vía server_default.
+    timezone:Mapped[str] = mapped_column(
+        "timezone", String(255), nullable=False, server_default="America/Bogota"
+    )
+
     users: Mapped[list["User"]] = relationship(
             back_populates="tenant",
             cascade="all, delete-orphan"
         )
-    
+
     __table_args__ = ({"schema": "shared"},)
+
+    @validates("timezone")
+    def _validate_timezone(self, key, value):
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError:
+            raise ValueError(f"Zona horaria inválida: {value!r} no es un nombre IANA reconocido.")
+        return value
 
 class Role(UUIDPrimaryKeyMixin,TimestampMixin,Base):
     __tablename__ = "roles"    

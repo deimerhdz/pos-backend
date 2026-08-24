@@ -48,6 +48,7 @@ class ProductService:
                 preparation_type=data.preparation_type.value,
                 image_url=data.image_url,
                 available=data.available,
+                tracks_inventory=data.tracks_inventory,
             )
             db.add(product)
             db.flush()
@@ -75,19 +76,22 @@ class ProductService:
             product.description = data.description
         if data.preparation_type is not None:
             product.preparation_type = data.preparation_type.value
+        old_key = None
         if data.image_url is not None and data.image_url != product.image_url:
             old_image_url = product.image_url
             product.image_url = data.image_url
             if old_image_url:
                 old_key = key_from_public_url(old_image_url)
-                if old_key:
-                    delete_object(old_key)
         if data.active is not None:
             product.active = data.active
         if data.available is not None:
             product.available = data.available
+        if data.tracks_inventory is not None:
+            product.tracks_inventory = data.tracks_inventory
         db.commit()
         db.refresh(product)
+        if old_key:
+            delete_object(old_key)
         return product
 
     def soft_delete(self, db: Session, id: UUID) -> Product:

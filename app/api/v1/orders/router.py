@@ -15,6 +15,7 @@ from app.core.qr_token import mint_qr_token
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem
+from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.api.v1.orders import service
 from app.api.v1.orders.consolidation import consolidate_table, add_item_to_table
 from app.api.v1.orders import kitchen
@@ -25,8 +26,10 @@ from app.api.v1.orders.schemas import (
     TableCreate, TableUpdate, TableResponse, TableQrTokenResponse,
     OrderCreate, OrderResponse, OrderItemIn,
     OrderItemResponse, KitchenTransitionIn, VoidItemIn,
-    BlockIn, CancelIn, PayIn, BillResponse,
+    BlockIn, CancelIn, CheckoutAndSendIn, PayIn, BillResponse,
     TableStatusUpdate, MoveOrderIn, MergeOrdersIn, MergeResponse, GroupBillResponse,
+    PaymentAttemptResponse, PaymentAttemptApproveIn, PaymentAttemptRejectIn,
+    PaymentAttemptConfirmCashIn,
 )
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -39,11 +42,16 @@ _ORDERS_ADAPTER = TypeAdapter(list[OrderResponse])
 def _load_order(db: Session, order_id: UUID) -> CustomerOrder:
     order = db.execute(
         select(CustomerOrder)
-        .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
+        .options(
+            selectinload(CustomerOrder.items).selectinload(OrderItem.options),
+            selectinload(CustomerOrder.payment_attempts)
+            .selectinload(OrderPaymentAttempt.payment_method),
+        )
         .where(CustomerOrder.id == order_id)
     ).scalar_one_or_none()
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    order.paid = service.order_has_sale(db, order.id)  # spec 029, D2
     return order
 
 
@@ -182,6 +190,56 @@ def confirm_order(
     )
     events.bill_changed(tenant.id, table_session_id=order.table_session_id)
     return order
+
+
+# ============================ Intentos de pago (cajero, spec 024) ============================
+@router.get(
+    "/{order_id}/payment-attempts",
+    response_model=list[PaymentAttemptResponse],
+    summary="Historial de intentos de pago de una orden (cajero/back-office)",
+)
+def list_payment_attempts(
+    order_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    return checkout.list_payment_attempts(db, order_id)
+
+
+@router.post(
+    "/payment-attempts/{attempt_id}/approve",
+    response_model=PaymentAttemptResponse,
+    summary="Aprobar un comprobante de transferencia (cajero)",
+)
+def approve_payment_attempt(
+    attempt_id: UUID, body: PaymentAttemptApproveIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    return checkout.approve_payment_attempt(db, attempt_id, body.cash_shift_id, user)
+
+
+@router.post(
+    "/payment-attempts/{attempt_id}/reject",
+    response_model=PaymentAttemptResponse,
+    summary="Rechazar un comprobante de transferencia con motivo (cajero)",
+)
+def reject_payment_attempt(
+    attempt_id: UUID, body: PaymentAttemptRejectIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    return checkout.reject_payment_attempt(db, attempt_id, body.reason, user)
+
+
+@router.post(
+    "/payment-attempts/{attempt_id}/confirm-cash",
+    response_model=PaymentAttemptResponse,
+    summary="Confirmar un pago en efectivo y calcular el cambio (cajero)",
+)
+def confirm_cash_payment_attempt(
+    attempt_id: UUID, body: PaymentAttemptConfirmCashIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    return checkout.confirm_cash_payment_attempt(
+        db, attempt_id, body.amount_received, body.cash_shift_id, user
+    )
 
 
 # ============================ Consolidación (mesero) ============================
@@ -351,6 +409,38 @@ def pay_order(
 
 
 @router.post(
+    "/{order_id}/checkout-and-send",
+    response_model=SaleResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Cobrar y enviar a cocina en un solo paso (comanda 'hold_for_payment')",
+)
+def checkout_and_send(
+    order_id: UUID, body: CheckoutAndSendIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
+):
+    """Solo para comandas creadas con `hold_for_payment=True` (status
+    'recibida'): cobra la orden y, en la misma transacción, la envía a cocina
+    (descuenta inventario) — spec 028, T016."""
+    sale = checkout.checkout_and_send(db, order_id, body, user)
+    order = db.get(CustomerOrder, order_id)
+    events.payment_completed(
+        tenant.id,
+        sale_id=sale.id,
+        table_session_id=order.table_session_id if order else None,
+        total=sale.total,
+        customer_name=order.customer_name if order else None,
+        billing_mode="counter",
+    )
+    if order is not None:
+        events.order_confirmed(
+            tenant.id, order_id=order.id, table_session_id=order.table_session_id
+        )
+        events.bill_changed(tenant.id, table_session_id=order.table_session_id)
+    return sale
+
+
+@router.post(
     "/{order_id}/cancel",
     response_model=OrderResponse,
     summary="Cancelar pedido (reversa parcial de inventario + auditoría)",
@@ -422,17 +512,24 @@ def create_order(
 def list_orders(
     request: Request,
     status_filter: str | None = Query(None, alias="status"),
+    active_sessions_only: bool = Query(False),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
     """La terminal sondea esto, así que responde con `ETag`: mientras nada
-    cambie el navegador revalida y recibe un 304, sin cuerpo ni re-render."""
-    q = select(CustomerOrder).options(
-        selectinload(CustomerOrder.items).selectinload(OrderItem.options)
-    ).order_by(CustomerOrder.created_at.desc())
-    if status_filter is not None:
-        q = q.where(CustomerOrder.status == status_filter)
-    return json_or_304(request, _ORDERS_ADAPTER, db.execute(q).scalars().all())
+    cambie el navegador revalida y recibe un 304, sin cuerpo ni re-render.
+
+    `active_sessions_only` (spec 029, hotfix): la Terminal de Mesas lo manda
+    siempre en `True` para no volver a mezclar pedidos ya cobrados de una
+    visita anterior con la sesión activa de la misma mesa física (ver
+    `service.list_orders`). Por defecto `False` conserva el comportamiento
+    actual exacto para cualquier otro consumidor de este endpoint."""
+    orders = service.list_orders(db, status_filter, active_sessions_only)
+    # spec 029, D2: una sola consulta para todo el listado, no una por pedido.
+    paid_ids = service.paid_order_ids(db, [o.id for o in orders])
+    for o in orders:
+        o.paid = o.id in paid_ids
+    return json_or_304(request, _ORDERS_ADAPTER, orders)
 
 
 @router.get("/{order_id}", response_model=OrderResponse, summary="Obtener una comanda")

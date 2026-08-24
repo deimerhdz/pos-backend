@@ -2,18 +2,20 @@
 mesa de una orden, y unión de mesas por grupo. La división de cuenta por comensal
 (RF-054) ya la expone `compute_bill` (líneas por `session_id`) en el bill de mesa."""
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from app.core.crud import get_or_404
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
-from app.models.order_item import OrderItem
+from app.api.v1.orders import checkout
+from app.api.v1.promotions import service as promotions
 
 TERMINAL = ("pagada", "cancelada")
 
@@ -90,23 +92,33 @@ def merge_orders(db: Session, order_ids: list[UUID]) -> dict:
 
 
 def group_bill(db: Session, group_id: UUID) -> dict:
+    """Cuenta consolidada de un grupo de mesas fusionadas — corrige A-01 camino C
+    (`registro-de-anomalias.md`, RN-ORD-64): excluye órdenes `pagada`/`cancelada`
+    del cálculo y aplica promociones/combos vigentes, igual que
+    `table_sessions.compute_bill` (camino A, referencia). Evalúa descuentos por
+    orden, no por comensal — equivalente en total a agrupar por comensal
+    (research.md Decisión 1 de specs/019-correccion-cuenta-mesas-fusionadas)."""
     orders = db.execute(
-        select(CustomerOrder)
-        .options(selectinload(CustomerOrder.items))
-        .where(CustomerOrder.merged_group_id == group_id)
+        select(CustomerOrder).where(CustomerOrder.merged_group_id == group_id)
     ).scalars().all()
     if not orders:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Grupo de mesas no encontrado")
 
+    now = datetime.now(timezone.utc)
     per_order = []
     total = Decimal("0")
     for o in orders:
-        sub = sum(
-            (Decimal(it.unit_price) * it.quantity
-             for it in o.items if it.estado_cocina != "anulado"),
-            start=Decimal("0"),
-        )
-        total += sub
+        if o.status in checkout.TERMINAL:
+            sub = Decimal("0")
+        else:
+            lines = checkout.order_sale_lines(db, o.id)
+            raw = sum((l.line_total for l in lines), start=Decimal("0"))
+            promo_discount, _ = promotions.evaluate(
+                db, checkout.promo_lines_for(db, lines), now
+            )
+            combo_discount = promotions.combo_discount_for_lines(db, lines, now)
+            sub = raw - promo_discount - combo_discount
+            total += sub
         per_order.append({
             "order_id": o.id, "dining_table_id": o.dining_table_id,
             "status": o.status, "subtotal": sub,

@@ -18,6 +18,7 @@ from app.models.customer_order import CustomerOrder
 from app.models.order_item import EN_CURSO, OrderItem, OrderItemOption
 from app.models.order_item_void_log import OrderItemVoidLog
 from app.models.product_variant import ProductVariant
+from app.api.v1.orders import service
 from app.api.v1.orders.consumption import deduct_order_items, reverse_order_items
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.orders.schemas import KitchenTransitionIn, VoidItemIn
@@ -103,6 +104,20 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
         raise HTTPException(status.HTTP_409_CONFLICT, "El ítem ya está anulado")
 
     order_id = item.order_id
+    order_status = db.execute(
+        select(CustomerOrder.status).where(CustomerOrder.id == order_id)
+    ).scalar_one()
+    # spec 029 (Historia 1, A-16): un pedido pagado se asume entregado y ya no
+    # es anulable. `status == "pagada"` cubre el camino legado
+    # (block_order → pay_order); `order_has_sale` cubre el camino QR/mostrador
+    # vigente, que deja la orden en "abierta" con la Sale ya emitida (D2/D3 de
+    # research.md) — a diferencia de `mark_order_ready`, que solo mira
+    # `status`, aquí eso no basta.
+    if order_status == "pagada" or service.order_has_sale(db, order_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "El pedido ya fue pagado y no puede anularse"
+        )
+
     was_pendiente = item.estado_cocina == "pendiente"
 
     # Validar el reemplazo ANTES de mutar (para un 422 limpio si aplica).

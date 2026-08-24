@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.audit import record_audit
 from app.core.crud import get_or_404
 from app.core.models import User
+from app.core.timezone import utc_now
 from app.models.dining_table import DiningTable
 from app.models.table_session import TableSession
 from app.models.session_participant import SessionParticipant
@@ -29,13 +30,17 @@ from app.models.sale import Sale
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import EN_CURSO, OrderItem
 from app.models.order_cancel_log import OrderCancelLog
+from app.models.order_payment_attempt import OrderPaymentAttempt
+from app.models.payment import PaymentMethod
 from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
+from app.api.v1.sales.schemas import PaymentIn
 from app.api.v1.orders.consumption import deduct_order_items, reverse_order_items
 from app.api.v1.orders.schemas import (
-    BlockIn, CancelIn, PayIn,
+    BlockIn, CancelIn, CheckoutAndSendIn, PayIn,
     BillResponse, BillOrderLine, BillItemLine, BillSessionLine,
 )
 from app.api.v1.promotions import service as promotions
+from app.api.v1.orders.service import order_has_sale
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +66,11 @@ def _item_options(db: Session, item: OrderItem) -> list[Option]:
 def _reload_order(db: Session, order_id: UUID) -> CustomerOrder:
     return db.execute(
         select(CustomerOrder)
-        .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
+        .options(
+            selectinload(CustomerOrder.items).selectinload(OrderItem.options),
+            selectinload(CustomerOrder.payment_attempts)
+            .selectinload(OrderPaymentAttempt.payment_method),
+        )
         .where(CustomerOrder.id == order_id)
     ).scalar_one()
 
@@ -304,15 +313,47 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
 
 # --------------------------------------------------------------- Confirmación
 
-def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
-    """`recibida` → `abierta`: el staff acepta el pedido que envió el comensal y
-    **aquí es donde se compromete el inventario**.
+def _deduct_and_open(db: Session, order: CustomerOrder, user: User) -> CustomerOrder:
+    """Núcleo de `recibida` → `abierta`: descuenta inventario y abre el pedido
+    a cocina, sobre una orden **ya cargada** (con o sin lock — lo decide quien
+    llama) y con `order.items` ya en memoria. Sin `commit`/`rollback` propios.
 
-    Es el único punto de descuento de los pedidos por QR. La validación de stock es
-    la real (con lock por fila, en orden canónico de id para no deadlockear); el
-    chequeo del carrito era solo preventivo y pudo quedar obsoleto. Si falta stock
-    de un solo insumo, la transacción entera hace rollback y el pedido sigue
-    `recibida`, listo para reintentar o cancelar."""
+    Extraído de `_confirm_order_impl` (spec 028, T016) para que
+    `checkout_and_send` pueda reusar exactamente el mismo descuento de
+    inventario sin pasar por la exigencia de `OrderPaymentAttempt` confirmado
+    (spec 024, FR-017), que es exclusiva del comensal anónimo por QR: aquí el
+    cobro ya se resolvió en la misma llamada, vía `build_sale`, no vía un
+    intento de pago aparte."""
+    entries = [
+        (it, _item_options(db, it))
+        for it in order.items
+        if it.estado_cocina != "anulado"
+    ]
+    if not entries:
+        raise HTTPException(status.HTTP_409_CONFLICT, "El pedido no tiene ítems")
+
+    deduct_order_items(db, entries, user.id, reference_id=order.id)
+
+    order.status = "abierta"
+    order.version += 1
+    return order
+
+
+def _confirm_order_impl(db: Session, order_id: UUID, user: User) -> CustomerOrder:
+    """Lógica de `recibida` → `abierta` (descuento de inventario incluido), sin
+    `commit`/`rollback` propios — quien la invoque decide la frontera de la
+    transacción. Extraída de `confirm_order` (spec 026, FR-001/FR-002,
+    research.md Decisión 1) para que `confirm_cash_payment_attempt` y
+    `approve_payment_attempt` puedan ejecutarla dentro de su propia transacción
+    y así confirmar el pago y enviar el pedido a cocina de forma atómica: si
+    falta stock, el `rollback` del llamador revierte también la confirmación
+    del pago, sin dejar nada a medias.
+
+    Mismas consultas y mismo orden de validación que antes (spec 028, T016):
+    solo se movió el descuento propiamente dicho a `_deduct_and_open`, sin
+    tocar el resto de este cuerpo — el comportamiento observable de los tres
+    llamadores actuales (`confirm_order`, `approve_payment_attempt`,
+    `confirm_cash_payment_attempt`) no cambia."""
     order = db.execute(
         select(CustomerOrder)
         .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
@@ -327,19 +368,42 @@ def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
             f"Solo se confirman pedidos en 'recibida' (status={order.status})",
         )
 
+    # spec 024, FR-017: una orden solo avanza a comanda con un intento de pago
+    # confirmado. Se verifica antes de tocar inventario a propósito — si el
+    # pago no está confirmado, esta llamada no debe tener ningún efecto
+    # secundario (research.md spec 024, Decisión 5).
+    has_confirmed_payment = db.execute(
+        select(OrderPaymentAttempt.id).where(
+            OrderPaymentAttempt.order_id == order.id,
+            OrderPaymentAttempt.status == "confirmado",
+        )
+    ).scalar_one_or_none()
+    if has_confirmed_payment is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "La orden no tiene un pago confirmado"
+        )
+
+    return _deduct_and_open(db, order, user)
+
+
+def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
+    """`recibida` → `abierta`: el staff acepta el pedido que envió el comensal y
+    **aquí es donde se compromete el inventario**.
+
+    Es el único punto de descuento de los pedidos por QR (`_confirm_order_impl`).
+    La validación de stock es la real (con lock por fila, en orden canónico de id
+    para no deadlockear); el chequeo del carrito era solo preventivo y pudo quedar
+    obsoleto. Si falta stock de un solo insumo, la transacción entera hace
+    rollback y el pedido sigue `recibida`, listo para reintentar o cancelar.
+
+    Endpoint público (`POST /orders/{id}/confirm`) sin cambios de contrato. Desde
+    spec 026, el flujo normal de la Terminal de Mesas ya no lo invoca
+    manualmente — confirmar el pago (`confirm_cash_payment_attempt`/
+    `approve_payment_attempt`) dispara esta misma lógica automáticamente. Se
+    mantiene expuesto como vía de recuperación (spec 026, research.md
+    Decisión 2)."""
     try:
-        entries = [
-            (it, _item_options(db, it))
-            for it in order.items
-            if it.estado_cocina != "anulado"
-        ]
-        if not entries:
-            raise HTTPException(status.HTTP_409_CONFLICT, "El pedido no tiene ítems")
-
-        deduct_order_items(db, entries, user.id, reference_id=order.id)
-
-        order.status = "abierta"
-        order.version += 1
+        _confirm_order_impl(db, order_id, user)
         db.commit()
     except HTTPException:
         db.rollback()
@@ -350,6 +414,95 @@ def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
         raise
 
     return _reload_order(db, order_id)
+
+
+# ---------------------------------------------------------- Cobra y envía (T016)
+
+def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cashier: User) -> Sale:
+    """Cobra y envía a cocina, en una sola transacción, una comanda creada con
+    `hold_for_payment=True` (spec 028, T012/T013): el mostrador/mesero cobra
+    **antes** de mandar el pedido a preparar, así que aquí se funden en un
+    solo paso lo que en el flujo QR son dos pasos separados y con su propio
+    `OrderPaymentAttempt` — confirmar el pago y despachar a cocina
+    (`_confirm_order_impl`, spec 026 research.md Decisión 1).
+
+    Reusa el mismo motor de venta que `pay_order` (líneas, promociones/combos,
+    `build_sale`) y el mismo núcleo de descuento que `_confirm_order_impl`
+    (`_deduct_and_open`), sin su exigencia de `OrderPaymentAttempt` confirmado
+    —irrelevante aquí, porque el cobro ya ocurrió en esta misma llamada—.
+    Toma el lock de fila igual que `block_order`/`_confirm_order_impl`, y el
+    chequeo de `version` es la guarda de idempotencia contra un doble clic: un
+    segundo intento con la misma versión ya vencida es 409, sin crear una
+    segunda venta. Si falta stock al enviar a cocina, la transacción entera
+    revierte —tampoco queda registrada la venta— igual que si `build_sale`
+    hubiera fallado."""
+    try:
+        order = db.execute(
+            select(CustomerOrder)
+            .options(selectinload(CustomerOrder.items).selectinload(OrderItem.options))
+            .where(CustomerOrder.id == order_id)
+            .with_for_update(of=CustomerOrder)
+        ).scalar_one_or_none()
+        if order is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+        if order.status != "recibida":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Solo se cobra y envía pedidos en 'recibida' (status={order.status})",
+            )
+        if order.version != data.version:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={"error": "Conflicto de versión (la orden cambió)", "version_actual": order.version},
+            )
+
+        shift = ensure_open_shift(db, data.cash_shift_id)
+
+        now = datetime.now(timezone.utc)
+        lines = order_sale_lines(db, order.id)
+
+        # Descuento automático (RF-012), igual que `pay_order`: percent/fixed
+        # sobre las líneas sin combo, más el ahorro de los combos presentes.
+        promo_discount, promo_id = promotions.evaluate(db, promo_lines_for(db, lines), now)
+        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
+        combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
+        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+
+        sale = build_sale(
+            db,
+            lines=lines,
+            shift=shift,
+            cashier=cashier,
+            payments=data.payments,
+            discount=Decimal(data.discount) + promo_discount + combo_discount,
+            tax=data.tax, tip=data.tip,
+            customer_name=data.billing_customer_name or "Consumidor Final",
+            dining_table_id=order.dining_table_id,
+            table_session_id=order.table_session_id,
+            participant_id=order.participant_id,
+            customer_order_id=order.id,
+            promotion_id=final_promotion_id,
+        )
+
+        # Envía a cocina en la misma transacción: si falta stock, el
+        # `rollback` de abajo revierte también la venta recién construida —
+        # no queda ni cobrada ni a medio enviar.
+        _deduct_and_open(db, order, cashier)
+
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Error cobrando y enviando la orden a cocina")
+        raise
+
+    return db.execute(
+        select(Sale)
+        .options(selectinload(Sale.items), selectinload(Sale.payments))
+        .where(Sale.id == sale.id)
+    ).scalar_one()
 
 
 # ------------------------------------------------------------------ Cancelación
@@ -389,6 +542,13 @@ def cancel_order(
     if order.status in TERMINAL:
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"La orden ya es terminal (status={order.status})"
+        )
+    # Spec 029, hotfix #4: en los caminos QR/mostrador el pago NO mueve
+    # `status` a "pagada" (research.md D2) — sin este chequeo, este endpoint
+    # podía cancelar un pedido ya cobrado y dejar su `Sale` huérfana.
+    if order_has_sale(db, order_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "El pedido ya fue pagado y no puede rechazarse"
         )
 
     deducted = order.status not in _NOT_DEDUCTED
@@ -565,3 +725,242 @@ def release_table(
 
     db.refresh(table)
     return table
+
+
+# ------------------------------------------------------- Intentos de pago (spec 024)
+# Revisión del cajero: aprobar/rechazar comprobante, confirmar efectivo (US2/US3).
+# `confirm_order` (arriba) es el único punto que hace avanzar la orden a comanda;
+# estas tres funciones solo resuelven el intento, nunca tocan `CustomerOrder.status`
+# ni descuentan inventario (contracts/cashier-payment-review.md).
+
+def _order_total(db: Session, order_id: UUID) -> Decimal:
+    """Total cobrable de la orden (líneas no anuladas), mismo criterio que
+    `compute_bill` — usado para validar FR-010a (monto recibido >= total)."""
+    items = db.execute(
+        select(OrderItem).where(
+            OrderItem.order_id == order_id, OrderItem.estado_cocina != "anulado"
+        )
+    ).scalars().all()
+    return sum((Decimal(it.unit_price) * it.quantity for it in items), start=Decimal("0"))
+
+
+def _load_pending_attempt_for_update(db: Session, attempt_id: UUID) -> OrderPaymentAttempt:
+    """Bloqueo pesimista sobre el intento, solo si sigue `pendiente` — mismo
+    patrón que `confirm_order` usa sobre la orden (research.md spec 024,
+    Decisión 9). Garantiza FR-018/SC-007: una segunda resolución casi
+    simultánea del mismo intento no tiene efecto."""
+    attempt = db.execute(
+        select(OrderPaymentAttempt)
+        .where(OrderPaymentAttempt.id == attempt_id)
+        .with_for_update(of=OrderPaymentAttempt)
+    ).scalar_one_or_none()
+    if attempt is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Intento de pago no encontrado")
+    if attempt.status != "pendiente":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"El intento de pago ya fue resuelto (status={attempt.status})",
+        )
+    return attempt
+
+
+def list_payment_attempts(db: Session, order_id: UUID) -> list[OrderPaymentAttempt]:
+    """Historial completo de intentos de una orden, para cajero/back-office
+    (FR-016) — incluye rechazados, con su motivo."""
+    get_or_404(db, CustomerOrder, order_id, "Order not found")
+    return db.execute(
+        select(OrderPaymentAttempt)
+        .options(selectinload(OrderPaymentAttempt.payment_method))
+        .where(OrderPaymentAttempt.order_id == order_id)
+        .order_by(OrderPaymentAttempt.created_at)
+    ).scalars().all()
+
+
+def approve_payment_attempt(
+    db: Session, attempt_id: UUID, cash_shift_id: UUID, user: User
+) -> OrderPaymentAttempt:
+    """Aprueba un comprobante de transferencia (US2, Acceptance Scenario 4).
+
+    Spec 026, FR-001: aprobar el comprobante confirma el intento de pago y, en
+    la misma transacción, envía el pedido a cocina (`_confirm_order_impl`) — si
+    falta stock, ninguna de las dos cosas queda registrada (FR-002,
+    research.md Decisión 1).
+
+    Spec 028: además genera la venta/factura en esta misma transacción (antes
+    solo se generaba al "Cobrar y cerrar mesa" — spec 010 `close_session` —,
+    botón que esta spec retira del flujo QR; sin esto, un pedido QR nunca
+    llegaba a tener una `Sale`/`Invoice`, y "Reimprimir Factura POS" y
+    "Liberar Mesa" quedaban permanentemente rotos para ese pedido). Reusa
+    exactamente el mismo motor de venta que `pay_order`/`checkout_and_send`
+    (líneas, promociones/combos, `build_sale`) — un único pago por el total
+    exacto de la orden, con el método del comprobante ya aprobado."""
+    try:
+        attempt = _load_pending_attempt_for_update(db, attempt_id)
+        method = get_or_404(db, PaymentMethod, attempt.payment_method_id, "Payment method not found")
+        if method.is_cash:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Un método en efectivo se confirma con confirm-cash, no con approve",
+            )
+        if not attempt.receipt_file_url:
+            raise HTTPException(status.HTTP_409_CONFLICT, "El intento no tiene comprobante todavía")
+
+        shift = ensure_open_shift(db, cash_shift_id)
+
+        attempt.status = "confirmado"
+        attempt.resolved_by_user_id = user.id
+        attempt.resolved_at = utc_now()
+        # La sesión tiene autoflush=False (ver `with_db`); sin este flush,
+        # el chequeo `has_confirmed_payment` de `_confirm_order_impl` lee el
+        # `status` todavía persistido ("pendiente") y siempre rechaza con
+        # 409, aunque el intento ya esté confirmado en memoria.
+        db.flush()
+        order = _confirm_order_impl(db, attempt.order_id, user)
+
+        now = utc_now()
+        lines = order_sale_lines(db, order.id)
+        promo_discount, promo_id = promotions.evaluate(db, promo_lines_for(db, lines), now)
+        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
+        combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
+        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+        total = sum((line.line_total for line in lines), Decimal("0")) - promo_discount - combo_discount
+
+        build_sale(
+            db,
+            lines=lines,
+            shift=shift,
+            cashier=user,
+            payments=[PaymentIn(payment_method_id=attempt.payment_method_id, amount=total)],
+            discount=promo_discount + combo_discount,
+            customer_name=order.customer_name,
+            dining_table_id=order.dining_table_id,
+            table_session_id=order.table_session_id,
+            participant_id=order.participant_id,
+            customer_order_id=order.id,
+            promotion_id=final_promotion_id,
+        )
+
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Error aprobando comprobante de pago")
+        raise
+
+    db.refresh(attempt)
+    return attempt
+
+
+def reject_payment_attempt(
+    db: Session, attempt_id: UUID, reason: str, user: User
+) -> OrderPaymentAttempt:
+    """Rechaza un comprobante con motivo obligatorio (FR-014, US2 Acceptance
+    Scenario 5-6). El motivo queda visible solo para cajero/back-office
+    (Clarification 3) — el router del comensal nunca lo serializa."""
+    try:
+        attempt = _load_pending_attempt_for_update(db, attempt_id)
+        method = get_or_404(db, PaymentMethod, attempt.payment_method_id, "Payment method not found")
+        if method.is_cash:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Un método en efectivo se confirma con confirm-cash, no se rechaza",
+            )
+
+        attempt.status = "rechazado"
+        attempt.rejection_reason = reason
+        attempt.resolved_by_user_id = user.id
+        attempt.resolved_at = utc_now()
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Error rechazando comprobante de pago")
+        raise
+
+    db.refresh(attempt)
+    return attempt
+
+
+def confirm_cash_payment_attempt(
+    db: Session, attempt_id: UUID, amount_received: Decimal, cash_shift_id: UUID, user: User
+) -> OrderPaymentAttempt:
+    """Confirma un pago en efectivo y calcula el cambio (FR-009/FR-010,
+    US3). FR-010a: impide confirmar si `amount_received < total_orden`.
+
+    Spec 026, FR-001: confirmar el efectivo confirma el intento de pago y, en
+    la misma transacción, envía el pedido a cocina (`_confirm_order_impl`) — si
+    falta stock, ninguna de las dos cosas queda registrada (FR-002,
+    research.md Decisión 1).
+
+    Spec 028: además genera la venta/factura en esta misma transacción (mismo
+    motivo que `approve_payment_attempt` — ver su docstring). El monto
+    recibido en efectivo se manda tal cual a `build_sale`, que calcula
+    `change_given` con el mismo criterio (`pagado - total`) que ya usa
+    `attempt.change_amount` — ambos coinciden por construcción."""
+    try:
+        attempt = _load_pending_attempt_for_update(db, attempt_id)
+        method = get_or_404(db, PaymentMethod, attempt.payment_method_id, "Payment method not found")
+        if not method.is_cash:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Un método de transferencia se aprueba/rechaza, no se confirma con confirm-cash",
+            )
+
+        total = _order_total(db, attempt.order_id)
+        if amount_received < total:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"El monto recibido ({amount_received}) es menor al total de la orden ({total})",
+            )
+
+        shift = ensure_open_shift(db, cash_shift_id)
+
+        attempt.amount_received = amount_received
+        attempt.change_amount = amount_received - total
+        attempt.status = "confirmado"
+        attempt.resolved_by_user_id = user.id
+        attempt.resolved_at = utc_now()
+        # Mismo motivo que en `approve_payment_attempt`: autoflush=False no
+        # deja ver este `UPDATE` a la `SELECT` de `_confirm_order_impl` sin
+        # este flush explícito (mismo patrón que ya usan
+        # `table_sessions/service.py` y `sales/service.py`).
+        db.flush()
+        order = _confirm_order_impl(db, attempt.order_id, user)
+
+        now = utc_now()
+        lines = order_sale_lines(db, order.id)
+        promo_discount, promo_id = promotions.evaluate(db, promo_lines_for(db, lines), now)
+        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
+        combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
+        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+
+        build_sale(
+            db,
+            lines=lines,
+            shift=shift,
+            cashier=user,
+            payments=[PaymentIn(payment_method_id=attempt.payment_method_id, amount=amount_received)],
+            discount=promo_discount + combo_discount,
+            customer_name=order.customer_name,
+            dining_table_id=order.dining_table_id,
+            table_session_id=order.table_session_id,
+            participant_id=order.participant_id,
+            customer_order_id=order.id,
+            promotion_id=final_promotion_id,
+        )
+
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Error confirmando pago en efectivo")
+        raise
+
+    db.refresh(attempt)
+    return attempt

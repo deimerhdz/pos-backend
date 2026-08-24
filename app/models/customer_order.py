@@ -1,6 +1,8 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy import String, Integer, ForeignKey, DateTime, func, CheckConstraint
+from sqlalchemy import (
+    String, Integer, ForeignKey, DateTime, func, CheckConstraint, Index, text,
+)
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import Optional, List
 from datetime import datetime
@@ -9,6 +11,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .order_item import OrderItem
     from .order_cancel_log import OrderCancelLog
+    from .order_payment_attempt import OrderPaymentAttempt
 
 
 class CustomerOrder(UUIDPrimaryKeyMixin, Base):
@@ -74,6 +77,23 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
         back_populates="order", cascade="all, delete-orphan"
     )
 
+    # Historial completo de intentos de pago (spec 024, FR-016) — nunca se
+    # borran, solo lectura desde aquí.
+    payment_attempts: Mapped[List["OrderPaymentAttempt"]] = relationship(
+        back_populates="order"
+    )
+
+    @property
+    def current_payment_attempt(self) -> Optional["OrderPaymentAttempt"]:
+        """El intento de pago más reciente (o `None` si no hay ninguno) —
+        base de `OrderResponse.current_payment_attempt` (spec 024). No es lo
+        mismo que "el confirmado": mientras no exista uno con
+        `status == 'confirmado'`, la orden sigue pendiente de pago para el
+        comensal, sin importar cuántos intentos rechazados haya antes."""
+        if not self.payment_attempts:
+            return None
+        return max(self.payment_attempts, key=lambda a: a.created_at)
+
     __table_args__ = (
         CheckConstraint(
             "channel IN ('qr', 'counter', 'waiter')", name="ck_customer_order_channel"
@@ -85,5 +105,17 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
         # Ya NO hay índice único de "una orden abierta por mesa": la mesa puede
         # tener varios pedidos simultáneos (uno por comensal, o varias rondas del
         # mismo). La agrupación para cobrar la da `table_session_id`.
+        #
+        # A lo sumo una orden activa por comensal (spec 025, FR-013) — mismo
+        # predicado que `_NON_TERMINAL_ORDER_STATUSES`
+        # (`app/api/v1/cart/service.py`). Postgres no considera dos NULL
+        # iguales: las órdenes de mostrador/mesero (participant_id NULL) no
+        # se ven afectadas.
+        Index(
+            "idx_active_order_per_participant",
+            "participant_id",
+            unique=True,
+            postgresql_where=text("status NOT IN ('pagada', 'cancelada')"),
+        ),
         {"schema": "tenant"},
     )

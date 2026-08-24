@@ -1,220 +1,29 @@
-"""Helpers de línea compartidos entre carrito (Fase 3) y consolidación (Fase 4):
-snapshot de precio, validación de la selección de opciones y chequeo preventivo de
-disponibilidad contra stock único.
+"""Fachada de `app.catalog_engine` (specs/014-extraccion-motor-catalogo,
+Historia 3). El motor real vive en `app.catalog_engine`; este módulo
+sobrevive solo porque `router.py`/`service.py` de este mismo directorio, y
+los siete ficheros consumidores de producción, siguen importando desde esta
+ruta — ver contracts/module-api.md Contrato B.
 
-El precio es un snapshot (variante + extras de opción). La disponibilidad NO
-reserva ni bloquea (a diferencia de `record_movement` en inventory/stock.py, que
-sí bloquea y descuenta en la venta/consolidación); es un chequeo best-effort de
-UX que puede quedar obsoleto para cuando se consolide.
-
-El cálculo de qué consume una línea vive en `consumption_plan.py`; aquí solo se
-reexporta `required_consumption` para no romper los imports existentes.
+Sin lógica propia de cálculo, validación o consulta (FR-008): cada símbolo
+es un reexport nombrado, nunca una función wrapper.
 """
 from __future__ import annotations
 
-from collections import defaultdict
-from decimal import Decimal
-from typing import Sequence
-from uuid import UUID
-
-from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from app.core.config import settings
-from app.core.crud import get_or_404
-from app.models.option import Option
-from app.models.option_group import OptionGroup
-from app.models.product_variant import ProductVariant
-from app.models.inventory_item import InventoryItem
-from app.models.variant_option_group import VariantOptionGroup
-from app.api.v1.catalog.consumption_plan import (  # noqa: F401  (reexport)
-    ConsumptionLine,
-    load_variant_groups,
-    plan_line_consumption,
-    required_consumption,
+from app.catalog_engine import (
+    _exige_maximo as _exige_maximo,
+    check_availability as check_availability,
+    compute_line_price as compute_line_price,
+    grupos_que_descuentan as grupos_que_descuentan,
+    load_valid_options as load_valid_options,
+    validate_option_selection as validate_option_selection,
 )
 
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-def load_valid_options(
-    db: Session, option_ids: list[UUID], *, variant: ProductVariant | None = None
-) -> list[Option]:
-    """Carga las opciones (dedup) validando existencia y que estén activas.
-
-    Pasar `variant` valida además la selección contra los grupos del producto (ver
-    `validate_option_selection`). Es opcional solo por compatibilidad con los pocos
-    llamadores que aún no tienen la variante a mano; **pasarla siempre que se pueda**.
-    """
-    seen: set[UUID] = set()
-    options: list[Option] = []
-    for opt_id in option_ids:
-        if opt_id in seen:
-            continue
-        seen.add(opt_id)
-        option = get_or_404(db, Option, opt_id, f"Option {opt_id} not found")
-        if not option.active:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY, f"Opción inactiva: {opt_id}"
-            )
-        options.append(option)
-    if variant is not None:
-        validate_option_selection(db, variant, options)
-    return options
-
-
-def grupos_que_descuentan(db: Session, links: Sequence[VariantOptionGroup]) -> set[UUID]:
-    """De estos grupos, cuáles mueven inventario al elegir una opción.
-
-    Hay **dos** vías y contar solo una deja fuera la mitad del catálogo:
-
-    - `variant_option_groups.quantity_per_option`: el tamaño reparte una cantidad
-      por cada opción elegida (la copa grande, 120 g de cada sabor);
-    - `options.item_quantity`: la opción descuenta lo suyo en todo el catálogo.
-
-    Basta con que la opción descuente por su cuenta para que el grupo importe:
-    elegir menos opciones descuenta menos, con independencia de dónde esté
-    escrita la cantidad.
-    """
-    gids = {l.option_group_id for l in links}
-    if not gids:
-        return set()
-    por_grupo = {l.option_group_id for l in links if l.quantity_per_option > 0}
-    por_opcion = set(db.execute(
-        select(Option.option_group_id)
-        .where(Option.option_group_id.in_(gids), Option.item_quantity > 0)
-        .distinct()
-    ).scalars().all())
-    return por_grupo | por_opcion
-
-
-def _exige_maximo(gid: UUID, lo: int, consumen: set[UUID]) -> bool:
-    """¿Este grupo obliga a elegir el máximo, y no solo el mínimo?
-
-    Solo si descuenta inventario **y** es obligatorio. Un grupo así reparte una
-    cantidad física fija entre las opciones elegidas: los tres sabores de un
-    helado de tres bolas. Elegir uno solo sirve tres bolas y descuenta una.
-
-    Un grupo que descuenta pero es opcional (`min_select = 0`) se queda como
-    está: ahí no elegir es una respuesta válida y el consumo cuadra con lo que
-    se sirve.
-    """
-    return lo > 0 and gid in consumen
-
-
-def validate_option_selection(
-    db: Session, variant: ProductVariant, options: Sequence[Option]
-) -> None:
-    """Comprueba que la selección respeta los grupos que ofrece **esta variante** y sus
-    `min_select`/`max_select`.
-
-    Hasta hace poco esto no se validaba en ningún camino de pedido (solo el frontend), y
-    era un fallo de UX tolerable. **Con consumo por opción deja de serlo**: lo que se
-    descuenta es `nº de opciones elegidas × quantity_per_option`, así que aceptar cinco
-    opciones en un grupo `max_select=1` descuenta cinco veces el helado.
-
-    Por eso el rodaje es asimétrico: `STRICT_OPTION_SELECTION` gobierna el resto del
-    catálogo, pero **los grupos que descuentan se validan siempre**. Ahí no es
-    cosmético, es inventario.
-
-    Y por lo mismo un grupo que descuenta y es obligatorio exige el **máximo**, no el
-    mínimo (ver `_exige_maximo`): el error simétrico al de arriba es elegir un sabor
-    para un helado de tres bolas, que sirve tres y descuenta una.
-
-    Todo sale de la misma tabla y del mismo nivel (la variante). Antes los bounds venían
-    del producto y el consumo de la variante, así que un tamaño podía exigir un número
-    de sabores pensado para otro.
-    """
-    links = load_variant_groups(db, variant.id)
-    bounds = {l.option_group_id: (l.min_select, l.max_select) for l in links}
-    consumen = grupos_que_descuentan(db, links)
-
-    chosen: dict[UUID, int] = defaultdict(int)
-    for option in options:
-        chosen[option.option_group_id] += 1
-
-    problems: list[tuple[UUID | None, str]] = []
-
-    for gid, count in chosen.items():
-        if gid not in bounds:
-            problems.append((gid, "no está disponible para esta presentación"))
-            continue
-        lo, hi = bounds[gid]
-        if _exige_maximo(gid, lo, consumen):
-            if count != hi:
-                problems.append(
-                    (gid, f"exige exactamente {hi} opción(es), se enviaron {count}")
-                )
-        elif count > hi:
-            problems.append((gid, f"admite como máximo {hi} opción(es), se enviaron {count}"))
-        elif count < lo:
-            problems.append((gid, f"exige al menos {lo} opción(es), se enviaron {count}"))
-
-    for gid, (lo, hi) in bounds.items():
-        if lo > 0 and gid not in chosen:
-            faltan = hi if _exige_maximo(gid, lo, consumen) else lo
-            problems.append((gid, f"es obligatorio: elige {faltan} opción(es)"))
-
-    if not problems:
-        return
-
-    # Un problema en un grupo que descuenta inventario es siempre bloqueante.
-    blocking = [p for p in problems if p[0] in consumen]
-    if not blocking and not settings.STRICT_OPTION_SELECTION:
-        logger.warning(
-            "Selección de opciones inválida (variante %s), tolerada por "
-            "STRICT_OPTION_SELECTION=False: %s",
-            variant.id, "; ".join(msg for _gid, msg in problems),
-        )
-        return
-
-    relevant = blocking or problems
-    names = {
-        gid: name for gid, name in db.execute(
-            select(OptionGroup.id, OptionGroup.name).where(
-                OptionGroup.id.in_([gid for gid, _ in relevant if gid is not None])
-            )
-        ).all()
-    }
-    detalle = "; ".join(
-        f"«{names.get(gid, 'grupo')}» {msg}" for gid, msg in relevant
-    )
-    raise HTTPException(
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail={"error": f"Selección de opciones inválida: {detalle}", "grupos": detalle},
-    )
-
-
-def compute_line_price(variant: ProductVariant, options: list[Option]) -> Decimal:
-    """Snapshot de precio de una línea: precio de la variante + extras de opción."""
-    price = Decimal(variant.price)
-    for option in options:
-        price += Decimal(option.extra_price)
-    return price
-
-
-def check_availability(
-    db: Session, required: dict[UUID, Decimal], *, extra_context: str = ""
-) -> None:
-    """Chequeo preventivo (sin lock ni reserva): rechaza con 409 si algún insumo
-    no tiene `current_stock` suficiente para el consumo `required` agregado."""
-    for item_id, need in required.items():
-        if need <= 0:
-            continue
-        item = db.get(InventoryItem, item_id)
-        if item is None:
-            continue
-        if Decimal(item.current_stock) < need:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                detail={
-                    "error": "Stock insuficiente",
-                    "insumo": item.name,
-                    "disponible": str(item.current_stock),
-                    "requerido": str(need),
-                    "contexto": extra_context,
-                },
-            )
+# Reexport histórico (FR-009): `cart/service.py:31-36` depende de importar
+# estos símbolos desde `line_pricing`, aunque su definición real vive en
+# `consumption_plan.py` / `app.catalog_engine`.
+from app.catalog_engine import (
+    ConsumptionLine as ConsumptionLine,
+    load_variant_groups as load_variant_groups,
+    plan_line_consumption as plan_line_consumption,
+    required_consumption as required_consumption,
+)

@@ -106,3 +106,63 @@ class CartResponse(BaseModel):
 class MyOrderCancelIn(BaseModel):
     motivo: str = Field(..., min_length=1, max_length=500,
                         examples=["Me equivoqué de sabor"])
+
+
+# ---------- Pagos del comensal (spec 024) ----------
+class DinerPaymentMethod(BaseModel):
+    """Método de pago tal como lo ve el comensal — solo los que el tenant
+    tiene `active` (FR-004); nunca expone el flag `active` en sí."""
+    id: UUID
+    name: str
+    type: str
+    is_cash: bool
+    payment_info: dict[str, str] | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaymentAttemptCreateIn(BaseModel):
+    payment_method_id: UUID
+
+
+class DinerPaymentAttempt(BaseModel):
+    """Intento de pago tal como lo ve el comensal — **nunca** incluye
+    `rejection_reason` (Clarification 3)."""
+    id: UUID
+    order_id: UUID
+    payment_method_id: UUID
+    status: str
+    receipt_file_url: str | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReceiptPresignIn(BaseModel):
+    content_type: str = Field(..., min_length=1, max_length=100, examples=["image/jpeg"])
+
+
+class ReceiptPresignOut(BaseModel):
+    upload_url: str
+    key: str
+    public_url: str
+    expires_in: int
+
+
+class ReceiptAttachIn(BaseModel):
+    file_url: str = Field(..., min_length=1, max_length=500)
+
+
+# ---------- Revisión y pago antes de enviar (spec 025) ----------
+class SubmitCartIn(BaseModel):
+    """Cuerpo de `POST /cart/submit` — el pedido nace junto con su primer
+    intento de pago (contracts/submit-cart-with-payment.md)."""
+    payment_method_id: UUID
+    receipt_file_url: str | None = Field(None, max_length=500)
+
+
+class PaymentReceiptPresignIn(ReceiptPresignIn):
+    """Mismo shape que `ReceiptPresignIn` (`content_type`), sin campos
+    nuevos — reexportada con su propio nombre porque alimenta un endpoint
+    distinto (`POST /cart/payment-receipt/presign`, no ligado a ningún
+    `attempt_id`, contracts/payment-receipt-presign.md)."""
