@@ -1,13 +1,16 @@
 """Reportes: consultas de agregación de solo lectura sobre las ventas cerradas
 (`sales.status = 'paid'`), inventario y rentabilidad. Sin tablas propias.
 
-La ventana temporal filtra por `sales.sold_at`: [date_from 00:00, date_to+1d)."""
-from datetime import date, timedelta
+La ventana temporal filtra por `sales.sold_at`: [medianoche local de date_from,
+medianoche local del día siguiente a date_to) — zona horaria del tenant, no
+UTC (spec 030, FR-004)."""
+from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import Date, select, func
 from sqlalchemy.orm import Session
 
+from app.core.timezone import local_day_bounds_utc, resolve_timezone
 from app.models.sale import Sale, SaleItem
 from app.models.product_variant import ProductVariant
 from app.models.product import Product
@@ -18,17 +21,20 @@ from app.models.variant_option_group import VariantOptionGroup
 from app.models.inventory_item import InventoryItem
 
 
-def _paid_sales_filter(date_from: date | None, date_to: date | None):
+def _paid_sales_filter(tenant, date_from: date | None, date_to: date | None):
     conds = [Sale.status == "paid"]
+    tz = resolve_timezone(tenant)
     if date_from is not None:
-        conds.append(Sale.sold_at >= date_from)
+        start, _ = local_day_bounds_utc(date_from, tz)
+        conds.append(Sale.sold_at >= start)
     if date_to is not None:
-        conds.append(Sale.sold_at < date_to + timedelta(days=1))
+        _, end = local_day_bounds_utc(date_to, tz)
+        conds.append(Sale.sold_at < end)
     return conds
 
 
-def sales_report(db: Session, date_from, date_to, group_by: str = "day") -> dict:
-    conds = _paid_sales_filter(date_from, date_to)
+def sales_report(db: Session, tenant, date_from, date_to, group_by: str = "day") -> dict:
+    conds = _paid_sales_filter(tenant, date_from, date_to)
     total, count = db.execute(
         select(func.coalesce(func.sum(Sale.total), 0), func.count(Sale.id)).where(*conds)
     ).one()
@@ -36,10 +42,16 @@ def sales_report(db: Session, date_from, date_to, group_by: str = "day") -> dict
     # Un rango anual por día son 365 puntos, que ninguna gráfica dibuja. Con
     # `month` el bucket es el primer día del mes: el consumidor sigue recibiendo
     # fechas y no tiene que aprender un formato nuevo.
+    #
+    # `Sale.sold_at` es UTC sin marca de zona: el doble `AT TIME ZONE`
+    # reinterpreta el valor como un instante en la zona del tenant antes de
+    # truncar, para que el bucket agrupe por día/mes de negocio, no UTC.
+    tz_name = resolve_timezone(tenant).key
+    local_sold_at = func.timezone(tz_name, func.timezone("UTC", Sale.sold_at))
     bucket = (
-        func.cast(func.date_trunc("month", Sale.sold_at), Date)
+        func.cast(func.date_trunc("month", local_sold_at), Date)
         if group_by == "month"
-        else func.date(Sale.sold_at)
+        else func.date(local_sold_at)
     )
     by_day = [
         {"day": d, "total": Decimal(t), "count": c}
@@ -56,8 +68,8 @@ def sales_report(db: Session, date_from, date_to, group_by: str = "day") -> dict
     }
 
 
-def products_report(db: Session, date_from, date_to, limit: int | None) -> list[dict]:
-    conds = _paid_sales_filter(date_from, date_to)
+def products_report(db: Session, tenant, date_from, date_to, limit: int | None) -> list[dict]:
+    conds = _paid_sales_filter(tenant, date_from, date_to)
     stmt = (
         select(
             SaleItem.product_variant_id,
@@ -77,8 +89,8 @@ def products_report(db: Session, date_from, date_to, limit: int | None) -> list[
     ]
 
 
-def categories_report(db: Session, date_from, date_to) -> list[dict]:
-    conds = _paid_sales_filter(date_from, date_to)
+def categories_report(db: Session, tenant, date_from, date_to) -> list[dict]:
+    conds = _paid_sales_filter(tenant, date_from, date_to)
     rows = db.execute(
         select(
             Category.id, Category.name,
@@ -99,8 +111,8 @@ def categories_report(db: Session, date_from, date_to) -> list[dict]:
     ]
 
 
-def cashiers_report(db: Session, date_from, date_to) -> list[dict]:
-    conds = _paid_sales_filter(date_from, date_to)
+def cashiers_report(db: Session, tenant, date_from, date_to) -> list[dict]:
+    conds = _paid_sales_filter(tenant, date_from, date_to)
     rows = db.execute(
         select(Sale.user_id, func.max(Sale.user_name), func.count(Sale.id), func.sum(Sale.total))
         .where(*conds).group_by(Sale.user_id).order_by(func.sum(Sale.total).desc())
@@ -200,8 +212,8 @@ def _variant_unit_cost_map(db: Session) -> dict:
     return out
 
 
-def profitability_report(db: Session, date_from, date_to) -> dict:
-    conds = _paid_sales_filter(date_from, date_to)
+def profitability_report(db: Session, tenant, date_from, date_to) -> dict:
+    conds = _paid_sales_filter(tenant, date_from, date_to)
     cost_map = _variant_unit_cost_map(db)
     # Filas de venta con su categoría.
     rows = db.execute(

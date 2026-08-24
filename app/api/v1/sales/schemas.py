@@ -1,9 +1,10 @@
 from enum import Enum
 from uuid import UUID
-from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.core.timezone import UtcDatetime
 
 
 # ---------- Métodos de pago ----------
@@ -96,6 +97,7 @@ class PaymentResponse(BaseModel):
     payment_method_id: UUID
     amount: Decimal
     reference: str | None = None
+    paid_at: UtcDatetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -131,7 +133,7 @@ class SaleResponse(BaseModel):
     paid_amount: Decimal | None = None
     change_given: Decimal | None = None
     status: str
-    sold_at: datetime
+    sold_at: UtcDatetime
     items: list[SaleItemResponse] = Field(default_factory=list)
     payments: list[PaymentResponse] = Field(default_factory=list)
     # Para reconstruir el ticket completo fuera del momento del cobro.

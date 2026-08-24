@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.audit import record_audit
 from app.core.crud import get_or_404
 from app.core.models import User
+from app.core.timezone import utc_now
 from app.models.dining_table import DiningTable
 from app.models.table_session import TableSession
 from app.models.session_participant import SessionParticipant
@@ -808,7 +809,7 @@ def approve_payment_attempt(
 
         attempt.status = "confirmado"
         attempt.resolved_by_user_id = user.id
-        attempt.resolved_at = datetime.now(timezone.utc)
+        attempt.resolved_at = utc_now()
         # La sesión tiene autoflush=False (ver `with_db`); sin este flush,
         # el chequeo `has_confirmed_payment` de `_confirm_order_impl` lee el
         # `status` todavía persistido ("pendiente") y siempre rechaza con
@@ -816,7 +817,7 @@ def approve_payment_attempt(
         db.flush()
         order = _confirm_order_impl(db, attempt.order_id, user)
 
-        now = datetime.now(timezone.utc)
+        now = utc_now()
         lines = order_sale_lines(db, order.id)
         promo_discount, promo_id = promotions.evaluate(db, promo_lines_for(db, lines), now)
         combo_discount = promotions.combo_discount_for_lines(db, lines, now)
@@ -870,7 +871,7 @@ def reject_payment_attempt(
         attempt.status = "rechazado"
         attempt.rejection_reason = reason
         attempt.resolved_by_user_id = user.id
-        attempt.resolved_at = datetime.now(timezone.utc)
+        attempt.resolved_at = utc_now()
         db.commit()
     except HTTPException:
         db.rollback()
@@ -922,7 +923,7 @@ def confirm_cash_payment_attempt(
         attempt.change_amount = amount_received - total
         attempt.status = "confirmado"
         attempt.resolved_by_user_id = user.id
-        attempt.resolved_at = datetime.now(timezone.utc)
+        attempt.resolved_at = utc_now()
         # Mismo motivo que en `approve_payment_attempt`: autoflush=False no
         # deja ver este `UPDATE` a la `SELECT` de `_confirm_order_impl` sin
         # este flush explícito (mismo patrón que ya usan
@@ -930,7 +931,7 @@ def confirm_cash_payment_attempt(
         db.flush()
         order = _confirm_order_impl(db, attempt.order_id, user)
 
-        now = datetime.now(timezone.utc)
+        now = utc_now()
         lines = order_sale_lines(db, order.id)
         promo_discount, promo_id = promotions.evaluate(db, promo_lines_for(db, lines), now)
         combo_discount = promotions.combo_discount_for_lines(db, lines, now)

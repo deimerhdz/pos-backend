@@ -79,8 +79,10 @@ def list_sales(
     invoice_reference: str | None = Query(None, description="Búsqueda por referencia de factura (prefijo+número)."),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_tenant),
 ):
     stmt = service.list_sales_query(
+        tenant=tenant,
         status=status,
         date_from=date_from,
         date_to=date_to,

@@ -430,11 +430,13 @@ def make_payment_attempt(
 
 # --------------------------------------------------------- Dobles de Tenant/User
 
-def make_tenant_double(*, id: int = 1, invoice_prefix: str = "") -> SimpleNamespace:
+def make_tenant_double(
+    *, id: int = 1, invoice_prefix: str = "", timezone: str = "America/Bogota"
+) -> SimpleNamespace:
     """No es el modelo `Tenant` real (schema `shared`, fuera de las tablas
-    creadas por este fixture) — bastan los dos atributos que las 23 funciones
-    podrían leer de él."""
-    return SimpleNamespace(id=id, invoice_prefix=invoice_prefix)
+    creadas por este fixture) — bastan los atributos que las funciones bajo
+    prueba podrían leer de él (`timezone`: spec 030, `resolve_timezone`)."""
+    return SimpleNamespace(id=id, invoice_prefix=invoice_prefix, timezone=timezone)
 
 
 def make_user_double(*, id=None, name: str = "Cajero de prueba") -> SimpleNamespace:

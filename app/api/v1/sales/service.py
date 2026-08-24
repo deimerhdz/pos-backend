@@ -2,7 +2,7 @@
 la liga al turno de caja y descuenta inventario (receta + opciones). Dueño de la
 transacción."""
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -13,6 +13,7 @@ from sqlalchemy.sql import Select
 
 from app.core.crud import ensure_unique, get_or_404
 from app.core.models import User
+from app.core.timezone import local_day_bounds_utc, resolve_timezone
 from app.models.invoice import Invoice
 from app.models.product_variant import ProductVariant
 from app.models.product import Product
@@ -185,12 +186,17 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
 
 
 def list_sales_query(
+    tenant,
     status: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     invoice_reference: str | None = None,
 ) -> Select:
-    """Construye el `Select` de ventas para el listado paginado (GET /sales)."""
+    """Construye el `Select` de ventas para el listado paginado (GET /sales).
+
+    `date_from`/`date_to` se interpretan como día calendario en la zona
+    horaria del tenant, no medianoche UTC (spec 030, FR-004,
+    contracts/date-range-filters.md)."""
     stmt = (
         select(Sale)
         .options(
@@ -203,10 +209,14 @@ def list_sales_query(
     )
     if status:
         stmt = stmt.where(Sale.status == status)
-    if date_from:
-        stmt = stmt.where(Sale.sold_at >= date_from)
-    if date_to:
-        stmt = stmt.where(Sale.sold_at < date_to + timedelta(days=1))
+    if date_from or date_to:
+        tz = resolve_timezone(tenant)
+        if date_from:
+            start, _ = local_day_bounds_utc(date_from, tz)
+            stmt = stmt.where(Sale.sold_at >= start)
+        if date_to:
+            _, end = local_day_bounds_utc(date_to, tz)
+            stmt = stmt.where(Sale.sold_at < end)
     if invoice_reference:
         # No hay columna "referencia": se reconstruye prefix + número (6 dígitos)
         # tal como se imprime en el ticket (ver Invoice.full_number).

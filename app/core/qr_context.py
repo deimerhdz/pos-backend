@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Iterator
 from uuid import UUID
 
@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.db import resolve_tenant_by_id, with_db
 from app.core.models import Tenant
+from app.core.timezone import utc_now
 from app.core.qr_token import (
     QrTokenError,
     SessionExpiredError,
@@ -82,7 +83,7 @@ def close_participant(db: Session, participant) -> None:
 
     participant.status = "closed"
     if participant.closed_at is None:
-        participant.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        participant.closed_at = utc_now().replace(tzinfo=None)
     for cart in db.execute(
         select(Cart).where(
             Cart.participant_id == participant.id, Cart.status == "abierto"
@@ -176,7 +177,7 @@ def open_session_context(token: str, *, touch: bool = True) -> Iterator[SessionC
                 detail="La mesa ya no tiene esta sesión abierta. Vuelve a escanear el QR.",
             )
 
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = utc_now().replace(tzinfo=None)
 
         if participant.expires_at is not None and participant.expires_at <= now:
             _abandon_expired(db, participant)

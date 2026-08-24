@@ -1,4 +1,3 @@
-from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -11,6 +10,7 @@ from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User
 from app.core.pagination import Page
+from app.core.timezone import utc_now
 from app.models.cash_register import CashRegister
 from app.models.cash_shift import CashShift
 from app.models.cash_movement import CashMovement
@@ -118,7 +118,7 @@ def close_shift(shift_id: UUID, body: ShiftClose, db: Session = Depends(get_db),
 
     shift.close_note = body.close_note
     shift.status = "closed"
-    shift.closed_at = datetime.now(timezone.utc)
+    shift.closed_at = utc_now()
     db.commit()
     db.refresh(shift)
     return shift

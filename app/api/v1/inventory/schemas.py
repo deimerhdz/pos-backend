@@ -1,9 +1,10 @@
 from enum import Enum
 from uuid import UUID
-from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.core.timezone import UtcDatetime
 
 
 class InventoryItemType(str, Enum):
@@ -61,7 +62,7 @@ class MovementResponse(BaseModel):
     reason: str | None = None
     reference_type: str | None = None
     reference_id: UUID | None = None
-    moved_at: datetime
+    moved_at: UtcDatetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -122,7 +123,7 @@ class PurchaseResponse(BaseModel):
     invoice_number: str | None = None
     status: str
     total: Decimal
-    purchased_at: datetime
+    purchased_at: UtcDatetime
     items: list[PurchaseItemResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

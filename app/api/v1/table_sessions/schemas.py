@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.v1.sales.schemas import PaymentIn
+from app.core.timezone import UtcDatetime
 
 
 class BillingMode(str, Enum):
@@ -22,9 +23,9 @@ class ParticipantResponse(BaseModel):
     display_name: str
     display_label: str | None = None
     status: str
-    joined_at: datetime
+    joined_at: UtcDatetime
     expires_at: datetime | None = None
-    closed_at: datetime | None = None
+    closed_at: UtcDatetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -33,8 +34,8 @@ class TableSessionResponse(BaseModel):
     id: UUID
     dining_table_id: UUID
     status: str
-    opened_at: datetime
-    closed_at: datetime | None = None
+    opened_at: UtcDatetime
+    closed_at: UtcDatetime | None = None
     closed_by_user_name: str | None = None
     billing_mode: str | None = None
     participants: list[ParticipantResponse] = Field(default_factory=list)

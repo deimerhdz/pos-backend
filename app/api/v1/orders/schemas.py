@@ -1,12 +1,12 @@
 from enum import Enum
 from typing import Literal
 from uuid import UUID
-from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.api.v1.sales.schemas import PaymentIn
+from app.core.timezone import UtcDatetime
 
 
 class OrderChannel(str, Enum):
@@ -179,7 +179,7 @@ class OrderResponse(BaseModel):
     dining_table_id: UUID | None = None
     customer_name: str | None = None
     notes: str | None = None
-    created_at: datetime
+    created_at: UtcDatetime
     items: list[OrderItemResponse] = Field(default_factory=list)
     # Intento de pago más reciente (spec 024) — `None` si nunca se inició
     # ninguno. Mientras no haya uno `confirmado`, la orden sigue "pendiente de
@@ -210,8 +210,8 @@ class PaymentAttemptResponse(BaseModel):
     receipt_file_url: str | None = None
     rejection_reason: str | None = None
     resolved_by_user_id: UUID | None = None
-    resolved_at: datetime | None = None
-    created_at: datetime
+    resolved_at: UtcDatetime | None = None
+    created_at: UtcDatetime
 
     model_config = ConfigDict(from_attributes=True)
 

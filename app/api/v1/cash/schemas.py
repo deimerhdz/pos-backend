@@ -1,9 +1,10 @@
 from enum import Enum
 from uuid import UUID
-from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.core.timezone import UtcDatetime
 
 
 class CashMovementKind(str, Enum):
@@ -49,8 +50,8 @@ class ShiftResponse(BaseModel):
     user_id: UUID
     user_name: str | None = None
     opening_amount: Decimal
-    opened_at: datetime
-    closed_at: datetime | None = None
+    opened_at: UtcDatetime
+    closed_at: UtcDatetime | None = None
     counted_amount: Decimal | None = None
     status: str
     close_note: str | None = None
@@ -74,7 +75,7 @@ class CashMovementResponse(BaseModel):
     category: str | None = None
     description: str | None = None
     user_name: str | None = None
-    occurred_at: datetime
+    occurred_at: UtcDatetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -127,7 +128,7 @@ class PartialCountResponse(BaseModel):
     difference: Decimal
     note: str | None = None
     user_name: str | None = None
-    counted_at: datetime
+    counted_at: UtcDatetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -150,8 +151,8 @@ class ShiftSummaryResponse(BaseModel):
     user_name: str | None = None
     opening_amount: Decimal
     counted_amount: Decimal | None = None
-    opened_at: datetime
-    closed_at: datetime | None = None
+    opened_at: UtcDatetime
+    closed_at: UtcDatetime | None = None
     status: str
     close_note: str | None = None
     expected: Decimal
