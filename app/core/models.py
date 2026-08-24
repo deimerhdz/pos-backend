@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Integer,String,Column,DateTime, UniqueConstraint,func,Boolean,MetaData,ForeignKey
@@ -115,6 +116,11 @@ class User(UUIDPrimaryKeyMixin,TimestampMixin,Base):
 
     must_change_password:Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Corte de sesiones (spec 031): cualquier JWT con `iat` anterior a este
+    # instante deja de aceptarse (ver app/core/dependencies.py). NULL hasta el
+    # primer cambio de contraseña bajo esta spec — no afecta cuentas existentes.
+    tokens_valid_after:Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
+
     role_id: Mapped[UUID] = mapped_column(ForeignKey("shared.roles.id"))
     
     role:Mapped[Optional["Role"]] = relationship(back_populates="users")
@@ -144,3 +150,33 @@ class User(UUIDPrimaryKeyMixin,TimestampMixin,Base):
         return self.tenant.name if self.tenant else None
 
 
+class PasswordResetToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Enlace de un solo uso para restablecer contraseña sin sesión (spec 031).
+
+    Solo se persiste el hash SHA-256 del token crudo enviado por correo —
+    igual que una contraseña, el valor crudo nunca vive en la base de datos
+    (research.md Decisión 2). El estado (vigente/usado/invalidado/caducado) se
+    deriva al leer, no es una columna — ver data-model.md.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("shared.users.id"), nullable=False, index=True
+    )
+
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+
+    # Correo de la cuenta al emitir el enlace; un cambio de correo posterior
+    # invalida el enlace en vivo al comparar contra user.email (FR-012).
+    email_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
+    invalidated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
+
+    user: Mapped["User"] = relationship()
+
+    __table_args__ = ({"schema": "shared"},)
