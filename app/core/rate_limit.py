@@ -14,6 +14,8 @@ El `table_id` sale siempre del token firmado ya verificado, nunca de un campo de
 body: si viniera del cliente, saltarse el límite sería tan fácil como cambiarlo.
 """
 import logging
+import time
+import uuid
 
 from fastapi import HTTPException, Request, status
 
@@ -67,3 +69,31 @@ async def enforce(request: Request, bucket: str, *, table_id=None) -> None:
         raise
     except Exception:
         logger.warning("Rate limiting no disponible (Redis); se deja pasar", exc_info=True)
+
+
+async def enforce_sliding_window(key: str, limit: int, window_seconds: int) -> bool:
+    """Ventana deslizante genuina (ZSET), a diferencia de `enforce()` (ventana
+    fija). Devuelve `True` si la clave está bloqueada (ya alcanzó `limit` en los
+    últimos `window_seconds`), sin lanzar excepción — el caller decide cómo
+    responder (spec 031, FR-010, research.md Decisión 3).
+
+    Fail-open: si Redis no responde, no se bloquea (mismo criterio que `enforce()`).
+    """
+    now = time.time()
+    try:
+        pipe = redis.pipeline()
+        pipe.zremrangebyscore(key, "-inf", now - window_seconds)
+        pipe.zcard(key)
+        _, count = await pipe.execute()
+
+        if count >= limit:
+            return True
+
+        pipe = redis.pipeline()
+        pipe.zadd(key, {f"{now}:{uuid.uuid4()}": now})
+        pipe.expire(key, window_seconds)
+        await pipe.execute()
+        return False
+    except Exception:
+        logger.warning("Rate limiting deslizante no disponible (Redis); se deja pasar", exc_info=True)
+        return False
