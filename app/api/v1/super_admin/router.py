@@ -7,12 +7,15 @@ from app.core.pagination import Page, paginate
 from app.core.models import User, Tenant
 from app.api.v1.users.schemas import UserResponse
 from app.api.v1.super_admin.schemas import TenantResponse
+from app.api.v1.super_admin.payment_methods_router import router as payment_methods_catalog_router
 
 router = APIRouter(
     prefix="/super-admin",
     tags=["super-admin"],
     dependencies=[Depends(get_current_super_admin)],
 )
+
+router.include_router(payment_methods_catalog_router)
 
 
 @router.get(

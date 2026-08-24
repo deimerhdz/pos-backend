@@ -1,6 +1,80 @@
 from datetime import datetime
+from enum import Enum
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.api.v1.sales.schemas import PaymentMethodType
+
+
+class PaymentMethodFieldFormat(str, Enum):
+    TEXT = "text"
+    NUMERIC = "numeric"
+    IMAGE = "image"
+
+
+class PaymentMethodFieldDefinition(BaseModel):
+    """Un campo de integración que el catálogo exige/permite a un tenant al
+    activar el método (spec 032, FR-004). Validado en Pydantic, no por
+    constraint de base de datos (research.md Decisión 2)."""
+
+    key: str = Field(..., min_length=1, max_length=50, examples=["celular", "qr"])
+    label: str = Field(..., min_length=1, max_length=150, examples=["Número de celular"])
+    required: bool = False
+    format: PaymentMethodFieldFormat
+    length: int | None = Field(
+        None, gt=0,
+        description="Longitud exacta esperada; solo aplica a format='text'/'numeric'.",
+    )
+
+    @model_validator(mode="after")
+    def _length_only_for_text_or_numeric(self):
+        if self.length is not None and self.format == PaymentMethodFieldFormat.IMAGE:
+            raise ValueError("`length` no aplica a un campo format='image'")
+        return self
+
+
+def _validate_unique_field_keys(fields: list[PaymentMethodFieldDefinition]) -> list[PaymentMethodFieldDefinition]:
+    keys = [f.key for f in fields]
+    if len(keys) != len(set(keys)):
+        raise ValueError("Los `key` de `fields` deben ser únicos dentro del mismo método")
+    return fields
+
+
+class PaymentMethodCatalogCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100, examples=["Daviplata"])
+    type: PaymentMethodType
+    fields: list[PaymentMethodFieldDefinition] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_keys(self):
+        _validate_unique_field_keys(self.fields)
+        return self
+
+
+class PaymentMethodCatalogUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=100)
+    type: PaymentMethodType | None = None
+    fields: list[PaymentMethodFieldDefinition] | None = None
+    active: bool | None = None
+
+    @model_validator(mode="after")
+    def _unique_keys(self):
+        if self.fields is not None:
+            _validate_unique_field_keys(self.fields)
+        return self
+
+
+class PaymentMethodCatalogResponse(BaseModel):
+    id: UUID
+    name: str
+    type: str
+    active: bool
+    fields: list[PaymentMethodFieldDefinition]
+    created_at: datetime
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TenantResponse(BaseModel):

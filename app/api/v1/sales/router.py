@@ -11,44 +11,59 @@ from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import Tenant, User
 from app.core.pagination import Page, paginate
 from app.models.payment import PaymentMethod
+from app.models.payment_method_catalog import PaymentMethodCatalog
 from app.models.sale import Sale
 from app.api.v1.sales import service
 from app.api.v1.sales.schemas import (
-    PaymentMethodCreate, PaymentMethodResponse, PaymentMethodUpdate,
-    SaleCreate, SaleResponse,
+    CatalogPaymentMethodOption, PaymentMethodCreate, PaymentMethodCheckoutOption,
+    PaymentMethodResponse, PaymentMethodUpdate, SaleCreate, SaleResponse,
 )
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
 
 # ============================ Métodos de pago ============================
-@router.get("/payment-methods", response_model=list[PaymentMethodResponse], summary="Listar métodos de pago")
-def list_payment_methods(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+@router.get(
+    "/payment-methods/catalog",
+    response_model=list[CatalogPaymentMethodOption],
+    summary="Ver el catálogo de métodos de pago disponible para activar (spec 032)",
+)
+def list_payment_methods_catalog(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    return service.list_catalog_for_tenant(db)
+
+
+@router.get(
+    "/payment-methods",
+    response_model=list[PaymentMethodResponse] | list[PaymentMethodCheckoutOption],
+    summary="Listar métodos de pago",
+    description=(
+        "Sin `available`: listado administrativo completo (todos los estados). Con "
+        "`available=true`: solo los disponibles para cobrar (activos, completos y con "
+        "el catálogo activo), sin datos de integración — spec 032, FR-012/FR-012a."
+    ),
+)
+def list_payment_methods(
+    available: bool = Query(False, description="Filtra a los disponibles para cobrar en caja."),
+    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+):
+    if available:
+        return service.list_available_payment_methods(db)
     return db.execute(select(PaymentMethod).order_by(PaymentMethod.name)).scalars().all()
 
 
-@router.post("/payment-methods", response_model=PaymentMethodResponse, status_code=status.HTTP_201_CREATED, summary="Crear método de pago")
+@router.post(
+    "/payment-methods", response_model=PaymentMethodResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Activar un método de pago del catálogo para este tenant (spec 032)",
+)
 def create_payment_method(body: PaymentMethodCreate, db: Session = Depends(get_db), _: User = Depends(require_tenant_admin)):
-    ensure_unique(db, PaymentMethod, PaymentMethod.name, body.name, "Payment method already exists")
-    # Mantener is_cash y type consistentes (is_cash ⇔ type == 'cash').
-    if body.type is not None:
-        method_type = body.type.value
-    else:
-        method_type = "cash" if body.is_cash else "other"
-    pm = PaymentMethod(
-        name=body.name, type=method_type, is_cash=(method_type == "cash"),
-        payment_info=body.payment_info,
-    )
-    db.add(pm)
-    db.commit()
-    db.refresh(pm)
-    return pm
+    return service.create_payment_method(db, body)
 
 
 @router.patch(
     "/payment-methods/{payment_method_id}",
     response_model=PaymentMethodResponse,
-    summary="Editar/activar/desactivar un método de pago (spec 024)",
+    summary="Editar/activar/desactivar/reactivar un método de pago (spec 024 / spec 032)",
 )
 def update_payment_method(
     payment_method_id: UUID, body: PaymentMethodUpdate,

@@ -37,6 +37,7 @@ from .order_payment_attempt import OrderPaymentAttempt
 # Ventas
 from .sale import Sale, SaleItem
 from .payment import PaymentMethod, Payment
+from .payment_method_catalog import PaymentMethodCatalog
 
 # Promociones
 from .promotion import Promotion, PromotionTarget, PromotionComboItem

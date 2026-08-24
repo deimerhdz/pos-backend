@@ -20,40 +20,122 @@ from app.models.product import Product
 from app.models.option import Option
 from app.models.cash_shift import CashShift
 from app.models.payment import Payment, PaymentMethod
+from app.models.payment_method_catalog import PaymentMethodCatalog
 from app.models.sale import Sale, SaleItem
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.sales.consumption import deduct_sale
 from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
-from app.api.v1.sales.schemas import SaleCreate, PaymentMethodUpdate
+from app.api.v1.sales.schemas import (
+    SaleCreate, PaymentMethodCreate, PaymentMethodUpdate, CatalogPaymentMethodOption,
+)
 from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
 
 
-# ============================ Métodos de pago (spec 024) ============================
+# ============================ Métodos de pago (spec 024 / spec 032) ============================
+
+def _validate_payment_info(fields: list[dict], payment_info: dict | None) -> bool:
+    """Valida `payment_info` contra `catalog.fields` (obligatoriedad + formato,
+    spec 032 FR-009, clarificación 2026-08-24 #3). Devuelve si la
+    configuración queda completa (todo lo obligatorio, diligenciado y
+    válido). Lanza 422 si algo diligenciado no cumple su formato — un campo
+    obligatorio simplemente vacío no es un error, solo deja `is_complete` en
+    `False` (FR-009 lo llama "incompleta", no inválida)."""
+    info = payment_info or {}
+    complete = True
+    for field in fields:
+        key = field["key"]
+        value = info.get(key)
+        if value is None or value == "":
+            if field.get("required", False):
+                complete = False
+            continue
+
+        fmt = field.get("format")
+        length = field.get("length")
+        value_str = str(value)
+        if fmt == "numeric" and not value_str.isdigit():
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"El campo '{key}' debe ser numérico.",
+            )
+        if fmt in ("numeric", "text") and length and len(value_str) != length:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"El campo '{key}' debe tener exactamente {length} caracteres.",
+            )
+    return complete
+
+
+def create_payment_method(db: Session, data: PaymentMethodCreate) -> PaymentMethod:
+    """Activa, para el tenant, un método del catálogo de la plataforma (spec
+    032, FR-007/FR-011). `name`/`type`/`is_cash` se copian del catálogo
+    (research.md Decisión 5) — el body ya no los acepta, un tenant no puede
+    crear métodos fuera del catálogo.
+
+    Crea fila solo la primera vez por `catalog_id`: si ya existe una (activa
+    o no), 409 — reactivar/editar es `update_payment_method` (`PATCH`), no
+    esta función (research.md Decisión 9: `catalog_id` es único por tenant
+    para siempre, así se conserva el `payment_info` ya capturado al
+    reactivar)."""
+    catalog = get_or_404(
+        db, PaymentMethodCatalog, data.catalog_id,
+        "Método de pago no encontrado en el catálogo",
+    )
+    if not catalog.active:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Este método de pago no está activo en el catálogo de la plataforma.",
+        )
+
+    existing = db.execute(
+        select(PaymentMethod).where(PaymentMethod.catalog_id == catalog.id)
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Ya existe una configuración para este método de pago en este tenant; "
+            "use PATCH para editarla o reactivarla.",
+        )
+
+    is_complete = _validate_payment_info(catalog.fields, data.payment_info)
+    method = PaymentMethod(
+        name=catalog.name,
+        type=catalog.type,
+        is_cash=(catalog.type == "cash"),
+        catalog_id=catalog.id,
+        payment_info=data.payment_info,
+        is_complete=is_complete,
+        active=True,
+    )
+    db.add(method)
+    db.commit()
+    db.refresh(method)
+    return method
+
 
 def update_payment_method(
     db: Session, payment_method_id: UUID, data: PaymentMethodUpdate
 ) -> PaymentMethod:
-    """Edita nombre/datos de pago/estado de un método (spec 024, US1).
+    """Edita datos de pago/estado de un método ya activado (spec 024 US1,
+    spec 032 FR-008/FR-009/FR-010).
 
-    Al desactivar (`active: False`), exige que quede al menos un método activo
-    en el tenant (FR-003) — se cuenta dentro de la misma transacción,
-    excluyendo el propio método (research.md spec 024, Decisión 10). Editar
-    `payment_info`/`name` no toca ningún `OrderPaymentAttempt` ya creado con
-    este método: el intento solo referencia `payment_method_id`, nunca copia
-    estos datos."""
+    Editar `payment_info` recalcula `is_complete` contra `catalog.fields`
+    vigente (spec 032, research.md Decisión 4). Al desactivar (`active:
+    False`), exige que quede al menos un método activo en el tenant —
+    contado dentro de la misma transacción, excluyendo el propio método
+    (research.md spec 024, Decisión 10). Reactivar (`active: True`) es el
+    único camino para volver a usar un método que el tenant había
+    desactivado — conserva el `payment_info` que ya tenía si no se manda uno
+    nuevo (research.md spec 032, Decisión 9)."""
     method = get_or_404(db, PaymentMethod, payment_method_id, "Payment method not found")
-
-    if data.name is not None and data.name != method.name:
-        ensure_unique(
-            db, PaymentMethod, PaymentMethod.name, data.name,
-            "Payment method already exists", exclude_id=payment_method_id,
-        )
-        method.name = data.name
 
     if data.payment_info is not None:
         method.payment_info = data.payment_info
+        catalog = db.get(PaymentMethodCatalog, method.catalog_id) if method.catalog_id else None
+        if catalog is not None:
+            method.is_complete = _validate_payment_info(catalog.fields, data.payment_info)
 
     if data.active is not None and data.active != method.active:
         if data.active is False:
@@ -73,6 +155,55 @@ def update_payment_method(
     db.commit()
     db.refresh(method)
     return method
+
+
+def list_catalog_for_tenant(db: Session) -> list[CatalogPaymentMethodOption]:
+    """Catálogo activo a nivel plataforma, más las entradas que el tenant ya
+    activó aunque el Super Admin las haya desactivado después — para que el
+    frontend pueda avisar "ya no disponible" (spec 032, FR-005/FR-006)."""
+    tenant_catalog_ids = {
+        row[0] for row in db.execute(
+            select(PaymentMethod.catalog_id).where(PaymentMethod.catalog_id.is_not(None))
+        ).all()
+    }
+    catalogs = db.execute(
+        select(PaymentMethodCatalog)
+        .where(
+            PaymentMethodCatalog.active.is_(True)
+            | PaymentMethodCatalog.id.in_(tenant_catalog_ids)
+        )
+        .order_by(PaymentMethodCatalog.name)
+    ).scalars().all()
+    return [
+        CatalogPaymentMethodOption(
+            id=c.id, name=c.name, fields=c.fields, active=c.active,
+            already_activated=c.id in tenant_catalog_ids,
+        )
+        for c in catalogs
+    ]
+
+
+def list_available_payment_methods(db: Session) -> list[PaymentMethod]:
+    """Métodos disponibles para cobrar en caja (spec 032, FR-012): activos,
+    completos, y con el catálogo todavía activo a nivel plataforma — sin
+    exponer `payment_info` (FR-012a, el `PaymentMethodCheckoutOption` del
+    router se encarga de eso, no esta consulta).
+
+    `outerjoin`, no `join`: una fila sin `catalog_id` todavía (ventana de
+    backfill, FR-016) no debe desaparecer de caja solo por no tener catálogo
+    asignado — sigue disponible mientras sea `active`/`is_complete` (default
+    `true` hasta que el backfill la procese). Solo se excluye por causa del
+    catálogo cuando SÍ tiene `catalog_id` y ese catálogo está inactivo."""
+    return db.execute(
+        select(PaymentMethod)
+        .outerjoin(PaymentMethodCatalog, PaymentMethod.catalog_id == PaymentMethodCatalog.id)
+        .where(
+            PaymentMethod.active.is_(True),
+            PaymentMethod.is_complete.is_(True),
+            (PaymentMethod.catalog_id.is_(None)) | (PaymentMethodCatalog.active.is_(True)),
+        )
+        .order_by(PaymentMethod.name)
+    ).scalars().all()
 
 
 def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: str = "") -> Sale:
