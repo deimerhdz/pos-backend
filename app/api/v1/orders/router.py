@@ -51,6 +51,7 @@ def _load_order(db: Session, order_id: UUID) -> CustomerOrder:
     ).scalar_one_or_none()
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    order.paid = service.order_has_sale(db, order.id)  # spec 029, D2
     return order
 
 
@@ -511,19 +512,24 @@ def create_order(
 def list_orders(
     request: Request,
     status_filter: str | None = Query(None, alias="status"),
+    active_sessions_only: bool = Query(False),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
     """La terminal sondea esto, así que responde con `ETag`: mientras nada
-    cambie el navegador revalida y recibe un 304, sin cuerpo ni re-render."""
-    q = select(CustomerOrder).options(
-        selectinload(CustomerOrder.items).selectinload(OrderItem.options),
-        selectinload(CustomerOrder.payment_attempts)
-        .selectinload(OrderPaymentAttempt.payment_method),
-    ).order_by(CustomerOrder.created_at.desc())
-    if status_filter is not None:
-        q = q.where(CustomerOrder.status == status_filter)
-    return json_or_304(request, _ORDERS_ADAPTER, db.execute(q).scalars().all())
+    cambie el navegador revalida y recibe un 304, sin cuerpo ni re-render.
+
+    `active_sessions_only` (spec 029, hotfix): la Terminal de Mesas lo manda
+    siempre en `True` para no volver a mezclar pedidos ya cobrados de una
+    visita anterior con la sesión activa de la misma mesa física (ver
+    `service.list_orders`). Por defecto `False` conserva el comportamiento
+    actual exacto para cualquier otro consumidor de este endpoint."""
+    orders = service.list_orders(db, status_filter, active_sessions_only)
+    # spec 029, D2: una sola consulta para todo el listado, no una por pedido.
+    paid_ids = service.paid_order_ids(db, [o.id for o in orders])
+    for o in orders:
+        o.paid = o.id in paid_ids
+    return json_or_304(request, _ORDERS_ADAPTER, orders)
 
 
 @router.get("/{order_id}", response_model=OrderResponse, summary="Obtener una comanda")

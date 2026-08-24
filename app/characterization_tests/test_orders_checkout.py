@@ -31,6 +31,7 @@ import unittest
 from uuid import uuid4
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.characterization_tests import orders_fixtures as fx
@@ -394,6 +395,41 @@ class TestCheckout(unittest.TestCase):
         perdidos_ids = {p["order_item_id"] for p in logs[0].payload["items_perdidos"]}
         self.assertEqual(perdidos_ids, {str(item_en_prep.id), str(item_listo.id)})
 
+    def test_cancel_order_409_si_orden_ya_tiene_sale_spec_029(self):
+        """Comportamiento NUEVO (spec 029, hotfix #4): igual que `void_item`
+        (`test_orders_kitchen.py::test_void_item_409_si_orden_abierta_con_sale_camino_qr_mostrador_spec_029`),
+        `cancel_order` debe reconocer un pedido ya cobrado por la `Sale`
+        asociada, no por `status` — los caminos QR/mostrador dejan la orden
+        en `"abierta"` a propósito tras el pago (research.md D2). Sin este
+        chequeo, se podía "rechazar" un pedido ya pagado y dejar su `Sale`
+        huérfana."""
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="abierta", channel="counter")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        shift = fx.make_cash_shift(db)
+        cashier = fx.make_user_double()
+        sale = Sale(
+            cash_shift_id=shift.id,
+            customer_order_id=order.id,
+            user_id=cashier.id,
+            status="paid",
+        )
+        db.add(sale)
+        db.commit()
+
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.cancel_order(db, order.id, CancelIn(motivo="prueba"), cashier)
+        self.assertEqual(ctx.exception.status_code, 409)
+        db.refresh(order)
+        self.assertEqual(order.status, "abierta")
+        self.assertIsNotNone(
+            db.execute(select(Sale).where(Sale.id == sale.id)).scalar_one_or_none()
+        )
+
     # ----------------------------------------------------- close_participants (T030)
 
     def test_close_participants_cierra_activos_y_devuelve_conteo(self):
@@ -588,6 +624,38 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(ventas, [])
         db.refresh(insumo)
         self.assertEqual(Decimal(insumo.current_stock), Decimal("1"))
+
+    def test_checkout_and_send_rechaza_descuento_manual_spec_029(self):
+        """Comportamiento NUEVO (spec 029, Historia 2, FR-009/010/011): el
+        único valor válido de `discount` en `checkout_and_send` es 0 — un
+        descuento manual distinto de cero se rechaza en la propia validación
+        del esquema (`le=0`), antes de que el handler llegue a ejecutarse."""
+        s = self._seed_hold_order_con_receta()
+        order, shift, method = s["order"], s["shift"], s["method"]
+
+        with self.assertRaises(ValidationError):
+            CheckoutAndSendIn(
+                version=order.version, cash_shift_id=shift.id,
+                discount=Decimal("5000"),
+                payments=[self._pago(method.id, PRECIO)],
+            )
+
+    def test_checkout_and_send_discount_cero_u_omitido_sigue_igual(self):
+        """Contraste del test anterior: `discount=0` (explícito u omitido,
+        que es su valor por defecto) se comporta exactamente igual que
+        antes de esta spec."""
+        s = self._seed_hold_order_con_receta()
+        db, order = s["db"], s["order"]
+        shift, method = s["shift"], s["method"]
+        cashier = self._user()
+
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=shift.id,
+            payments=[self._pago(method.id, PRECIO)],
+        )
+        sale = checkout.checkout_and_send(db, order.id, data, cashier)
+
+        self.assertEqual(sale.total, PRECIO)
 
 
 if __name__ == "__main__":
