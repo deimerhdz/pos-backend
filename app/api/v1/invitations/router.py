@@ -1,13 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.core.db import get_db, get_tenant
 from app.core.dependencies import require_tenant_admin
 from app.core.mail import create_message, invitation_email_body, send_email
 from app.core.models import Role, Tenant, User, UserInvitation
+from app.core.pagination import Page, paginate
 from app.core.plan_limits import enforce_plan_limit
 from app.core.utils import generate_passwd_hash, generate_random_password
 from app.api.v1.invitations.schemas import InvitationCreate, InvitationResponse
@@ -19,6 +20,35 @@ def _build_login_url(tenant: Tenant) -> str:
     if settings.ENVIRONMENT == "prod":
         return f"https://{tenant.host}.skeilopos.com/login"
     return f"http://{tenant.host}.localhost:4200/login"
+
+
+@router.get(
+    "",
+    response_model=Page[InvitationResponse],
+    summary="Listar invitaciones pendientes del tenant",
+    description=(
+        "Devuelve, de forma paginada, las invitaciones con status='pending' del tenant del "
+        "admin autenticado (FR-009/FR-013) — nunca de otro tenant, ni las ya consumidas/canceladas."
+    ),
+    response_description="Página de invitaciones pendientes del tenant.",
+    responses={
+        401: {"description": "No autenticado o token inválido."},
+        403: {"description": "El usuario no es administrador del tenant."},
+    },
+)
+def list_pending_invitations(
+    page: int = Query(1, ge=1, description="Número de página (empieza en 1)."),
+    size: int = Query(20, ge=1, le=100, description="Cantidad de elementos por página (máximo 100)."),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_tenant_admin),
+):
+    stmt = (
+        select(UserInvitation)
+        .options(selectinload(UserInvitation.role))
+        .where(UserInvitation.tenant_id == admin.tenant_id, UserInvitation.status == "pending")
+        .order_by(UserInvitation.sent_at.desc())
+    )
+    return paginate(db, stmt, page, size)
 
 
 @router.post(
