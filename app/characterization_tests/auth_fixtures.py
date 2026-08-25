@@ -39,8 +39,9 @@ from sqlalchemy.orm import Session
 
 from app.core.models import Base, PasswordResetToken, Role, Tenant, User
 from app.core.utils import generate_passwd_hash
+from app.models.plan import Plan  # noqa: F401  - registra shared.plans en Base.metadata
 
-_TABLE_NAMES = ["tenants", "roles", "users", "password_reset_tokens"]
+_TABLE_NAMES = ["tenants", "roles", "users", "password_reset_tokens", "plans"]
 
 
 def new_session() -> Session:
@@ -64,6 +65,13 @@ def make_tenant(db: Session, **kw) -> Tenant:
     kw.setdefault("name", f"tenant-{uuid.uuid4()}")
     kw.setdefault("schema", f"schema_{uuid.uuid4().hex[:8]}")
     kw.setdefault("host", f"host-{uuid.uuid4().hex[:8]}")
+    if "plan_id" not in kw:
+        # spec 033: Tenant.plan_id es NOT NULL. Estos tests no ejercitan
+        # límites/accesos de plan — un plan sin restricciones basta.
+        plan = Plan(name=f"plan-{uuid.uuid4()}")
+        db.add(plan)
+        db.flush()
+        kw["plan_id"] = plan.id
     obj = Tenant(**kw)
     db.add(obj)
     db.flush()

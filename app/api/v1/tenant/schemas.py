@@ -5,7 +5,8 @@ class TenantInfoResponse(BaseModel):
     id: int
     name: str
     host: str
-    plan: str
+    # `plan` (texto libre heredado) se elimina en spec 033 — el plan de
+    # suscripción real vive en `GET /plan` (Historia de Usuario 6), no aquí.
     logo_url: str | None = None
     receipt_message: str | None = None
     invoice_prefix: str | None = None

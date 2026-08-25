@@ -26,6 +26,8 @@ def create_tenant(body: TenantCreateWithUser):
         admin_name=body.name,
         admin_email=body.email,
         admin_password=password,
+        plan_id=body.plan_id,
+        ciclo_facturacion=body.ciclo_facturacion,
     )
 
     if settings.ENVIRONMENT == "prod":

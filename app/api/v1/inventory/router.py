@@ -9,6 +9,7 @@ from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User
 from app.core.pagination import Page, paginate
+from app.core.plan_limits import require_module_access
 from app.models.inventory_item import InventoryItem
 from app.models.inventory_movement import InventoryMovement
 from app.models.unit_measure import UnitMeasure
@@ -24,7 +25,10 @@ from app.api.v1.inventory.schemas import (
     LowStockResponse,
 )
 
-router = APIRouter(prefix="/inventory", tags=["inventory"])
+router = APIRouter(
+    prefix="/inventory", tags=["inventory"],
+    dependencies=[Depends(require_module_access("inventario"))],
+)
 
 
 # ============================ Insumos ============================
@@ -177,7 +181,10 @@ def update_supplier(
 
 
 # ============================ Compras ============================
-@router.get("/purchases", response_model=Page[PurchaseResponse], summary="Listar compras")
+@router.get(
+    "/purchases", response_model=Page[PurchaseResponse], summary="Listar compras",
+    dependencies=[Depends(require_module_access("compras"))],
+)
 def list_purchases(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
@@ -188,7 +195,11 @@ def list_purchases(
     return paginate(db, stmt, page, size)
 
 
-@router.post("/purchases", response_model=PurchaseResponse, status_code=status.HTTP_201_CREATED, summary="Registrar compra (da alta de stock total)")
+@router.post(
+    "/purchases", response_model=PurchaseResponse, status_code=status.HTTP_201_CREATED,
+    summary="Registrar compra (da alta de stock total)",
+    dependencies=[Depends(require_module_access("compras"))],
+)
 def create_purchase(
     body: PurchaseCreate,
     db: Session = Depends(get_db),
@@ -197,8 +208,11 @@ def create_purchase(
     return service.create_purchase(db, body, user_id=user.id)
 
 
-@router.post("/purchases/order", response_model=PurchaseResponse, status_code=status.HTTP_201_CREATED,
-             summary="Crear orden de compra (draft, sin alta de stock) — RF-022")
+@router.post(
+    "/purchases/order", response_model=PurchaseResponse, status_code=status.HTTP_201_CREATED,
+    summary="Crear orden de compra (draft, sin alta de stock) — RF-022",
+    dependencies=[Depends(require_module_access("compras"))],
+)
 def create_purchase_order(
     body: PurchaseCreate,
     db: Session = Depends(get_db),
@@ -207,8 +221,11 @@ def create_purchase_order(
     return service.create_purchase_order(db, body, user_id=user.id)
 
 
-@router.post("/purchases/{purchase_id}/receive", response_model=PurchaseResponse,
-             summary="Recibir una orden de compra (parcial o total) — RF-022")
+@router.post(
+    "/purchases/{purchase_id}/receive", response_model=PurchaseResponse,
+    summary="Recibir una orden de compra (parcial o total) — RF-022",
+    dependencies=[Depends(require_module_access("compras"))],
+)
 def receive_purchase(
     purchase_id: UUID,
     body: PurchaseReceiveIn,

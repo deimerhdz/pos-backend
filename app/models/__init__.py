@@ -48,3 +48,6 @@ from .audit_log import AuditLog
 
 # Facturación
 from .invoice import Invoice, InvoiceCounter
+
+# Planes de suscripción (Super Admin)
+from .plan import Plan
