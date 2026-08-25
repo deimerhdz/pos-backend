@@ -53,6 +53,7 @@ _TABLE_NAMES = [
     "plans",
     "roles",
     "users",
+    "user_invitations",
     "dining_tables",
     "cash_registers",
     "products",
