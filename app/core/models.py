@@ -51,9 +51,25 @@ class Tenant(Base,TimestampMixin):
     name:Mapped[str] = mapped_column("name",String(255), nullable=False, index=True, unique=True)
     
     schema:Mapped[str] = mapped_column("schema", String(255), nullable=False, unique=True)
-    
-    plan:Mapped[str] = mapped_column("plan", String(100), nullable=False, default="basic")
-    
+
+    # Plan de suscripción vigente (spec 033). FK NOT NULL: garantiza FR-003
+    # ("todo tenant tiene, en todo momento, exactamente un plan vigente") a
+    # nivel de esquema, sin validación de aplicación adicional. Reemplaza a
+    # la columna heredada `plan` (texto libre sin uso real, research.md
+    # Decisión 2).
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("shared.plans.id"), nullable=False
+    )
+    plan: Mapped["Plan"] = relationship()
+
+    # Ciclo de facturación de la asignación vigente ("mensual"/"anual") y las
+    # fechas que lo respaldan. Los tres son NULL a la vez cuando el tenant
+    # nunca vence (plan de transición o elegido explícitamente "sin
+    # vencimiento", FR-021) — research.md Decisiones 10 y 12.
+    ciclo_facturacion: Mapped[Optional[str]] = mapped_column("ciclo_facturacion", String(10), nullable=True)
+    plan_iniciado_en: Mapped[Optional[datetime]] = mapped_column("plan_iniciado_en", DateTime, nullable=True)
+    plan_vence_en: Mapped[Optional[datetime]] = mapped_column("plan_vence_en", DateTime, nullable=True)
+
     host:Mapped[str] = mapped_column("host", String(255), nullable=False, unique=True)
 
     logo_url:Mapped[Optional[str]] = mapped_column("logo_url", String(500), nullable=True)

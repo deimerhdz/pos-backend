@@ -5,11 +5,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from app.core.db import get_db
+from app.core.db import get_db, get_tenant
 from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
-from app.core.models import User
+from app.core.models import Tenant, User
 from app.core.pagination import Page
+from app.core.plan_limits import enforce_plan_limit
 from app.core.timezone import utc_now
 from app.models.cash_register import CashRegister
 from app.models.cash_shift import CashShift
@@ -36,8 +37,14 @@ def list_registers(db: Session = Depends(get_db), _: User = Depends(get_current_
 
 
 @router.post("/registers", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED, summary="Crear caja")
-def create_register(body: RegisterCreate, db: Session = Depends(get_db), _: User = Depends(require_tenant_admin)):
+def create_register(
+    body: RegisterCreate,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+    _: User = Depends(require_tenant_admin),
+):
     ensure_unique(db, CashRegister, CashRegister.name, body.name, "Register name already exists")
+    enforce_plan_limit(db, tenant, "cajas")  # spec 033, FR-005/FR-006
     reg = CashRegister(name=body.name)
     db.add(reg)
     db.commit()

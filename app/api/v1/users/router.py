@@ -4,10 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import select
 
-from app.core.db import get_db
+from app.core.db import get_db, get_tenant
 from app.core.dependencies import require_tenant_admin
 from app.core.pagination import Page, paginate
-from app.core.models import User, Role
+from app.core.models import Tenant, User, Role
+from app.core.plan_limits import enforce_plan_limit
 from app.core.utils import generate_passwd_hash
 from app.api.v1.users.schemas import UserCreate, UserResponse, UserRoleUpdate, UserStatusUpdate
 
@@ -60,8 +61,10 @@ def list_users(
 def create_user(
     body: UserCreate,
     db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
     admin: User = Depends(require_tenant_admin),
 ):
+    enforce_plan_limit(db, tenant, "usuarios")  # spec 033, FR-005/FR-006
     existing = db.execute(
         select(User).where(
             User.email == body.email,

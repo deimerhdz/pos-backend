@@ -10,6 +10,7 @@ from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import Tenant, User
 from app.core.pagination import Page, paginate
+from app.core.plan_limits import enforce_plan_limit
 from app.models.payment import PaymentMethod
 from app.models.payment_method_catalog import PaymentMethodCatalog
 from app.models.sale import Sale
@@ -56,7 +57,13 @@ def list_payment_methods(
     status_code=status.HTTP_201_CREATED,
     summary="Activar un método de pago del catálogo para este tenant (spec 032)",
 )
-def create_payment_method(body: PaymentMethodCreate, db: Session = Depends(get_db), _: User = Depends(require_tenant_admin)):
+def create_payment_method(
+    body: PaymentMethodCreate,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+    _: User = Depends(require_tenant_admin),
+):
+    enforce_plan_limit(db, tenant, "metodos_pago_activos")  # spec 033, FR-005/FR-006
     return service.create_payment_method(db, body)
 
 

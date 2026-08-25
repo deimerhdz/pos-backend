@@ -3,10 +3,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
-from app.core.db import get_db
+from app.core.db import get_db, get_tenant
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.pagination import Page, paginate
-from app.core.models import User
+from app.core.models import Tenant, User
+from app.core.plan_limits import enforce_plan_limit
 from app.api.v1.products.service import ProductService
 from app.api.v1.products.schemas import (
     ProductCreate,
@@ -71,8 +72,10 @@ def get_product(
 def create_product(
     body: ProductCreate,
     db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
     _: User = Depends(require_tenant_admin),
 ):
+    enforce_plan_limit(db, tenant, "productos")  # spec 033, FR-005/FR-006
     return service.create_product(db, body)
 
 
