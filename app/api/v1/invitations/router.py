@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -10,6 +12,7 @@ from app.core.mail import create_message, invitation_email_body, send_email
 from app.core.models import Role, Tenant, User, UserInvitation
 from app.core.pagination import Page, paginate
 from app.core.plan_limits import enforce_plan_limit
+from app.core.timezone import utc_now
 from app.core.utils import generate_passwd_hash, generate_random_password
 from app.api.v1.invitations.schemas import InvitationCreate, InvitationResponse
 
@@ -146,6 +149,109 @@ def create_invitation(
             detail="No se pudo enviar el correo de invitación. Intenta de nuevo.",
         )
 
+    db.commit()
+    db.refresh(invitation)
+    return invitation
+
+
+def _get_pending_invitation_for_tenant(db: Session, admin: User, invitation_id: UUID) -> UserInvitation:
+    invitation = db.execute(
+        select(UserInvitation)
+        .where(UserInvitation.id == invitation_id, UserInvitation.tenant_id == admin.tenant_id)
+        .with_for_update(of=UserInvitation)
+    ).scalar_one_or_none()
+    if invitation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invitación no encontrada",
+        )
+    if invitation.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="La invitación ya no está pendiente",
+        )
+    return invitation
+
+
+@router.post(
+    "/{invitation_id}/resend",
+    response_model=InvitationResponse,
+    summary="Reenviar una invitación pendiente",
+    description=(
+        "Genera una nueva contraseña temporal, invalida de inmediato la anterior, actualiza la "
+        "fecha de envío y despacha un nuevo correo (FR-010)."
+    ),
+    response_description="La invitación reenviada.",
+    responses={
+        401: {"description": "No autenticado o token inválido."},
+        403: {"description": "El usuario no es administrador del tenant."},
+        404: {"description": "La invitación no existe en el tenant del admin."},
+        409: {"description": "La invitación ya no está pendiente."},
+        502: {"description": "No se pudo enviar el correo de invitación."},
+    },
+)
+def resend_invitation(
+    invitation_id: UUID,
+    tenant: Tenant = Depends(get_tenant),
+    admin: User = Depends(require_tenant_admin),
+    db: Session = Depends(get_db),
+):
+    invitation = _get_pending_invitation_for_tenant(db, admin, invitation_id)
+
+    password = generate_random_password()
+
+    # research.md Decisión 10: el correo se despacha *antes* de sobrescribir
+    # la fila — si falla, la contraseña anterior sigue intacta y sirviendo
+    # (FR-012 aplicado al reenvío: nunca deja la invitación sin ninguna
+    # contraseña funcional conocida por nadie).
+    try:
+        send_email(
+            create_message(
+                [invitation.email],
+                f"Bienvenido a {tenant.name}",
+                invitation_email_body(
+                    tenant_name=tenant.name,
+                    login_url=_build_login_url(tenant),
+                    email=invitation.email,
+                    password=password,
+                ),
+            )
+        )
+    except RuntimeError:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="No se pudo enviar el correo de invitación. Intenta de nuevo.",
+        )
+
+    invitation.password_hash = generate_passwd_hash(password)
+    invitation.sent_at = utc_now().replace(tzinfo=None)
+    db.commit()
+    db.refresh(invitation)
+    return invitation
+
+
+@router.post(
+    "/{invitation_id}/cancel",
+    response_model=InvitationResponse,
+    summary="Cancelar una invitación pendiente",
+    description="Invalida de inmediato su contraseña temporal y deja de aparecer como pendiente (FR-011).",
+    response_description="La invitación cancelada.",
+    responses={
+        401: {"description": "No autenticado o token inválido."},
+        403: {"description": "El usuario no es administrador del tenant."},
+        404: {"description": "La invitación no existe en el tenant del admin."},
+        409: {"description": "La invitación ya no está pendiente."},
+    },
+)
+def cancel_invitation(
+    invitation_id: UUID,
+    admin: User = Depends(require_tenant_admin),
+    db: Session = Depends(get_db),
+):
+    invitation = _get_pending_invitation_for_tenant(db, admin, invitation_id)
+
+    invitation.status = "cancelled"
+    invitation.cancelled_at = utc_now().replace(tzinfo=None)
     db.commit()
     db.refresh(invitation)
     return invitation
