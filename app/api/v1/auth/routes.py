@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError, OperationalError
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.db import with_db, get_tenant
-from app.core.models import User, Tenant, PasswordResetToken
+from app.core.models import User, Tenant, PasswordResetToken, UserInvitation
 from app.core.utils import verify_password, create_access_token, generate_passwd_hash
 from app.core.dependencies import RefreshTokenBearer,AccessTokenBearer, get_authenticated_user
 from app.core.dependencies import get_shared_db, _reject_if_session_revoked
@@ -93,6 +93,45 @@ def _resolve_reset_token(db: Session, raw_token: str, *, lock: bool = False):
     return row, user, None
 
 
+def _consume_invitation_if_valid(db: Session, tenant: Tenant, email: str, password: str):
+    """Consume una `UserInvitation` 'pending' cuyas credenciales coincidan
+    (FR-007, research.md Decisión 7). Devuelve el `User` recién creado, o
+    `None` si no hay ninguna invitación vigente o la contraseña no coincide
+    — en ambos casos el llamador cae al mismo `401` de siempre, sin crear
+    nada. `WITH FOR UPDATE` evita que dos logins casi simultáneos con la
+    misma contraseña temporal consuman la misma invitación dos veces."""
+    email_normalized = email.strip().lower()
+    invitation = db.execute(
+        select(UserInvitation)
+        .where(
+            UserInvitation.tenant_id == tenant.id,
+            UserInvitation.email == email_normalized,
+            UserInvitation.status == "pending",
+        )
+        .with_for_update(of=UserInvitation)
+    ).scalar_one_or_none()
+
+    if invitation is None or not verify_password(password, invitation.password_hash):
+        return None
+
+    new_user = User(
+        name=invitation.email,
+        email=invitation.email,
+        password_hash=invitation.password_hash,
+        phone=None,
+        active=True,
+        must_change_password=True,
+        role_id=invitation.role_id,
+        tenant_id=invitation.tenant_id,
+    )
+    db.add(new_user)
+    invitation.status = "consumed"
+    invitation.consumed_at = utc_now().replace(tzinfo=None)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
 @auth_router.post("/login")
 async def login(body: LoginRequest, req: Request):
     host_header = req.headers.get("x-tenant-host")
@@ -116,6 +155,15 @@ async def login(body: LoginRequest, req: Request):
                 stmt = stmt.where(User.tenant_id.is_(None))      # super admin global
 
             user = db.execute(stmt).scalar_one_or_none()
+
+            # FR-007: si no hay `User` con ese correo pero sí una invitación
+            # pendiente cuyas credenciales coinciden, esto crea la cuenta y
+            # consume la invitación en el mismo intento — el resto del login
+            # sigue exactamente igual que con cualquier usuario existente
+            # (research.md Decisión 7). Sin `x-tenant-host` resuelto (login
+            # de super admin), nunca se busca invitación.
+            if user is None and tenant is not None:
+                user = _consume_invitation_if_valid(db, tenant, body.email, body.password)
 
             # Validaciones dentro de la sesión para evitar objetos detached.
             logger.info(f"Usuario encontrado: {user.email if user else 'None'}")
