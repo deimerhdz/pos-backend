@@ -37,11 +37,11 @@ for _k, _v in {
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.core.models import Base, PasswordResetToken, Role, Tenant, User
+from app.core.models import Base, PasswordResetToken, Role, Tenant, User, UserInvitation
 from app.core.utils import generate_passwd_hash
 from app.models.plan import Plan  # noqa: F401  - registra shared.plans en Base.metadata
 
-_TABLE_NAMES = ["tenants", "roles", "users", "password_reset_tokens", "plans"]
+_TABLE_NAMES = ["tenants", "roles", "users", "password_reset_tokens", "plans", "user_invitations"]
 
 
 def new_session() -> Session:
@@ -129,6 +129,28 @@ def make_password_reset_token(
     kw.setdefault("issued_at", issued_at)
     kw.setdefault("expires_at", issued_at + timedelta(minutes=expiry_minutes))
     obj = PasswordResetToken(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def make_invitation(
+    db: Session,
+    tenant: Tenant,
+    role: Role | None = None,
+    password: str = "temporal-123",
+    **kw,
+) -> UserInvitation:
+    if role is None:
+        role = make_role(db)
+    kw.setdefault("id", _uid())
+    kw.setdefault("tenant_id", tenant.id)
+    kw.setdefault("role_id", role.id)
+    kw.setdefault("email", f"invite-{uuid.uuid4()}@example.com")
+    kw.setdefault("password_hash", generate_passwd_hash(password))
+    kw.setdefault("status", "pending")
+    kw.setdefault("sent_at", datetime.now(timezone.utc).replace(tzinfo=None))
+    obj = UserInvitation(**kw)
     db.add(obj)
     db.flush()
     return obj

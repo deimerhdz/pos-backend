@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import Integer,String,Column,DateTime, UniqueConstraint,func,Boolean,MetaData,ForeignKey
+from sqlalchemy import Integer,String,Column,DateTime, UniqueConstraint,func,Boolean,MetaData,ForeignKey,Index,CheckConstraint,text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm  import mapped_column,Mapped,DeclarativeBase,relationship,validates
 
@@ -196,3 +196,60 @@ class PasswordResetToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     user: Mapped["User"] = relationship()
 
     __table_args__ = ({"schema": "shared"},)
+
+
+class UserInvitation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Invitación pendiente de alta de un usuario interno por correo (spec 037).
+
+    Una sola fila por correo+tenant mientras `status='pending'` — reenviar
+    (FR-010) sobrescribe `password_hash`/`sent_at` de la misma fila en vez de
+    crear una nueva (research.md Decisión 2). Al consumirse desde
+    `POST /auth/login` da origen a un `User` (research.md Decisión 7); ver
+    data-model.md.
+    """
+
+    __tablename__ = "user_invitations"
+
+    tenant_id: Mapped[int] = mapped_column(
+        ForeignKey("shared.tenants.id"), nullable=False, index=True
+    )
+
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    role_id: Mapped[UUID] = mapped_column(ForeignKey("shared.roles.id"), nullable=False)
+
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    status: Mapped[str] = mapped_column(String(10), nullable=False, server_default="pending")
+
+    sent_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    cancelled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    tenant: Mapped["Tenant"] = relationship()
+    role: Mapped["Role"] = relationship()
+
+    @property
+    def role_name(self) -> Optional[str]:
+        return self.role.name if self.role else None
+
+    __table_args__ = (
+        # A lo sumo una invitación 'pending' por (tenant, correo) a la vez
+        # (FR-015, research.md Decisión 3). `sqlite_where` además de
+        # `postgresql_where` para que los characterization tests (SQLite en
+        # memoria) enfrenten el mismo IntegrityError que produciría Postgres.
+        Index(
+            "idx_pending_invitation_per_tenant_email",
+            "tenant_id",
+            "email",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'consumed', 'cancelled')",
+            name="ck_user_invitations_status",
+        ),
+        {"schema": "shared"},
+    )

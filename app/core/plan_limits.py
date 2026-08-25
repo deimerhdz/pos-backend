@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import get_db, get_tenant
 from app.core.dependencies import get_current_user
-from app.core.models import Tenant, User
+from app.core.models import Tenant, User, UserInvitation
 from app.core.timezone import utc_now
 from app.models.cash_register import CashRegister
 from app.models.dining_table import DiningTable
@@ -54,7 +54,23 @@ def _count_resource(db: Session, tenant: Tenant, config: _ResourceConfig) -> int
         stmt = stmt.where(config.model.tenant_id == tenant.id)
     if config.filter_active:
         stmt = stmt.where(config.model.active.is_(True))
-    return db.execute(stmt).scalar_one()
+    count = db.execute(stmt).scalar_one()
+
+    # spec 037, research.md Decisión 5: el cupo de "usuarios" también reserva
+    # las invitaciones aún no consumidas — si no, invitar sería una vía para
+    # eludir en silencio el límite del plan (nunca se inserta un `User` hasta
+    # que la persona invitada consume la invitación).
+    if config.model is User:
+        count += db.execute(
+            select(func.count())
+            .select_from(UserInvitation)
+            .where(
+                UserInvitation.tenant_id == tenant.id,
+                UserInvitation.status == "pending",
+            )
+        ).scalar_one()
+
+    return count
 
 
 def count_resource_usage(db: Session, tenant: Tenant, resource_key: str) -> int:
