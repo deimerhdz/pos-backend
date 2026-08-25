@@ -244,13 +244,14 @@ class TestOrdersPaymentGate(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
 
     def test_confirm_order_ok_con_intento_confirmado(self):
-        """Acceptance Scenario 3 (US4), actualizado por spec 026 FR-001: con
-        un intento de pago recién confirmado en efectivo, la orden queda
-        'abierta' (inventario descontado) en la MISMA llamada a
-        `confirm_cash_payment_attempt` — ya no hace falta una segunda llamada
-        manual a `confirm_order` (research.md spec 026, Decisión 1).
-        `confirm_order` sigue expuesto como vía de recuperación (Decisión 2),
-        pero sobre una orden que ya está 'abierta' no tiene nada que hacer."""
+        """Acceptance Scenario 3 (US4), actualizado por spec 026 FR-001 y
+        spec 035 (A-52): con un intento de pago recién confirmado en
+        efectivo, la orden queda 'pagada' (ya con su venta) en la MISMA
+        llamada a `confirm_cash_payment_attempt` — ya no hace falta una
+        segunda llamada manual a `confirm_order` (research.md spec 026,
+        Decisión 1). `confirm_order` sigue expuesto como vía de recuperación
+        (Decisión 2), pero sobre una orden que ya está 'pagada' no tiene nada
+        que hacer."""
         db, order = self._seed_order_recibida()
         efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
         attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
@@ -261,7 +262,7 @@ class TestOrdersPaymentGate(unittest.TestCase):
         )
         self.assertEqual(result.status, "confirmado")
         db.refresh(order)
-        self.assertEqual(order.status, "abierta")
+        self.assertEqual(order.status, "pagada")
 
         with self.assertRaises(HTTPException) as ctx:
             checkout.confirm_order(db, order.id, self._user())
@@ -287,9 +288,10 @@ class TestOrdersPaymentGate(unittest.TestCase):
     # ------------------------------------------------- Fusión pago→cocina (spec 026, FR-001/FR-002)
 
     def test_confirm_cash_envia_a_cocina_en_la_misma_llamada(self):
-        """spec 026, FR-001 (US1, escenario 1): confirmar el efectivo
-        descuenta inventario y deja la orden 'abierta' en la misma llamada,
-        sin ninguna acción manual adicional."""
+        """spec 026, FR-001 (US1, escenario 1), estado ampliado por spec 035
+        (A-52): confirmar el efectivo descuenta inventario y deja la orden
+        'pagada' (ya con su venta) en la misma llamada, sin ninguna acción
+        manual adicional."""
         db, order = self._seed_order_recibida()
         efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
         attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
@@ -300,16 +302,16 @@ class TestOrdersPaymentGate(unittest.TestCase):
         )
 
         db.refresh(order)
-        self.assertEqual(order.status, "abierta")
+        self.assertEqual(order.status, "pagada")
         movimientos = db.execute(
             select(InventoryMovement).where(InventoryMovement.reference_id == order.id)
         ).scalars().all()
         self.assertEqual(len(movimientos), 1)
 
     def test_approve_envia_a_cocina_en_la_misma_llamada(self):
-        """spec 026, FR-001 (US1, escenario 2): aprobar un comprobante de
-        transferencia descuenta inventario y deja la orden 'abierta' en la
-        misma llamada."""
+        """spec 026, FR-001 (US1, escenario 2), estado ampliado por spec 035
+        (A-52): aprobar un comprobante de transferencia descuenta inventario
+        y deja la orden 'pagada' (ya con su venta) en la misma llamada."""
         db, order = self._seed_order_recibida()
         nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
         attempt = fx.make_payment_attempt(
@@ -320,7 +322,7 @@ class TestOrdersPaymentGate(unittest.TestCase):
         checkout.approve_payment_attempt(db, attempt.id, self._shift(db).id, self._user())
 
         db.refresh(order)
-        self.assertEqual(order.status, "abierta")
+        self.assertEqual(order.status, "pagada")
         movimientos = db.execute(
             select(InventoryMovement).where(InventoryMovement.reference_id == order.id)
         ).scalars().all()
@@ -350,7 +352,7 @@ class TestOrdersPaymentGate(unittest.TestCase):
         self.assertEqual(result.status, "confirmado")
         self.assertEqual(result.change_amount, Decimal("2000"))
         db.refresh(order)
-        self.assertEqual(order.status, "abierta")
+        self.assertEqual(order.status, "pagada")
 
         db2, order2 = self._seed_order_recibida(autoflush=False)
         nequi = fx.make_payment_method(db2, name="Nequi", is_cash=False, type="transfer")
@@ -362,7 +364,7 @@ class TestOrdersPaymentGate(unittest.TestCase):
         result2 = checkout.approve_payment_attempt(db2, attempt2.id, self._shift(db2).id, self._user())
         self.assertEqual(result2.status, "confirmado")
         db2.refresh(order2)
-        self.assertEqual(order2.status, "abierta")
+        self.assertEqual(order2.status, "pagada")
 
     def test_confirm_cash_stock_insuficiente_no_confirma_el_pago(self):
         """spec 026, FR-002 (US1, escenario 3): si el descuento automático de
@@ -457,10 +459,11 @@ class TestOrdersPaymentGate(unittest.TestCase):
         approved = checkout.approve_payment_attempt(db, second.id, self._shift(db).id, self._user())
         self.assertEqual(approved.status, "confirmado")
 
-        # spec 026, FR-001: aprobar ya deja la orden 'abierta' en la misma
-        # llamada — no hace falta una segunda llamada manual a confirm_order.
+        # spec 026, FR-001 + spec 035 (A-52): aprobar ya deja la orden
+        # 'pagada' (con su venta) en la misma llamada — no hace falta una
+        # segunda llamada manual a confirm_order.
         db.refresh(order)
-        self.assertEqual(order.status, "abierta")
+        self.assertEqual(order.status, "pagada")
 
 
 if __name__ == "__main__":
