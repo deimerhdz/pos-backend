@@ -117,6 +117,10 @@ class DinerPaymentMethod(BaseModel):
     type: str
     is_cash: bool
     payment_info: dict[str, str] | None = None
+    # Metadata de formato de cada clave de `payment_info` (spec 034,
+    # FR-011/FR-012) — mismo shape que ya usa `CatalogPaymentMethodOption.fields`
+    # (sales/schemas.py:57): [{"key", "label", "required", "format", "length"?}].
+    fields: list[dict] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 

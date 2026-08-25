@@ -647,9 +647,12 @@ def remove_item(db: Session, participant_id: UUID, item_id: UUID) -> CartRespons
 
 def list_payment_methods(db: Session) -> list[PaymentMethod]:
     """Métodos de pago activos del tenant (FR-004) — un método desactivado
-    nunca aparece aquí, aunque el comensal ya tuviera la pantalla abierta."""
+    nunca aparece aquí, aunque el comensal ya tuviera la pantalla abierta.
+    Carga `catalog` de una vez (spec 034): `DinerPaymentMethod.fields` lo lee
+    de ahí vía `PaymentMethod.fields` (propiedad, sin columna propia)."""
     return db.execute(
         select(PaymentMethod)
+        .options(selectinload(PaymentMethod.catalog))
         .where(PaymentMethod.active.is_(True))
         .order_by(PaymentMethod.name)
     ).scalars().all()
