@@ -489,6 +489,15 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
         # no queda ni cobrada ni a medio enviar.
         _deduct_and_open(db, order, cashier)
 
+        # spec 035, A-52 (registro-de-anomalias.md): a diferencia de
+        # `_deduct_and_open` en sus otros dos llamadores (QR, sin venta
+        # todavía en ese instante), aquí la `Sale` ya se construyó arriba en
+        # esta misma transacción — el pedido queda `'pagada'` de una vez, no
+        # `'abierta'`. `tables_advanced.py` ya no trata `'pagada'` como "sin
+        # nada pendiente": sigue bloqueando mientras queden ítems por
+        # preparar.
+        order.status = "pagada"
+
         db.commit()
     except HTTPException:
         db.rollback()
@@ -840,6 +849,12 @@ def approve_payment_attempt(
             promotion_id=final_promotion_id,
         )
 
+        # spec 035, A-52 (registro-de-anomalias.md): la Sale ya se construyó
+        # arriba en esta misma transacción — igual que en checkout_and_send,
+        # el pedido queda 'pagada' de una vez, no 'abierta' (aunque cocina
+        # todavía no haya terminado de prepararlo).
+        order.status = "pagada"
+
         db.commit()
     except HTTPException:
         db.rollback()
@@ -952,6 +967,11 @@ def confirm_cash_payment_attempt(
             customer_order_id=order.id,
             promotion_id=final_promotion_id,
         )
+
+        # spec 035, A-52 (registro-de-anomalias.md): igual que en
+        # approve_payment_attempt/checkout_and_send — la Sale ya existe en
+        # esta misma transacción.
+        order.status = "pagada"
 
         db.commit()
     except HTTPException:
