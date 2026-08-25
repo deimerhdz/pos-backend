@@ -46,6 +46,12 @@ class PaymentMethod(UUIDPrimaryKeyMixin, Base):
     )
     catalog: Mapped[Optional["PaymentMethodCatalog"]] = relationship()
 
+    @property
+    def fields(self) -> list[dict]:
+        """Metadata de formato de `payment_info` (spec 034, `DinerPaymentMethod.fields`),
+        tomada del catálogo — sin columna propia, no requiere migración."""
+        return self.catalog.fields if self.catalog is not None else []
+
     # Recalculado en `sales/service.py` cada vez que se guarda `payment_info`,
     # comparando contra `catalog.fields` vigente en ese momento (spec 032,
     # research.md Decisión 4). No se revalida en cada lectura.
