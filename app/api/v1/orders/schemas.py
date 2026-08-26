@@ -142,6 +142,12 @@ class OrderItemResponse(BaseModel):
     participant_id: UUID | None = None
     quantity: int
     unit_price: Decimal
+    # Snapshot del descuento vigente al confirmar (spec 038, FR-013), mismos
+    # nombres/semántica que `CartItemResponse`: `None` si ninguna promoción
+    # aplicó a la línea (o es un combo), o si el pedido es anterior a esta
+    # spec (columnas nuevas, sin backfill — FR-015).
+    discounted_unit_price: Decimal | None = None
+    discounted_line_total: Decimal | None = None
     estado_cocina: str
     void_de: UUID | None = None
     notes: str | None = None
