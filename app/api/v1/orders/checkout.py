@@ -11,7 +11,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.audit import record_audit
@@ -693,6 +693,23 @@ def close_table_sessions(
     return sessions
 
 
+def delete_orphan_carts(db: Session, sessions: list[TableSession]) -> None:
+    """Elimina físicamente los `Cart` de los participantes de `sessions`, sin
+    importar su `status` (spec 039, FR-001/FR-002/FR-004). Se invoca en el
+    call-site, exactamente donde la mesa ya quedó `libre` — nunca dentro de
+    `close_table_sessions`/`close_participants` (research.md Decisión 1), para no
+    borrar carritos cuando la mesa no termina liberándose (`_sweep_schema`,
+    RN-SCHED-04). No hace `commit()`/`flush()` propio: se une a la transacción
+    del caller.
+    """
+    if not sessions:
+        return
+
+    participant_ids = select(SessionParticipant.id).where(
+        SessionParticipant.table_session_id.in_([s.id for s in sessions])
+    )
+    db.execute(delete(Cart).where(Cart.participant_id.in_(participant_ids)))
+
 
 def release_table(
     db: Session, table_id: UUID, *, closed_by: User | None = None
@@ -725,7 +742,8 @@ def release_table(
 
     try:
         table.status = "libre"
-        close_table_sessions(db, table.id, closed_by=closed_by)
+        sessions = close_table_sessions(db, table.id, closed_by=closed_by)
+        delete_orphan_carts(db, sessions)
         db.commit()
     except Exception:
         db.rollback()

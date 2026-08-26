@@ -91,7 +91,7 @@ def _sweep_schema(schema: str, corte: datetime, tenant_id: int | None = None) ->
     from app.models.dining_table import DiningTable
     from app.models.table_session import TableSession
     from app.api.v1.orders.checkout import (
-        TERMINAL, close_participants, close_table_sessions,
+        TERMINAL, close_participants, close_table_sessions, delete_orphan_carts,
     )
     from app.api.v1.table_sessions.service import has_billable_orders
 
@@ -137,7 +137,7 @@ def _sweep_schema(schema: str, corte: datetime, tenant_id: int | None = None) ->
                 continue
 
             # `closed_by=None`: no la cerró un humano, la cerró el barrido.
-            close_table_sessions(db, table_id, closed_by=None)
+            sessions = close_table_sessions(db, table_id, closed_by=None)
 
             # Segunda red: la mesa solo vuelve a 'libre' si tampoco le quedan
             # pedidos vivos **fuera** de esta sesión (los que quedaron sin
@@ -155,6 +155,7 @@ def _sweep_schema(schema: str, corte: datetime, tenant_id: int | None = None) ->
             )
             if quedo_libre:
                 table.status = "libre"
+                delete_orphan_carts(db, sessions)
             elif pendientes is not None:
                 logger.warning(
                     "Mesa %s (schema %s) sigue ocupada: tiene pedidos sin cobrar "

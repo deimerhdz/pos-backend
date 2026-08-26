@@ -40,6 +40,7 @@ from app.api.v1.orders.schemas import BlockIn, CancelIn, CheckoutAndSendIn, PayI
 from app.api.v1.sales.schemas import PaymentIn
 from app.api.v1.promotions import service as promotions
 from app.models.audit_log import AuditLog
+from app.models.cart import Cart
 from app.models.inventory_movement import InventoryMovement
 from app.models.sale import Sale
 
@@ -517,6 +518,36 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(result.status, "libre")
         db.refresh(ts)
         self.assertEqual(ts.status, "closed")
+
+    def test_release_table_borra_carritos_huerfanos_sin_ordenes_bloqueantes(self):
+        """US2 escenario 2 (spec 039, Acceptance Scenario 2): "Liberar Mesa"
+        (`release_table`) sin órdenes bloqueantes, con dos comensales ya
+        cerrados de la misma sesión, cada uno con su propio Cart huérfano →
+        la mesa queda 'libre' y ninguno de los dos Cart sigue existiendo.
+        Cubre el edge case de spec.md "dos TableSession cerrándose en la
+        misma operación" hasta donde lo permite este fixture: sembrar dos
+        filas `TableSession` para la misma mesa colisiona con
+        `idx_active_session_per_table` (único incondicional sobre SQLite,
+        sin partial `WHERE` — `orders_fixtures.new_session` no lo remueve),
+        así que se aísla el escenario con dos participantes de una sola
+        sesión; `delete_orphan_carts` borra por `participant_id`, sin
+        distinguir de qué sesión viene cada uno."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db, status="ocupada")
+        ts = fx.make_table_session(db, table=table)
+        p1 = fx.make_participant(db, table_session=ts, status="closed")
+        cart1 = fx.make_cart(db, participant=p1, status="abandonado")
+        cart1_id = cart1.id
+        p2 = fx.make_participant(db, table_session=ts, status="closed")
+        cart2 = fx.make_cart(db, participant=p2, status="abandonado")
+        cart2_id = cart2.id
+        db.commit()
+
+        result = checkout.release_table(db, table.id)
+
+        self.assertEqual(result.status, "libre")
+        self.assertIsNone(db.get(Cart, cart1_id))
+        self.assertIsNone(db.get(Cart, cart2_id))
 
     # -------------------------------------------------- checkout_and_send (T020)
 
