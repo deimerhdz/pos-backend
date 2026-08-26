@@ -604,13 +604,27 @@ def submit_cart(
         db.add(order)
         db.flush()
 
+        # spec 038, FR-002/FR-013 (research.md Decisión 4): mismo motor que ya
+        # usa `serialize_cart`/`GET /cart`, evaluado una sola vez antes del
+        # bucle — el snapshot de descuento del pedido recién confirmado debe
+        # coincidir exactamente con lo que el carrito mostraba justo antes.
+        now = datetime.now(timezone.utc)
+        promos = promotions.active_discount_promotions(db, now)
+        catalog = _discount_catalog(db, {ci.product_variant_id for ci in cart.items})
+
         for ci in cart.items:
+            discounted_unit_price, discounted_line_total = _line_discount(
+                promos, catalog, ci.product_variant_id, ci.combo_id, ci.quantity,
+                Decimal(ci.unit_price),
+            )
             item = OrderItem(
                 order_id=order.id,
                 participant_id=participant.id,
                 product_variant_id=ci.product_variant_id,
                 quantity=ci.quantity,
                 unit_price=ci.unit_price,  # snapshot copiado del carrito
+                discounted_unit_price=discounted_unit_price,
+                discounted_line_total=discounted_line_total,
                 notes=ci.notes,
                 combo_id=ci.combo_id,
                 estado_cocina="pendiente",
@@ -626,7 +640,13 @@ def submit_cart(
             receipt_file_url=receipt_file_url,
         ))
 
-        cart.status = "confirmado"
+        # spec 038, FR-003/FR-004: el carrito se elimina físicamente (no se
+        # archiva) en la misma transacción del pedido — la cascada ya
+        # declarada (`Cart.items`, `ondelete="CASCADE"` en `cart_items`/
+        # `cart_item_options`) se lleva sus líneas sin código adicional
+        # (research.md Decisión 1). Si algo de lo anterior falla, el
+        # `except`/`rollback()` de abajo deshace también este borrado.
+        db.delete(cart)
         db.commit()
     except HTTPException:
         db.rollback()
