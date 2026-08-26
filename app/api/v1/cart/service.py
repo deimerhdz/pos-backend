@@ -168,12 +168,16 @@ def open_session(
 
 # --------------------------------------------------------------- Carrito helpers
 
-def _load_open_cart(db: Session, participant_id: UUID) -> Cart:
-    cart = db.execute(
+def _load_open_cart_or_none(db: Session, participant_id: UUID) -> Cart | None:
+    return db.execute(
         select(Cart)
         .options(selectinload(Cart.items).selectinload(CartItem.options))
         .where(Cart.participant_id == participant_id, Cart.status == "abierto")
     ).scalar_one_or_none()
+
+
+def _load_open_cart(db: Session, participant_id: UUID) -> Cart:
+    cart = _load_open_cart_or_none(db, participant_id)
     if cart is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No hay carrito abierto para el comensal")
     return cart
@@ -217,19 +221,55 @@ def _cart_consumption(
     return total
 
 
+def _discount_catalog(db: Session, variant_ids: set[UUID]) -> dict[UUID, tuple[UUID, UUID]]:
+    """`product_id`/`category_id` por variante, para evaluar promociones por
+    línea (`_line_discount`) sin una consulta por línea."""
+    if not variant_ids:
+        return {}
+    rows = db.execute(
+        select(ProductVariant.id, ProductVariant.product_id, Product.category_id)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(ProductVariant.id.in_(variant_ids))
+    ).all()
+    return {row.id: (row.product_id, row.category_id) for row in rows}
+
+
+def _line_discount(
+    promos: list,
+    catalog: dict[UUID, tuple[UUID, UUID]],
+    product_variant_id: UUID,
+    combo_id: UUID | None,
+    quantity: int,
+    unit_price: Decimal,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Precio unitario/subtotal de línea ya con el mejor descuento percent/fixed
+    vigente aplicado, o `(None, None)` si ninguna promoción aplica a la línea
+    (o es un combo — su ahorro se calcula aparte, al cobrar). Mismo motor que
+    `GET /cart` (`promotions.best_line_discount`), compartido con `submit_cart`
+    para que el snapshot de descuento del pedido coincida exactamente con lo
+    que el carrito mostraba (research.md Decisión 4)."""
+    line_total = unit_price * quantity
+    if not promos or combo_id is not None:
+        return None, None
+    product_id, category_id = catalog.get(product_variant_id, (None, None))
+    discount, _ = promotions.best_line_discount(
+        promos, product_id, category_id, quantity, line_total, unit_price=unit_price,
+    )
+    if discount <= 0:
+        return None, None
+    discounted_line_total = (line_total - discount).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    discounted_unit_price = (discounted_line_total / quantity).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    return discounted_unit_price, discounted_line_total
+
+
 def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> CartResponse:
     now = datetime.now(timezone.utc)
     promos = promotions.active_discount_promotions(db, now)
-
-    variant_ids = {it.product_variant_id for it in cart.items}
-    catalog: dict[UUID, tuple[UUID, UUID]] = {}
-    if variant_ids:
-        rows = db.execute(
-            select(ProductVariant.id, ProductVariant.product_id, Product.category_id)
-            .join(Product, Product.id == ProductVariant.product_id)
-            .where(ProductVariant.id.in_(variant_ids))
-        ).all()
-        catalog = {row.id: (row.product_id, row.category_id) for row in rows}
+    catalog = _discount_catalog(db, {it.product_variant_id for it in cart.items})
 
     items: list[CartItemResponse] = []
     total = Decimal("0")
@@ -238,24 +278,12 @@ def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> 
     for it in cart.items:
         line_total = Decimal(it.unit_price) * it.quantity
         total += line_total
-        discounted_unit_price = None
-        discounted_line_total = None
-        # Los combos ya llevan su propio ahorro (`combo_discount_for_lines` al
-        # cobrar); aplicarles además un percent/fixed sería descontar dos veces.
-        if promos and it.combo_id is None:
-            product_id, category_id = catalog.get(it.product_variant_id, (None, None))
-            discount, _ = promotions.best_line_discount(
-                promos, product_id, category_id, it.quantity, line_total,
-                unit_price=Decimal(it.unit_price),
-            )
-            if discount > 0:
-                discounted_line_total = (line_total - discount).quantize(
-                    Decimal("0.01"), rounding=ROUND_HALF_UP
-                )
-                discounted_unit_price = (discounted_line_total / it.quantity).quantize(
-                    Decimal("0.01"), rounding=ROUND_HALF_UP
-                )
-                any_discount = True
+        discounted_unit_price, discounted_line_total = _line_discount(
+            promos, catalog, it.product_variant_id, it.combo_id, it.quantity,
+            Decimal(it.unit_price),
+        )
+        if discounted_line_total is not None:
+            any_discount = True
         discounted_total += discounted_line_total if discounted_line_total is not None else line_total
         items.append(CartItemResponse(
             id=it.id,
@@ -506,11 +534,10 @@ def submit_cart(
     ningún movimiento de stock. El chequeo de disponibilidad de aquí es preventivo
     (sin lock ni reserva): la validación real y atómica es la de la confirmación.
 
-    El comensal puede enviar varios pedidos en la misma sesión: al enviar, este
-    carrito queda `confirmado` y `_get_or_create_open_cart` le abre otro."""
-    cart = _load_open_cart(db, participant.id)
-    if not cart.items:
-        raise HTTPException(status.HTTP_409_CONFLICT, "El carrito está vacío")
+    El comensal puede enviar varios pedidos en la misma sesión: al confirmar,
+    este carrito se elimina físicamente y `_get_or_create_open_cart` le abre
+    otro, limpio, para la siguiente ronda (spec 038, FR-003/FR-004)."""
+    cart = _load_open_cart_or_none(db, participant.id)
 
     # spec 024, FR-005: no permitir una segunda orden activa del mismo
     # comensal. "Activa" = no terminal (research.md spec 024, Decisión 8).
@@ -519,12 +546,32 @@ def submit_cart(
     # última instancia ante una confirmación duplicada casi simultánea
     # (FR-013, research.md Decisión 4) — capturada más abajo, alrededor del
     # `commit()`.
+    #
+    # spec 038, FR-007 (research.md Decisión 3): se calcula **antes** de
+    # decidir qué error devolver, porque tras cualquier confirmación exitosa
+    # (FR-003 ya eliminó la fila del carrito) un segundo intento cae en
+    # `cart is None` — sin este orden, ese caso —el más frecuente en
+    # producción— mostraría el 404/409 genérico de "no hay carrito", no el
+    # mensaje explícito de "ya fue enviado".
     active_order = db.execute(
         select(CustomerOrder.id).where(
             CustomerOrder.participant_id == participant.id,
             CustomerOrder.status.in_(_NON_TERMINAL_ORDER_STATUSES),
         )
     ).scalar_one_or_none()
+
+    if cart is None or not cart.items:
+        if active_order is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Tu pedido ya fue enviado; revisa el estado en Mis pedidos.",
+            )
+        if cart is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "No hay carrito abierto para el comensal"
+            )
+        raise HTTPException(status.HTTP_409_CONFLICT, "El carrito está vacío")
+
     if active_order is not None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -580,13 +627,27 @@ def submit_cart(
         db.add(order)
         db.flush()
 
+        # spec 038, FR-002/FR-013 (research.md Decisión 4): mismo motor que ya
+        # usa `serialize_cart`/`GET /cart`, evaluado una sola vez antes del
+        # bucle — el snapshot de descuento del pedido recién confirmado debe
+        # coincidir exactamente con lo que el carrito mostraba justo antes.
+        now = datetime.now(timezone.utc)
+        promos = promotions.active_discount_promotions(db, now)
+        catalog = _discount_catalog(db, {ci.product_variant_id for ci in cart.items})
+
         for ci in cart.items:
+            discounted_unit_price, discounted_line_total = _line_discount(
+                promos, catalog, ci.product_variant_id, ci.combo_id, ci.quantity,
+                Decimal(ci.unit_price),
+            )
             item = OrderItem(
                 order_id=order.id,
                 participant_id=participant.id,
                 product_variant_id=ci.product_variant_id,
                 quantity=ci.quantity,
                 unit_price=ci.unit_price,  # snapshot copiado del carrito
+                discounted_unit_price=discounted_unit_price,
+                discounted_line_total=discounted_line_total,
                 notes=ci.notes,
                 combo_id=ci.combo_id,
                 estado_cocina="pendiente",
@@ -602,7 +663,13 @@ def submit_cart(
             receipt_file_url=receipt_file_url,
         ))
 
-        cart.status = "confirmado"
+        # spec 038, FR-003/FR-004: el carrito se elimina físicamente (no se
+        # archiva) en la misma transacción del pedido — la cascada ya
+        # declarada (`Cart.items`, `ondelete="CASCADE"` en `cart_items`/
+        # `cart_item_options`) se lleva sus líneas sin código adicional
+        # (research.md Decisión 1). Si algo de lo anterior falla, el
+        # `except`/`rollback()` de abajo deshace también este borrado.
+        db.delete(cart)
         db.commit()
     except HTTPException:
         db.rollback()
