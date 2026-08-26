@@ -168,12 +168,16 @@ def open_session(
 
 # --------------------------------------------------------------- Carrito helpers
 
-def _load_open_cart(db: Session, participant_id: UUID) -> Cart:
-    cart = db.execute(
+def _load_open_cart_or_none(db: Session, participant_id: UUID) -> Cart | None:
+    return db.execute(
         select(Cart)
         .options(selectinload(Cart.items).selectinload(CartItem.options))
         .where(Cart.participant_id == participant_id, Cart.status == "abierto")
     ).scalar_one_or_none()
+
+
+def _load_open_cart(db: Session, participant_id: UUID) -> Cart:
+    cart = _load_open_cart_or_none(db, participant_id)
     if cart is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No hay carrito abierto para el comensal")
     return cart
@@ -530,11 +534,10 @@ def submit_cart(
     ningún movimiento de stock. El chequeo de disponibilidad de aquí es preventivo
     (sin lock ni reserva): la validación real y atómica es la de la confirmación.
 
-    El comensal puede enviar varios pedidos en la misma sesión: al enviar, este
-    carrito queda `confirmado` y `_get_or_create_open_cart` le abre otro."""
-    cart = _load_open_cart(db, participant.id)
-    if not cart.items:
-        raise HTTPException(status.HTTP_409_CONFLICT, "El carrito está vacío")
+    El comensal puede enviar varios pedidos en la misma sesión: al confirmar,
+    este carrito se elimina físicamente y `_get_or_create_open_cart` le abre
+    otro, limpio, para la siguiente ronda (spec 038, FR-003/FR-004)."""
+    cart = _load_open_cart_or_none(db, participant.id)
 
     # spec 024, FR-005: no permitir una segunda orden activa del mismo
     # comensal. "Activa" = no terminal (research.md spec 024, Decisión 8).
@@ -543,12 +546,32 @@ def submit_cart(
     # última instancia ante una confirmación duplicada casi simultánea
     # (FR-013, research.md Decisión 4) — capturada más abajo, alrededor del
     # `commit()`.
+    #
+    # spec 038, FR-007 (research.md Decisión 3): se calcula **antes** de
+    # decidir qué error devolver, porque tras cualquier confirmación exitosa
+    # (FR-003 ya eliminó la fila del carrito) un segundo intento cae en
+    # `cart is None` — sin este orden, ese caso —el más frecuente en
+    # producción— mostraría el 404/409 genérico de "no hay carrito", no el
+    # mensaje explícito de "ya fue enviado".
     active_order = db.execute(
         select(CustomerOrder.id).where(
             CustomerOrder.participant_id == participant.id,
             CustomerOrder.status.in_(_NON_TERMINAL_ORDER_STATUSES),
         )
     ).scalar_one_or_none()
+
+    if cart is None or not cart.items:
+        if active_order is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Tu pedido ya fue enviado; revisa el estado en Mis pedidos.",
+            )
+        if cart is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "No hay carrito abierto para el comensal"
+            )
+        raise HTTPException(status.HTTP_409_CONFLICT, "El carrito está vacío")
+
     if active_order is not None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
