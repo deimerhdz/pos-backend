@@ -11,6 +11,7 @@ from app.core.crud import get_or_404
 from app.core.http_cache import json_or_304
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User, Tenant
+from app.core.plan_limits import enforce_plan_limit
 from app.core.qr_token import mint_qr_token
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
@@ -62,10 +63,16 @@ def list_tables(db: Session = Depends(get_db), _: User = Depends(get_current_use
 
 
 @router.post("/tables", response_model=TableResponse, status_code=status.HTTP_201_CREATED, summary="Crear mesa (genera qr_token)")
-def create_table(body: TableCreate, db: Session = Depends(get_db), _: User = Depends(require_tenant_admin)):
+def create_table(
+    body: TableCreate,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+    _: User = Depends(require_tenant_admin),
+):
     dup = db.execute(select(DiningTable).where(DiningTable.number == body.number)).scalar_one_or_none()
     if dup is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Ya existe una mesa con ese número")
+    enforce_plan_limit(db, tenant, "mesas")  # spec 033, FR-005/FR-006
     table = DiningTable(number=body.number, name=body.name)
     db.add(table)
     db.commit()

@@ -37,6 +37,7 @@ from .order_payment_attempt import OrderPaymentAttempt
 # Ventas
 from .sale import Sale, SaleItem
 from .payment import PaymentMethod, Payment
+from .payment_method_catalog import PaymentMethodCatalog
 
 # Promociones
 from .promotion import Promotion, PromotionTarget, PromotionComboItem
@@ -47,3 +48,6 @@ from .audit_log import AuditLog
 
 # Facturación
 from .invoice import Invoice, InvoiceCounter
+
+# Planes de suscripción (Super Admin)
+from .plan import Plan

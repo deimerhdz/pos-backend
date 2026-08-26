@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_TABLE:int = Field(default=120,env="RATE_LIMIT_PER_TABLE")
     RATE_LIMIT_WINDOW_SECONDS:int = Field(default=60,env="RATE_LIMIT_WINDOW_SECONDS")
 
+    # Recuperación de contraseña (spec 031): límite de solicitudes por correo
+    # ingresado, ventana deslizante genuina sobre Redis (no la ventana fija de
+    # RATE_LIMIT_*, ver app/core/rate_limit.py::enforce_sliding_window).
+    PASSWORD_RESET_MAX_REQUESTS:int = Field(default=3,env="PASSWORD_RESET_MAX_REQUESTS")
+    PASSWORD_RESET_WINDOW_SECONDS:int = Field(default=900,env="PASSWORD_RESET_WINDOW_SECONDS")
+    # Vigencia del enlace de un solo uso enviado por correo, en minutos.
+    PASSWORD_RESET_TOKEN_EXPIRY_MINUTES:int = Field(default=30,env="PASSWORD_RESET_TOKEN_EXPIRY_MINUTES")
+
     # ---------------- Tiempo real (SSE + Redis Streams) ----------------
     # Interruptor de pánico: en false el publicador es un no-op y el endpoint
     # responde 503, así los clientes caen al sondeo sin desplegar frontend.

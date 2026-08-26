@@ -10,6 +10,7 @@ que `app/scripts/test_promotions_rules.py` para funciones puras.
     python -m unittest app.characterization_tests.test_tenant_timezone -v
 """
 import unittest
+import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -19,7 +20,7 @@ from app.core.timezone import resolve_timezone
 
 def _tenant(timezone: str) -> Tenant:
     return Tenant(
-        id=1, name="t", schema="t", plan="basic", host="t.example.com", timezone=timezone,
+        id=1, name="t", schema="t", plan_id=uuid.uuid4(), host="t.example.com", timezone=timezone,
     )
 
 

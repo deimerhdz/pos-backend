@@ -1,7 +1,8 @@
 import uuid
+from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import Integer,String,Column,DateTime, UniqueConstraint,func,Boolean,MetaData,ForeignKey
+from sqlalchemy import Integer,String,Column,DateTime, UniqueConstraint,func,Boolean,MetaData,ForeignKey,Index,CheckConstraint,text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm  import mapped_column,Mapped,DeclarativeBase,relationship,validates
 
@@ -50,9 +51,25 @@ class Tenant(Base,TimestampMixin):
     name:Mapped[str] = mapped_column("name",String(255), nullable=False, index=True, unique=True)
     
     schema:Mapped[str] = mapped_column("schema", String(255), nullable=False, unique=True)
-    
-    plan:Mapped[str] = mapped_column("plan", String(100), nullable=False, default="basic")
-    
+
+    # Plan de suscripción vigente (spec 033). FK NOT NULL: garantiza FR-003
+    # ("todo tenant tiene, en todo momento, exactamente un plan vigente") a
+    # nivel de esquema, sin validación de aplicación adicional. Reemplaza a
+    # la columna heredada `plan` (texto libre sin uso real, research.md
+    # Decisión 2).
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("shared.plans.id"), nullable=False
+    )
+    plan: Mapped["Plan"] = relationship()
+
+    # Ciclo de facturación de la asignación vigente ("mensual"/"anual") y las
+    # fechas que lo respaldan. Los tres son NULL a la vez cuando el tenant
+    # nunca vence (plan de transición o elegido explícitamente "sin
+    # vencimiento", FR-021) — research.md Decisiones 10 y 12.
+    ciclo_facturacion: Mapped[Optional[str]] = mapped_column("ciclo_facturacion", String(10), nullable=True)
+    plan_iniciado_en: Mapped[Optional[datetime]] = mapped_column("plan_iniciado_en", DateTime, nullable=True)
+    plan_vence_en: Mapped[Optional[datetime]] = mapped_column("plan_vence_en", DateTime, nullable=True)
+
     host:Mapped[str] = mapped_column("host", String(255), nullable=False, unique=True)
 
     logo_url:Mapped[Optional[str]] = mapped_column("logo_url", String(500), nullable=True)
@@ -115,6 +132,11 @@ class User(UUIDPrimaryKeyMixin,TimestampMixin,Base):
 
     must_change_password:Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Corte de sesiones (spec 031): cualquier JWT con `iat` anterior a este
+    # instante deja de aceptarse (ver app/core/dependencies.py). NULL hasta el
+    # primer cambio de contraseña bajo esta spec — no afecta cuentas existentes.
+    tokens_valid_after:Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
+
     role_id: Mapped[UUID] = mapped_column(ForeignKey("shared.roles.id"))
     
     role:Mapped[Optional["Role"]] = relationship(back_populates="users")
@@ -144,3 +166,90 @@ class User(UUIDPrimaryKeyMixin,TimestampMixin,Base):
         return self.tenant.name if self.tenant else None
 
 
+class PasswordResetToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Enlace de un solo uso para restablecer contraseña sin sesión (spec 031).
+
+    Solo se persiste el hash SHA-256 del token crudo enviado por correo —
+    igual que una contraseña, el valor crudo nunca vive en la base de datos
+    (research.md Decisión 2). El estado (vigente/usado/invalidado/caducado) se
+    deriva al leer, no es una columna — ver data-model.md.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("shared.users.id"), nullable=False, index=True
+    )
+
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+
+    # Correo de la cuenta al emitir el enlace; un cambio de correo posterior
+    # invalida el enlace en vivo al comparar contra user.email (FR-012).
+    email_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
+    invalidated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
+
+    user: Mapped["User"] = relationship()
+
+    __table_args__ = ({"schema": "shared"},)
+
+
+class UserInvitation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Invitación pendiente de alta de un usuario interno por correo (spec 037).
+
+    Una sola fila por correo+tenant mientras `status='pending'` — reenviar
+    (FR-010) sobrescribe `password_hash`/`sent_at` de la misma fila en vez de
+    crear una nueva (research.md Decisión 2). Al consumirse desde
+    `POST /auth/login` da origen a un `User` (research.md Decisión 7); ver
+    data-model.md.
+    """
+
+    __tablename__ = "user_invitations"
+
+    tenant_id: Mapped[int] = mapped_column(
+        ForeignKey("shared.tenants.id"), nullable=False, index=True
+    )
+
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    role_id: Mapped[UUID] = mapped_column(ForeignKey("shared.roles.id"), nullable=False)
+
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    status: Mapped[str] = mapped_column(String(10), nullable=False, server_default="pending")
+
+    sent_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    cancelled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    tenant: Mapped["Tenant"] = relationship()
+    role: Mapped["Role"] = relationship()
+
+    @property
+    def role_name(self) -> Optional[str]:
+        return self.role.name if self.role else None
+
+    __table_args__ = (
+        # A lo sumo una invitación 'pending' por (tenant, correo) a la vez
+        # (FR-015, research.md Decisión 3). `sqlite_where` además de
+        # `postgresql_where` para que los characterization tests (SQLite en
+        # memoria) enfrenten el mismo IntegrityError que produciría Postgres.
+        Index(
+            "idx_pending_invitation_per_tenant_email",
+            "tenant_id",
+            "email",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'consumed', 'cancelled')",
+            name="ck_user_invitations_status",
+        ),
+        {"schema": "shared"},
+    )

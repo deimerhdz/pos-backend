@@ -19,8 +19,17 @@ import bcrypt
 from app.core.config import settings
 from app.core.models import Tenant, User, convention, Base
 import app.models  # registra modelos tenant en Base.metadata
+from app.core.timezone import utc_now
+from app.models.plan import Plan
 from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
+
+# Import diferido (dentro de tenant_create) de app.core.plan_limits: ese
+# módulo importa get_db/get_tenant de este mismo fichero (app.core.db) para
+# construir require_module_access — importarlo aquí arriba crearía un ciclo
+# db.py -> plan_limits.py -> db.py. calculate_plan_vencimiento/
+# validate_billing_cycle_price no dependen de nada de este módulo, así que
+# el import diferido es seguro y no reevalúa nada costoso por request.
 
 alembic_config = Config("alembic.ini")
 # En prod el echo se apaga: serializar cada SELECT a texto y escribirlo era el
@@ -44,7 +53,18 @@ def with_db(tenant_schema: Optional[str]):
         db.close()
         
         
-def tenant_create(name: str, schema: str, host: str, admin_name: str, admin_email: str, admin_password: str) -> None:
+def tenant_create(
+    name: str,
+    schema: str,
+    host: str,
+    admin_name: str,
+    admin_email: str,
+    admin_password: str,
+    plan_id: uuid.UUID,
+    ciclo_facturacion: Optional[str],
+) -> None:
+    from app.core.plan_limits import calculate_plan_vencimiento, validate_billing_cycle_price
+
     with with_db(schema) as db:
         try:
             context = MigrationContext.configure(db.connection())
@@ -53,10 +73,25 @@ def tenant_create(name: str, schema: str, host: str, admin_name: str, admin_emai
                 raise RuntimeError(
                     "Database is not up-to-date. Execute migrations before adding new tenants."
                 )
+
+            # spec 033, FR-004/FR-017/FR-018: un tenant nunca se persiste sin
+            # un plan_id válido ni con un ciclo de facturación sin precio.
+            plan = db.get(Plan, plan_id)
+            if plan is None:
+                raise HTTPException(status_code=404, detail=f"El plan '{plan_id}' no existe")
+            validate_billing_cycle_price(plan, ciclo_facturacion)
+
+            plan_iniciado_en = utc_now().replace(tzinfo=None)
+            plan_vence_en = calculate_plan_vencimiento(plan_iniciado_en, ciclo_facturacion)
+
             tenant = Tenant(
                 name=name,
                 host=host,
                 schema=schema,
+                plan_id=plan_id,
+                ciclo_facturacion=ciclo_facturacion,
+                plan_iniciado_en=plan_iniciado_en if ciclo_facturacion is not None else None,
+                plan_vence_en=plan_vence_en,
             )
             db.add(tenant)
             db.flush()
@@ -91,7 +126,13 @@ def tenant_create(name: str, schema: str, host: str, admin_name: str, admin_emai
                 raise HTTPException(status_code=409, detail=f"El tenant '{schema}' ya existe")
             logger.exception("IntegrityError inesperado durante tenant_create")
             raise HTTPException(status_code=500, detail="Internal server error")
-        
+
+        except HTTPException:
+            # spec 033: deja pasar los 404/409 intencionales de la validación
+            # de plan_id/ciclo_facturacion sin convertirlos en un 500 genérico.
+            db.rollback()
+            raise
+
         except Exception as e:
             db.rollback()
             logger.exception("Unexpected error creating tenant"+str(e))

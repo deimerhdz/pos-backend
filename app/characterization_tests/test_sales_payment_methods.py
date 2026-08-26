@@ -6,6 +6,15 @@ y `PATCH /sales/payment-methods/{id}` son comportamiento nuevo (Constitución,
 Principio IV/X) — se verifican contra `spec.md`, no contra un comportamiento
 heredado.
 
+Editado por spec 032-catalogo-metodos-pago (FR-007/FR-011): ninguno de estos
+tests creaba métodos vía `service.create_payment_method`/`router` con `name`
+libre — todos siembran filas directamente con `orders_fixtures.make_payment_method`
+(un fixture, no la API) y solo ejercitan `service.update_payment_method`
+(`PATCH`), que nunca aceptó `name`. Por eso no necesitaron cambios de fondo; el
+`name`/`type` libres que antes aceptaba `POST /sales/payment-methods` ya no
+existen (`PaymentMethodCreate` ahora exige `catalog_id`) — esa creación nueva,
+vía catálogo, se prueba en `test_sales_payment_methods_catalog.py`.
+
 Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_sales_payment_methods -v

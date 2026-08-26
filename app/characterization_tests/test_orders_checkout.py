@@ -544,11 +544,14 @@ class TestCheckout(unittest.TestCase):
         )
 
     def test_checkout_and_send_cobra_descuenta_y_abre_a_cocina(self):
-        """Comportamiento nuevo (spec 028, T016): orden 'recibida' (nacida con
+        """Comportamiento nuevo (spec 028, T016), estado ampliado por spec 035
+        (A-52, `registro-de-anomalias.md`): orden 'recibida' (nacida con
         `hold_for_payment=True`) + turno de caja abierto → `checkout_and_send`
-        cobra (crea el `Sale`), descuenta inventario y pasa la orden a
-        'abierta' — todo en una sola llamada, sin pasar por
-        `OrderPaymentAttempt` (eso es exclusivo del flujo QR)."""
+        cobra (crea el `Sale`), descuenta inventario, y pasa la orden a
+        'pagada' — todo en una sola llamada, sin pasar por
+        `OrderPaymentAttempt` (eso es exclusivo del flujo QR). Antes de spec
+        035 quedaba en 'abierta' pese a ya tener venta; ver research.md
+        Decisión 1."""
         s = self._seed_hold_order_con_receta()
         db, order, insumo = s["db"], s["order"], s["insumo"]
         shift, method = s["shift"], s["method"]
@@ -563,7 +566,7 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(sale.total, PRECIO)
         self.assertEqual(sale.customer_name, "Consumidor Final")
         db.refresh(order)
-        self.assertEqual(order.status, "abierta")
+        self.assertEqual(order.status, "pagada")
         self.assertEqual(order.version, 1)
         movimientos = db.execute(
             select(InventoryMovement).where(InventoryMovement.reference_id == order.id)

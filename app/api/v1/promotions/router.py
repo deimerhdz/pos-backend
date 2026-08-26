@@ -12,6 +12,7 @@ from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User
 from app.core.audit import record_audit
 from app.core.pagination import Page, paginate
+from app.core.plan_limits import require_module_access
 from app.models.promotion import Promotion
 from app.api.v1.promotions import service
 from app.api.v1.promotions.schemas import (
@@ -19,7 +20,10 @@ from app.api.v1.promotions.schemas import (
     PromotionDuplicate, PromotionResponse, PromotionWithOverlaps,
 )
 
-router = APIRouter(prefix="/promotions", tags=["promotions"])
+router = APIRouter(
+    prefix="/promotions", tags=["promotions"],
+    dependencies=[Depends(require_module_access("promociones"))],
+)
 
 
 def _with_overlaps(db: Session, promo: Promotion) -> dict:

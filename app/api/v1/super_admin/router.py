@@ -1,18 +1,29 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import select
 
+from app.core.crud import get_or_404
 from app.core.dependencies import get_shared_db, get_current_super_admin
 from app.core.pagination import Page, paginate
 from app.core.models import User, Tenant
+from app.core.plan_limits import calculate_plan_vencimiento, validate_billing_cycle_price
+from app.core.timezone import utc_now
+from app.models.plan import Plan
 from app.api.v1.users.schemas import UserResponse
-from app.api.v1.super_admin.schemas import TenantResponse
+from app.api.v1.super_admin.schemas import TenantPlanUpdate, TenantResponse
+from app.api.v1.super_admin.payment_methods_router import router as payment_methods_catalog_router
+from app.api.v1.super_admin.plans_router import router as plans_router
 
 router = APIRouter(
     prefix="/super-admin",
     tags=["super-admin"],
     dependencies=[Depends(get_current_super_admin)],
 )
+
+router.include_router(payment_methods_catalog_router)
+router.include_router(plans_router)
 
 
 @router.get(
@@ -58,5 +69,44 @@ def list_all_tenants(
     size: int = Query(20, ge=1, le=100, description="Cantidad de elementos por página (máximo 100)."),
     db: Session = Depends(get_shared_db),
 ):
-    stmt = select(Tenant).order_by(Tenant.created_at.desc())
+    stmt = (
+        select(Tenant)
+        .options(selectinload(Tenant.plan))
+        .order_by(Tenant.created_at.desc())
+    )
     return paginate(db, stmt, page, size)
+
+
+@router.patch(
+    "/tenants/{tenant_id}",
+    response_model=TenantResponse,
+    summary="Asignar, cambiar o renovar el plan de un tenant",
+    description=(
+        "Reasigna el plan vigente de un tenant, lo cambia por otro, o lo renueva (mismo plan) — "
+        "las tres son la misma operación: siempre recalcula el período desde este momento "
+        "(FR-010/FR-017/FR-018/FR-020, research.md Decisión 16)."
+    ),
+    responses={
+        404: {"description": "No existe ese tenant, o el plan indicado no existe."},
+        409: {"description": "El ciclo de facturación elegido no tiene precio definido en ese plan."},
+    },
+)
+def update_tenant_plan(
+    tenant_id: int, body: TenantPlanUpdate, db: Session = Depends(get_shared_db),
+):
+    tenant = get_or_404(db, Tenant, tenant_id, "No existe ese tenant")
+    plan = get_or_404(db, Plan, body.plan_id, "No existe ese plan")
+    validate_billing_cycle_price(plan, body.ciclo_facturacion)
+
+    tenant.plan_id = plan.id
+    tenant.ciclo_facturacion = body.ciclo_facturacion
+    if body.ciclo_facturacion is not None:
+        tenant.plan_iniciado_en = utc_now().replace(tzinfo=None)
+        tenant.plan_vence_en = calculate_plan_vencimiento(tenant.plan_iniciado_en, body.ciclo_facturacion)
+    else:
+        tenant.plan_iniciado_en = None
+        tenant.plan_vence_en = None
+
+    db.commit()
+    db.refresh(tenant)
+    return tenant

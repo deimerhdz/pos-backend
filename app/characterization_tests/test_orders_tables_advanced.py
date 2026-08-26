@@ -334,6 +334,59 @@ class TestTablesAdvanced(unittest.TestCase):
         self.assertEqual(session_total, group_total)
         self.assertEqual(group_total, Decimal("13500"))
 
+    # ------------------------- Nueva protección: orden 'pagada' con cocina pendiente (spec 035, A-52)
+
+    def _seed_orden_pagada_con_item(self, db=None, *, estado_cocina="pendiente"):
+        db, table, ts, order = self._seed_table_con_orden_activa(db, status="pagada")
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        fx.make_order_item(db, order, variant, estado_cocina=estado_cocina)
+        db.commit()
+        return db, table, order
+
+    def test_orden_pagada_con_item_pendiente_sigue_bloqueando_spec_035(self):
+        """Spec 035 (A-52, `registro-de-anomalias.md`): una orden 'pagada'
+        (como la que deja `checkout_and_send` desde esta spec) con algún ítem
+        todavía sin terminar de preparar sigue bloqueando liberar, mover, y
+        fusionar su mesa — antes de esta spec, 'pagada' dejaba de bloquear
+        sin mirar el estado de cocina de sus ítems."""
+        db, table, order = self._seed_orden_pagada_con_item(estado_cocina="pendiente")
+
+        with self.assertRaises(HTTPException) as ctx:
+            tables_advanced.set_table_status(db, table.id, "libre")
+        self.assertEqual(ctx.exception.status_code, 409)
+
+        destino = fx.make_dining_table(db, status="libre")
+        db.commit()
+        with self.assertRaises(HTTPException) as ctx:
+            tables_advanced.move_order(db, order.id, destino.id)
+        self.assertEqual(ctx.exception.status_code, 409)
+
+        _, _, _, otra = self._seed_table_con_orden_activa(db, status="abierta")
+        with self.assertRaises(HTTPException) as ctx:
+            tables_advanced.merge_orders(db, [order.id, otra.id])
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    def test_orden_pagada_con_items_terminados_ya_no_bloquea_spec_035(self):
+        """Spec 035 (A-52): la misma orden 'pagada', una vez sus ítems quedan
+        `listo`/`anulado`, deja de bloquear — mismo resultado final que antes
+        de esta spec para una orden verdaderamente sin nada pendiente."""
+        db, table, order = self._seed_orden_pagada_con_item(estado_cocina="listo")
+        result = tables_advanced.set_table_status(db, table.id, "libre")
+        self.assertEqual(result.status, "libre")
+
+        db, table2, order2 = self._seed_orden_pagada_con_item(db, estado_cocina="anulado")
+        destino = fx.make_dining_table(db, status="libre")
+        db.commit()
+        moved = tables_advanced.move_order(db, order2.id, destino.id)
+        self.assertEqual(moved.dining_table_id, destino.id)
+
+        db, table3, order3 = self._seed_orden_pagada_con_item(db, estado_cocina="listo")
+        _, _, _, otra = self._seed_table_con_orden_activa(db, status="abierta")
+        merged = tables_advanced.merge_orders(db, [order3.id, otra.id])
+        self.assertIn(order3.id, merged["order_ids"])
+
 
 if __name__ == "__main__":
     unittest.main()

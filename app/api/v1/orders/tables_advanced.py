@@ -8,25 +8,64 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
 
 from app.core.crud import get_or_404
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
+from app.models.order_item import EN_CURSO
 from app.api.v1.orders import checkout
 from app.api.v1.promotions import service as promotions
 
-TERMINAL = ("pagada", "cancelada")
+
+def _has_pending_kitchen_work(order: CustomerOrder) -> bool:
+    """¿Le queda a esta orden algún ítem sin terminar de preparar?
+    (`EN_CURSO`, `models/order_item.py`)."""
+    return any(it.estado_cocina in EN_CURSO for it in order.items)
+
+
+def _table_occupied_by_order(order: CustomerOrder) -> bool:
+    """¿Esta orden hace que su mesa cuente como "con trabajo pendiente" para
+    liberarla/reservarla, o como destino/origen ocupado al mover otra orden?
+    (spec 035, A-52 de `registro-de-anomalias.md`). `'cancelada'` nunca ocupa
+    la mesa. Una orden `'pagada'` deja de ocuparla salvo que le queden ítems
+    sin terminar de preparar — antes de esta spec, `'pagada'` dejaba de
+    ocupar la mesa de inmediato, sin mirar cocina; ahora que
+    `checkout_and_send` puede dejar una orden `'pagada'` con comida todavía
+    en preparación (spec 028: se cobra antes de enviar a cocina), esa señal
+    ya no basta por sí sola. Cualquier otro estado (`'recibida'`, `'abierta'`,
+    `'bloqueada'`) sigue ocupando la mesa sin condición, igual que antes."""
+    if order.status == "cancelada":
+        return False
+    if order.status == "pagada":
+        return _has_pending_kitchen_work(order)
+    return True
+
+
+def _order_locked_for_move_or_merge(order: CustomerOrder) -> bool:
+    """¿Esta orden específica no se puede mover ni fusionar todavía? (spec
+    035, A-52). Distinto de `_table_occupied_by_order`: una orden
+    `'cancelada'` siempre lo impide (igual que antes de esta spec) aunque
+    nunca ocupe la mesa por sí sola; una orden no-terminal
+    (`'recibida'`/`'abierta'`/`'bloqueada'`) nunca lo impide (igual que
+    antes). Una orden `'pagada'` lo impide solo mientras le queden ítems sin
+    terminar de preparar — antes de esta spec, `'pagada'` siempre lo impedía,
+    sin mirar cocina."""
+    if order.status == "cancelada":
+        return True
+    if order.status == "pagada":
+        return _has_pending_kitchen_work(order)
+    return False
 
 
 def _active_orders_on_table(db: Session, table_id: UUID) -> list[CustomerOrder]:
-    return db.execute(
-        select(CustomerOrder).where(
-            CustomerOrder.dining_table_id == table_id,
-            CustomerOrder.status.notin_(TERMINAL),
-        )
+    orders = db.execute(
+        select(CustomerOrder)
+        .options(selectinload(CustomerOrder.items))
+        .where(CustomerOrder.dining_table_id == table_id)
     ).scalars().all()
+    return [o for o in orders if _table_occupied_by_order(o)]
 
 
 def set_table_status(db: Session, table_id: UUID, new_status: str) -> DiningTable:
@@ -46,7 +85,7 @@ def set_table_status(db: Session, table_id: UUID, new_status: str) -> DiningTabl
 
 def move_order(db: Session, order_id: UUID, target_table_id: UUID) -> CustomerOrder:
     order = get_or_404(db, CustomerOrder, order_id, "Order not found")
-    if order.status in TERMINAL:
+    if _order_locked_for_move_or_merge(order):
         raise HTTPException(status.HTTP_409_CONFLICT, "La orden ya está cerrada")
 
     target = get_or_404(db, DiningTable, target_table_id, "Target table not found")
@@ -80,7 +119,7 @@ def merge_orders(db: Session, order_ids: list[UUID]) -> dict:
     ).scalars().all()
     if len(orders) != len(set(order_ids)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Alguna orden no existe")
-    if any(o.status in TERMINAL for o in orders):
+    if any(_order_locked_for_move_or_merge(o) for o in orders):
         raise HTTPException(status.HTTP_409_CONFLICT, "No se pueden unir órdenes ya cerradas")
 
     # Reusar un grupo existente entre las órdenes, o crear uno nuevo.
