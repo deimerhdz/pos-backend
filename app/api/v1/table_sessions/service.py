@@ -123,10 +123,11 @@ def try_release_if_empty(db: Session, table_session_id: UUID) -> bool:
     if has_billable_orders(db, ts.id):
         return False
 
-    checkout.close_table_sessions(db, ts.dining_table_id, closed_by=None)
+    sessions = checkout.close_table_sessions(db, ts.dining_table_id, closed_by=None)
     table = db.get(DiningTable, ts.dining_table_id)
     if table is not None:
         table.status = "libre"
+        checkout.delete_orphan_carts(db, sessions)
     return True
 
 
@@ -281,11 +282,12 @@ def close_session(
             order.status = "pagada"
 
         ts.billing_mode = data.billing_mode.value
-        checkout.close_table_sessions(db, ts.dining_table_id, closed_by=cashier)
+        sessions = checkout.close_table_sessions(db, ts.dining_table_id, closed_by=cashier)
 
         table = db.get(DiningTable, ts.dining_table_id)
         if table is not None:
             table.status = "libre"
+            checkout.delete_orphan_carts(db, sessions)
 
         db.commit()
     except HTTPException:
@@ -370,11 +372,12 @@ def release_paid_session(
     _assert_closable(db, orders)
 
     try:
-        checkout.close_table_sessions(db, ts.dining_table_id, closed_by=cashier)
+        sessions = checkout.close_table_sessions(db, ts.dining_table_id, closed_by=cashier)
 
         table = db.get(DiningTable, ts.dining_table_id)
         if table is not None:
             table.status = "libre"
+            checkout.delete_orphan_carts(db, sessions)
 
         db.commit()
     except Exception:
