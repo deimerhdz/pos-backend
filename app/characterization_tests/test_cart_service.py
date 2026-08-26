@@ -465,9 +465,11 @@ class TestCartService(unittest.TestCase):
 
     def test_leave_session_cierra_participante_abandona_carrito_y_libera_mesa(self):
         """CONGELA comportamiento actual: `leave_session` cierra al
-        comensal (`status='closed'`), abandona su carrito abierto
-        (`status='abandonado'`) y, al ser el último de la mesa sin nada que
-        cobrar, libera la mesa en el acto (`try_release_if_empty`)."""
+        comensal (`status='closed'`) y, al ser el último de la mesa sin nada
+        que cobrar, libera la mesa en el acto (`try_release_if_empty`).
+        `close_participants` sigue marcando el carrito `'abandonado'` como
+        paso intermedio, pero spec 039 (`delete_orphan_carts`) lo elimina
+        físicamente en la misma operación en la que la mesa queda `libre`."""
         db = cart_fixtures.new_session()
         table = cart_fixtures.make_dining_table(db, status="libre")
         resp = service.open_session(db, 1, table, "Ana")
@@ -476,8 +478,7 @@ class TestCartService(unittest.TestCase):
         service.leave_session(db, participant)
 
         self.assertEqual(participant.status, "closed")
-        cart = db.get(Cart, resp.cart_id)
-        self.assertEqual(cart.status, "abandonado")
+        self.assertIsNone(db.get(Cart, resp.cart_id))
         self.assertEqual(table.status, "libre")
 
     # ----------------------------------------------------------------- submit_cart (T021)
