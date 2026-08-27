@@ -596,6 +596,27 @@ def cancel_order(
             participant_id=participant.id if participant is not None else None,
         ))
 
+        # Spec 044: rechazar un pedido con pago QR pendiente (efectivo, o
+        # transferencia sin comprobante aún) también resuelve ese intento —
+        # sin esto quedaba "pendiente" para siempre en una orden ya
+        # cancelada. Mismos campos que `reject_payment_attempt` (arriba),
+        # pero buscado por `order_id` porque este endpoint no recibe
+        # `attempt_id`; el índice único parcial garantiza a lo sumo un
+        # `pendiente` por orden, así que `scalar_one_or_none()` es seguro.
+        pending_attempt = db.execute(
+            select(OrderPaymentAttempt)
+            .where(
+                OrderPaymentAttempt.order_id == order.id,
+                OrderPaymentAttempt.status == "pendiente",
+            )
+            .with_for_update(of=OrderPaymentAttempt)
+        ).scalar_one_or_none()
+        if pending_attempt is not None:
+            pending_attempt.status = "rechazado"
+            pending_attempt.rejection_reason = data.motivo
+            pending_attempt.resolved_by_user_id = actor_id
+            pending_attempt.resolved_at = utc_now()
+
         if perdidos:
             # La pérdida no genera movimiento de inventario (ya está descontada);
             # queda trazada en auditoría para el reporte de mermas.

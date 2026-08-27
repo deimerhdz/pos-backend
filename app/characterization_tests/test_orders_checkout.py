@@ -42,6 +42,7 @@ from app.api.v1.promotions import service as promotions
 from app.models.audit_log import AuditLog
 from app.models.cart import Cart
 from app.models.inventory_movement import InventoryMovement
+from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.sale import Sale
 
 PRECIO = Decimal("10000")
@@ -430,6 +431,92 @@ class TestCheckout(unittest.TestCase):
         self.assertIsNotNone(
             db.execute(select(Sale).where(Sale.id == sale.id)).scalar_one_or_none()
         )
+
+    # --------- cancel_order también resuelve el intento de pago (spec 044) ---------
+    #
+    # Comportamiento NUEVO (spec 044, revierte research.md D5 de spec 028 para pago
+    # en efectivo y transferencia-sin-comprobante): rechazar un pedido con pago QR
+    # pendiente ya no lo deja "pendiente" para siempre en una orden cancelada.
+
+    def test_cancel_order_resuelve_intento_de_pago_pendiente_efectivo_spec_044(self):
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="recibida", channel="qr")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        method = fx.make_payment_method(db, is_cash=True)
+        attempt = fx.make_payment_attempt(db, order, method, status="pendiente")
+        db.commit()
+        user = self._user()
+
+        resultado = checkout.cancel_order(db, order.id, CancelIn(motivo="no llegó"), user)
+        self.assertEqual(resultado.status, "cancelada")
+
+        db.refresh(attempt)
+        self.assertEqual(attempt.status, "rechazado")
+        self.assertEqual(attempt.rejection_reason, "no llegó")
+        self.assertEqual(attempt.resolved_by_user_id, user.id)
+        self.assertIsNotNone(attempt.resolved_at)
+
+    def test_cancel_order_resuelve_intento_de_pago_pendiente_transferencia_sin_comprobante_spec_044(self):
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="recibida", channel="qr")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        method = fx.make_payment_method(db, is_cash=False)
+        attempt = fx.make_payment_attempt(
+            db, order, method, status="pendiente", receipt_file_url=None
+        )
+        db.commit()
+        user = self._user()
+
+        checkout.cancel_order(db, order.id, CancelIn(motivo="se fue sin pagar"), user)
+
+        db.refresh(attempt)
+        self.assertEqual(attempt.status, "rechazado")
+        self.assertEqual(attempt.rejection_reason, "se fue sin pagar")
+
+    def test_cancel_order_sin_intento_de_pago_no_falla_spec_044(self):
+        """Guarda de no-regresión: un pedido de mostrador/mesero (sin ningún
+        `OrderPaymentAttempt`) se cancela exactamente igual que antes de spec 044."""
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="abierta", channel="waiter")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        db.commit()
+        user = self._user()
+
+        resultado = checkout.cancel_order(db, order.id, CancelIn(motivo="prueba"), user)
+        self.assertEqual(resultado.status, "cancelada")
+
+    def test_cancel_order_no_toca_intento_ya_confirmado_spec_044(self):
+        """La búsqueda solo matchea `status='pendiente'` -- un intento ya
+        resuelto (confirmado en otro pedido/momento) no se sobrescribe."""
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="abierta", channel="waiter")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        method = fx.make_payment_method(db, is_cash=True)
+        confirmado = fx.make_payment_attempt(db, order, method, status="confirmado")
+        db.commit()
+        user = self._user()
+
+        checkout.cancel_order(db, order.id, CancelIn(motivo="prueba"), user)
+
+        db.refresh(confirmado)
+        self.assertEqual(confirmado.status, "confirmado")
+        self.assertIsNone(confirmado.rejection_reason)
 
     # ----------------------------------------------------- close_participants (T030)
 
