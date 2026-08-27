@@ -49,8 +49,13 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     # Los grupos de opciones cuelgan de la VARIANTE (`variant_option_groups`), no de
     # aquí: cuántos sabores se eligen y cuánto descuenta cada uno cambian con el tamaño.
+    # order_by (spec 042): quien recorra `product.variants` (p. ej. el Menú QR,
+    # menu/router.py) recibe las presentaciones ya en el orden guardado, sin tener que
+    # acordarse de ordenar en cada punto de lectura por separado.
     variants: Mapped[List["ProductVariant"]] = relationship(
-        back_populates="product", cascade="all, delete-orphan"
+        back_populates="product",
+        cascade="all, delete-orphan",
+        order_by="ProductVariant.display_order",
     )
 
     __table_args__ = (

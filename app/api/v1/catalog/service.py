@@ -27,6 +27,21 @@ def _unique_sku(db: Session, base: str) -> str:
     return sku
 
 
+def _next_display_order(db: Session, product_id: UUID) -> int:
+    """Siguiente posición al final para una presentación nueva (spec 042, FR-005).
+
+    Cuenta activas e inactivas del mismo producto -- una presentación desactivada
+    sigue ocupando su posición en la secuencia (research.md Decisión 4), así que el
+    siguiente hueco libre es siempre el máximo actual + 1, nunca el conteo de filas.
+    """
+    current_max = db.execute(
+        select(func.max(ProductVariant.display_order)).where(
+            ProductVariant.product_id == product_id
+        )
+    ).scalar()
+    return (current_max or 0) + 1
+
+
 def variante_duplicada(
     db: Session,
     product_id: UUID,
@@ -74,7 +89,65 @@ def ensure_default_variant(db: Session, product: Product, *, price=0) -> Product
         sku=_unique_sku(db, f"{_slug(product.name)}-DEF"),
         price=price,
         active=True,
+        display_order=_next_display_order(db, product.id),
     )
     db.add(variant)
     db.flush()
     return variant
+
+
+class VariantReorderError(Exception):
+    """El conjunto de `variant_ids` no coincide con las presentaciones activas del
+    producto (falta alguno, sobra alguno, o hay duplicados) -- spec 042, contrato del
+    endpoint de reordenamiento."""
+
+    def __init__(self, message: str, *, missing: set[UUID] = frozenset(), extra: set[UUID] = frozenset()):
+        self.missing = missing
+        self.extra = extra
+        super().__init__(message)
+
+
+def reorder_variants(db: Session, product_id: UUID, variant_ids: list[UUID]) -> list[ProductVariant]:
+    """Reasigna `display_order = 1..N` según el orden de `variant_ids` (spec 042,
+    FR-002/FR-003/FR-010).
+
+    `variant_ids` debe ser exactamente el conjunto de IDs de presentaciones ACTIVAS del
+    producto, sin duplicados -- ver research.md Decisión 2 (un solo endpoint atómico,
+    no un `PATCH` por presentación).
+
+    La reasignación se hace en dos pasadas (valores negativos temporales y luego los
+    definitivos) para no violar nunca `UNIQUE(product_id, display_order)` en un estado
+    intermedio -- ver research.md Decisión 3, revisada durante la implementación: los
+    characterization tests corren sobre SQLite, que solo permite diferir constraints
+    `FOREIGN KEY`, no `UNIQUE`, así que la migración usa un `UNIQUE` simple y esta
+    función evita la colisión por construcción en vez de depender de diferirla.
+    """
+    if len(variant_ids) != len(set(variant_ids)):
+        raise VariantReorderError("variant_ids tiene IDs duplicados")
+
+    active = db.execute(
+        select(ProductVariant).where(
+            ProductVariant.product_id == product_id, ProductVariant.active.is_(True)
+        )
+    ).scalars().all()
+    by_id = {v.id: v for v in active}
+    active_ids = set(by_id.keys())
+    requested_ids = set(variant_ids)
+
+    if requested_ids != active_ids:
+        raise VariantReorderError(
+            "variant_ids no coincide con las presentaciones activas del producto",
+            missing=active_ids - requested_ids,
+            extra=requested_ids - active_ids,
+        )
+
+    for i, variant_id in enumerate(variant_ids, start=1):
+        by_id[variant_id].display_order = -i
+    db.flush()
+
+    for i, variant_id in enumerate(variant_ids, start=1):
+        by_id[variant_id].display_order = i
+    db.flush()
+
+    db.commit()
+    return [by_id[vid] for vid in variant_ids]

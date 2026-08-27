@@ -35,6 +35,24 @@ class VariantResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# ---------- Orden de presentaciones (spec 042) ----------
+class VariantReorderRequest(BaseModel):
+    """IDs de las presentaciones ACTIVAS del producto, en el orden deseado."""
+
+    variant_ids: list[UUID] = Field(..., min_length=1)
+
+
+class VariantOrderEntry(BaseModel):
+    id: UUID
+    display_order: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VariantReorderResponse(BaseModel):
+    variants: list[VariantOrderEntry]
+
+
 # ---------- Receta (BOM): insumos fijos ----------
 class RecipeItemIn(BaseModel):
     """Un insumo que la variante consume siempre (200 g de fruta). Lo que el cliente

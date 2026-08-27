@@ -105,7 +105,8 @@ def _fixture(db, suf: str):
     db.add(item); db.flush()
     product = Product(name=f"prod-split-{suf}", category_id=cat.id, preparation_type="prepared")
     db.add(product); db.flush()
-    variant = ProductVariant(product_id=product.id, name="Única", price=PRECIO, active=True)
+    variant = ProductVariant(product_id=product.id, name="Única", price=PRECIO, active=True,
+                             display_order=1)
     db.add(variant); db.flush()
     db.add(RecipeItem(product_variant_id=variant.id, inventory_item_id=item.id,
                       quantity=Decimal("1")))

@@ -1,6 +1,6 @@
 from app.core.models import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy import String, Boolean, Numeric, ForeignKey, CheckConstraint, UniqueConstraint
+from sqlalchemy import String, Boolean, Integer, Numeric, ForeignKey, CheckConstraint, UniqueConstraint
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import List, Optional, TYPE_CHECKING
 from decimal import Decimal
@@ -32,6 +32,11 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Posición de despliegue dentro del producto (spec 042): determina el orden en el
+    # formulario y en el detalle del Menú QR. Sin default de ORM -- toda ruta que crea
+    # una variante (fixtures de test incluidas) debe asignarlo explícitamente.
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False)
+
     recipe_items: Mapped[List["RecipeItem"]] = relationship(
         back_populates="product_variant", cascade="all, delete-orphan"
     )
@@ -43,5 +48,8 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("price >= 0", name="ck_product_variant_price_positive"),
         UniqueConstraint("product_id", "name", name="uq__product_variants__product_id__name"),
+        UniqueConstraint(
+            "product_id", "display_order", name="uq__product_variants__product_id__display_order"
+        ),
         {"schema": "tenant"},
     )
