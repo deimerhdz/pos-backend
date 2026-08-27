@@ -115,7 +115,7 @@ def seed():
                           category_id=cat.id, preparation_type="prepared")
         db.add(product); db.flush()
         variant = ProductVariant(product_id=product.id, name="única",
-                                 price=Decimal("10.00"), active=True)
+                                 price=Decimal("10.00"), active=True, display_order=1)
         db.add(variant); db.flush()
         db.add(RecipeItem(product_variant_id=variant.id,
                           inventory_item_id=item.id, quantity=POR_UNIDAD))

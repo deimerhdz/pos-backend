@@ -21,11 +21,16 @@ from app.api.v1.catalog.service import (
     variante_duplicada,
     _unique_sku,
     _slug,
+    _next_display_order,
+    reorder_variants,
+    VariantReorderError,
 )
 from app.api.v1.catalog.schemas import (
     VariantCreate,
     VariantUpdate,
     VariantResponse,
+    VariantReorderRequest,
+    VariantReorderResponse,
     RecipeSet,
     RecipeItemResponse,
     OptionGroupCreate,
@@ -100,7 +105,9 @@ def list_variants(
     stmt = select(ProductVariant).where(ProductVariant.product_id == product_id)
     if active is not None:
         stmt = stmt.where(ProductVariant.active.is_(active))
-    return db.execute(stmt.order_by(ProductVariant.name)).scalars().all()
+    # spec 042: antes ordenaba por nombre (alfabético) -- ahora refleja el orden que el
+    # administrador definió (o el de creación, por backfill, si nunca lo cambió).
+    return db.execute(stmt.order_by(ProductVariant.display_order)).scalars().all()
 
 
 @router.post(
@@ -126,10 +133,49 @@ def create_variant(
         ensure_unique(db, ProductVariant, ProductVariant.sku, body.sku, "SKU already exists")
     sku = body.sku or _unique_sku(db, f"{_slug(product.name)}-{_slug(name)}")
     variant = ProductVariant(
-        product_id=product_id, name=name, price=body.price, sku=sku, active=True
+        product_id=product_id,
+        name=name,
+        price=body.price,
+        sku=sku,
+        active=True,
+        display_order=_next_display_order(db, product_id),
     )
     db.add(variant)
     return _commit_variante(db, variant)
+
+
+@router.patch(
+    "/products/{product_id}/variants/reorder",
+    response_model=VariantReorderResponse,
+    summary="Reordenar las presentaciones activas de un producto",
+    responses={
+        404: {"description": "El producto no existe."},
+        422: {"description": "variant_ids no coincide exactamente con las presentaciones activas del producto."},
+    },
+)
+def reorder_product_variants(
+    product_id: UUID,
+    body: VariantReorderRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_tenant_admin),
+):
+    get_or_404(db, Product, product_id, "Product not found")
+    try:
+        variants = reorder_variants(db, product_id, body.variant_ids)
+    except VariantReorderError as exc:
+        # La validación de reorder_variants ocurre antes de tocar ninguna fila --
+        # no hay nada que revertir; no se llama rollback() aquí a propósito.
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error": str(exc),
+                "missing": [str(v) for v in exc.missing],
+                "extra": [str(v) for v in exc.extra],
+            },
+        )
+    return VariantReorderResponse(
+        variants=[{"id": v.id, "display_order": v.display_order} for v in variants]
+    )
 
 
 @router.patch(

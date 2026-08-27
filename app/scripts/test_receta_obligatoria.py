@@ -87,9 +87,9 @@ def _fixture(db):
     db.add(product); db.flush()
 
     con = ProductVariant(product_id=product.id, name="con receta",
-                         price=Decimal("10.00"), active=True)
+                         price=Decimal("10.00"), active=True, display_order=1)
     sin = ProductVariant(product_id=product.id, name="sin receta",
-                         price=Decimal("10.00"), active=True)
+                         price=Decimal("10.00"), active=True, display_order=2)
     db.add_all([con, sin]); db.flush()
 
     db.add(RecipeItem(product_variant_id=con.id, inventory_item_id=item.id,

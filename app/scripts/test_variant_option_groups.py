@@ -120,9 +120,9 @@ def _fixture(db):
     db.add(product); db.flush()
 
     grande = ProductVariant(product_id=product.id, name="Grande",
-                            price=Decimal("10.00"), active=True)
+                            price=Decimal("10.00"), active=True, display_order=1)
     pequena = ProductVariant(product_id=product.id, name="Pequeña",
-                             price=Decimal("6.00"), active=True)
+                             price=Decimal("6.00"), active=True, display_order=2)
     db.add_all([grande, pequena]); db.flush()
 
     # El mismo grupo, con cardinalidad Y cantidad distintas por tamaño: esto es
