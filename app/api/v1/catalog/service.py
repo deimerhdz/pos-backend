@@ -6,11 +6,17 @@ Los grupos de opciones (sabores) se gestionan aparte y se asignan al producto.
 import re
 from uuid import UUID
 
+from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
+from app.models.recipe_item import RecipeItem
+from app.models.inventory_item import InventoryItem
+from app.models.option_group import OptionGroup
+from app.models.variant_option_group import VariantOptionGroup
+from app.api.v1.catalog.schemas import VariantSaveIn, RecipeItemIn, VariantOptionGroupIn
 
 
 def _slug(text: str) -> str:
@@ -96,58 +102,211 @@ def ensure_default_variant(db: Session, product: Product, *, price=0) -> Product
     return variant
 
 
-class VariantReorderError(Exception):
-    """El conjunto de `variant_ids` no coincide con las presentaciones activas del
-    producto (falta alguno, sobra alguno, o hay duplicados) -- spec 042, contrato del
-    endpoint de reordenamiento."""
+# ===================== Guardado consolidado de producto (spec 043) =====================
+#
+# `reorder_variants`/`VariantReorderError` (el endpoint dedicado de reordenamiento, spec 042)
+# se retiraron aquí (A-55, registro-de-anomalias.md): `_assign_display_orders` abajo reemplaza
+# su función, dentro del guardado consolidado, con el mismo patrón de dos pasadas.
+# `_save_variant_entry`/`_replace_recipe`/`_replace_option_groups` reproducen, a propósito, la
+# misma lógica de validación que ya usan `create_variant`/`update_variant`/`set_recipe`/
+# `set_variant_option_groups` en `catalog/router.py` -- no se importa de ahí (la capa de servicio
+# no depende de la de router) y esas funciones del router siguen intactas mientras existan sus
+# endpoints (retiro condicionado a FR-007). La única diferencia real es que estas versiones no
+# hacen `commit()` por su cuenta (el llamador -- `ProductService.create_product`/`update_product`
+# -- controla una única transacción para todo el árbol, FR-004) y que cada error trae
+# `variant_index` para identificar qué entrada del payload falló (research.md Decisión 5).
 
-    def __init__(self, message: str, *, missing: set[UUID] = frozenset(), extra: set[UUID] = frozenset()):
-        self.missing = missing
-        self.extra = extra
-        super().__init__(message)
+
+def _raise_name_conflict(dup: ProductVariant, index: int) -> None:
+    if dup.active:
+        mensaje = f"Ya existe una variante «{dup.name}» en este producto"
+    else:
+        mensaje = (
+            f"Ya existe una variante «{dup.name}» desactivada en este producto. "
+            "Reactívala en vez de crear otra."
+        )
+    raise HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail={
+            "error": mensaje,
+            "variant_index": index,
+            "variant_id": str(dup.id),
+            "active": dup.active,
+        },
+    )
 
 
-def reorder_variants(db: Session, product_id: UUID, variant_ids: list[UUID]) -> list[ProductVariant]:
-    """Reasigna `display_order = 1..N` según el orden de `variant_ids` (spec 042,
-    FR-002/FR-003/FR-010).
+def _ensure_sku_unique(
+    db: Session, sku: str, index: int, *, exclude_id: UUID | None = None
+) -> None:
+    stmt = select(ProductVariant.id).where(ProductVariant.sku == sku)
+    if exclude_id is not None:
+        stmt = stmt.where(ProductVariant.id != exclude_id)
+    if db.execute(stmt).first() is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"error": "SKU already exists", "variant_index": index},
+        )
 
-    `variant_ids` debe ser exactamente el conjunto de IDs de presentaciones ACTIVAS del
-    producto, sin duplicados -- ver research.md Decisión 2 (un solo endpoint atómico,
-    no un `PATCH` por presentación).
 
-    La reasignación se hace en dos pasadas (valores negativos temporales y luego los
-    definitivos) para no violar nunca `UNIQUE(product_id, display_order)` en un estado
-    intermedio -- ver research.md Decisión 3, revisada durante la implementación: los
-    characterization tests corren sobre SQLite, que solo permite diferir constraints
-    `FOREIGN KEY`, no `UNIQUE`, así que la migración usa un `UNIQUE` simple y esta
-    función evita la colisión por construcción en vez de depender de diferirla.
+def _replace_recipe(
+    db: Session, variant_id: UUID, items: list[RecipeItemIn], index: int
+) -> None:
+    """Reemplazo total de la receta de una presentación -- mismo patrón que `set_recipe`
+    (`catalog/router.py`), con `variant_index` en cualquier error."""
+    db.execute(RecipeItem.__table__.delete().where(RecipeItem.product_variant_id == variant_id))
+    seen: set[UUID] = set()
+    for it in items:
+        if it.inventory_item_id in seen:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": "Insumo repetido en la receta", "variant_index": index},
+            )
+        if db.get(InventoryItem, it.inventory_item_id) is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail={"error": "Inventory item not found", "variant_index": index},
+            )
+        seen.add(it.inventory_item_id)
+        db.add(RecipeItem(
+            product_variant_id=variant_id,
+            inventory_item_id=it.inventory_item_id,
+            quantity=it.quantity,
+        ))
+
+
+def _replace_option_groups(
+    db: Session, variant_id: UUID, groups: list[VariantOptionGroupIn], index: int
+) -> None:
+    """Reemplazo total de los grupos de opciones de una presentación -- mismo patrón que
+    `set_variant_option_groups` (`catalog/router.py`), con `variant_index` en cualquier error."""
+    db.execute(
+        VariantOptionGroup.__table__.delete().where(
+            VariantOptionGroup.product_variant_id == variant_id
+        )
+    )
+    seen: set[UUID] = set()
+    for g in groups:
+        if g.option_group_id in seen:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error": "Grupo de opciones repetido en esta presentación",
+                    "variant_index": index,
+                },
+            )
+        group = db.get(OptionGroup, g.option_group_id)
+        if group is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail={"error": "Option group not found", "variant_index": index},
+            )
+        if not group.active:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": f"El grupo «{group.name}» está inactivo", "variant_index": index},
+            )
+        seen.add(g.option_group_id)
+        db.add(VariantOptionGroup(
+            product_variant_id=variant_id,
+            option_group_id=g.option_group_id,
+            min_select=g.min_select,
+            max_select=g.max_select,
+            quantity_per_option=g.quantity_per_option,
+        ))
+
+
+def _save_variant_entry(
+    db: Session,
+    product: Product,
+    entry: VariantSaveIn,
+    index: int,
+    existing_by_id: dict[UUID, ProductVariant],
+) -> ProductVariant:
+    """Crea o actualiza una presentación dentro de un guardado consolidado (spec 043, FR-001/
+    FR-002). `existing_by_id` son las presentaciones que ya pertenecen a `product` (para poder
+    rechazar un `id` que no le pertenece). `index` es la posición de `entry` en la lista `variants`
+    del body -- se agrega a cualquier error para identificar qué presentación falló (FR-004).
+
+    No asigna el `display_order` final (lo hace `_assign_display_orders` una vez resueltas todas
+    las entradas) ni hace `commit()` -- el llamador controla la transacción completa.
     """
-    if len(variant_ids) != len(set(variant_ids)):
-        raise VariantReorderError("variant_ids tiene IDs duplicados")
+    if entry.id is None:
+        dup = variante_duplicada(db, product.id, entry.name)
+        if dup is not None:
+            _raise_name_conflict(dup, index)
+        if entry.sku is not None:
+            _ensure_sku_unique(db, entry.sku, index)
+        sku = entry.sku or _unique_sku(db, f"{_slug(product.name)}-{_slug(entry.name)}")
+        variant = ProductVariant(
+            product_id=product.id,
+            name=entry.name,
+            price=entry.price,
+            sku=sku,
+            active=entry.active,
+            display_order=_next_display_order(db, product.id),
+        )
+        db.add(variant)
+        db.flush()
+    else:
+        variant = existing_by_id.get(entry.id)
+        if variant is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "Variant not found",
+                    "variant_index": index,
+                    "variant_id": str(entry.id),
+                },
+            )
+        if entry.sku is not None and entry.sku != variant.sku:
+            _ensure_sku_unique(db, entry.sku, index, exclude_id=variant.id)
+            variant.sku = entry.sku
+        if entry.name != variant.name:
+            dup = variante_duplicada(db, product.id, entry.name, exclude_id=variant.id)
+            if dup is not None:
+                _raise_name_conflict(dup, index)
+            variant.name = entry.name
+        variant.price = entry.price
+        variant.active = entry.active
+        db.flush()
 
-    active = db.execute(
+    _replace_recipe(db, variant.id, entry.recipe, index)
+    _replace_option_groups(db, variant.id, entry.option_groups, index)
+    return variant
+
+
+def _assign_display_orders(
+    db: Session, product_id: UUID, resolved: list[ProductVariant]
+) -> None:
+    """Asigna `display_order = 1..N` a `resolved` según su posición en la lista, y reacomoda
+    cualquier otra fila del mismo producto (p. ej. presentaciones inactivas que este guardado no
+    tocó) por encima de ese rango.
+
+    `UNIQUE(product_id, display_order)` aplica a **todas** las filas del producto, activas o no
+    -- una presentación desactivada puede seguir ocupando un valor bajo (p. ej. 2) que el nuevo
+    conjunto activo también necesita, así que no basta con reasignar solo `resolved` (a diferencia
+    de `reorder_variants` arriba, que asume que el conjunto activo ya no choca con nada porque
+    nunca lo reordena junto con altas/bajas en la misma llamada). Mismo patrón de dos pasadas
+    (negativos primero, definitivos después), extendido a todas las filas del producto para no
+    violar la constraint en ningún estado intermedio (spec 043, research.md Decisión 2). No hace
+    `commit()` -- el llamador controla la transacción completa.
+    """
+    resolved_ids = {v.id for v in resolved}
+    others = db.execute(
         select(ProductVariant).where(
-            ProductVariant.product_id == product_id, ProductVariant.active.is_(True)
+            ProductVariant.product_id == product_id, ProductVariant.id.notin_(resolved_ids)
         )
     ).scalars().all()
-    by_id = {v.id: v for v in active}
-    active_ids = set(by_id.keys())
-    requested_ids = set(variant_ids)
+    others.sort(key=lambda v: v.display_order)
 
-    if requested_ids != active_ids:
-        raise VariantReorderError(
-            "variant_ids no coincide con las presentaciones activas del producto",
-            missing=active_ids - requested_ids,
-            extra=requested_ids - active_ids,
-        )
-
-    for i, variant_id in enumerate(variant_ids, start=1):
-        by_id[variant_id].display_order = -i
+    for i, variant in enumerate([*resolved, *others], start=1):
+        variant.display_order = -i
     db.flush()
 
-    for i, variant_id in enumerate(variant_ids, start=1):
-        by_id[variant_id].display_order = i
+    for i, variant in enumerate(resolved, start=1):
+        variant.display_order = i
+    offset = len(resolved)
+    for i, variant in enumerate(others, start=1):
+        variant.display_order = offset + i
     db.flush()
-
-    db.commit()
-    return [by_id[vid] for vid in variant_ids]

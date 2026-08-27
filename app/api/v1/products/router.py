@@ -15,6 +15,7 @@ from app.api.v1.products.schemas import (
     ProductResponse,
     ProductListResponse,
     ProductDetailResponse,
+    ProductSaveResponse,
 )
 
 router = APIRouter(prefix="/products", tags=["products"])
@@ -59,13 +60,17 @@ def get_product(
 
 @router.post(
     "",
-    response_model=ProductResponse,
+    response_model=ProductSaveResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Crear un producto",
-    description="Crea un producto de catálogo. Un producto SIMPLE recibe una variante default.",
+    description=(
+        "Crea un producto de catálogo junto con sus presentaciones, receta y grupos de opciones "
+        "en una sola operación atómica (spec 043). Sin `variants`, recibe una variante default."
+    ),
     responses={
         401: {"description": "No autenticado o token inválido."},
-        404: {"description": "La categoría o la unidad de medida no existen."},
+        404: {"description": "La categoría, un insumo o un grupo de opciones no existen."},
+        409: {"description": "Nombre de presentación o SKU ya en uso."},
         422: {"description": "Datos de entrada inválidos."},
     },
 )
@@ -76,16 +81,23 @@ def create_product(
     _: User = Depends(require_tenant_admin),
 ):
     enforce_plan_limit(db, tenant, "productos")  # spec 033, FR-005/FR-006
-    return service.create_product(db, body)
+    product = service.create_product(db, body)
+    return service.to_save_response(product)
 
 
 @router.patch(
     "/{id}",
-    response_model=ProductResponse,
+    response_model=ProductSaveResponse,
     summary="Actualizar un producto",
+    description=(
+        "Actualiza un producto y, opcionalmente, el árbol completo de sus presentaciones "
+        "(crear/editar/desactivar, receta, grupos de opciones y orden) en una sola operación "
+        "atómica (spec 043)."
+    ),
     responses={
         401: {"description": "No autenticado o token inválido."},
-        404: {"description": "El producto, la categoría o la unidad de medida no existen."},
+        404: {"description": "El producto, la categoría, un insumo o un grupo de opciones no existen."},
+        409: {"description": "Nombre de presentación o SKU ya en uso."},
         422: {"description": "Datos de entrada inválidos."},
     },
 )
@@ -95,16 +107,18 @@ def update_product(
     db: Session = Depends(get_db),
     _: User = Depends(require_tenant_admin),
 ):
-    return service.update_product(db, id, body)
+    product = service.update_product(db, id, body)
+    return service.to_save_response(product)
 
 
 @router.put(
     "/{id}",
-    response_model=ProductResponse,
+    response_model=ProductSaveResponse,
     summary="Actualizar un producto (alias de PATCH)",
     responses={
         401: {"description": "No autenticado o token inválido."},
-        404: {"description": "El producto, la categoría o la unidad de medida no existen."},
+        404: {"description": "El producto, la categoría, un insumo o un grupo de opciones no existen."},
+        409: {"description": "Nombre de presentación o SKU ya en uso."},
         422: {"description": "Datos de entrada inválidos."},
     },
 )
@@ -114,7 +128,8 @@ def replace_product(
     db: Session = Depends(get_db),
     _: User = Depends(require_tenant_admin),
 ):
-    return service.update_product(db, id, body)
+    product = service.update_product(db, id, body)
+    return service.to_save_response(product)
 
 
 @router.delete(

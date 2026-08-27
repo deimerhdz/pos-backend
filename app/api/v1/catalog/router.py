@@ -22,16 +22,11 @@ from app.api.v1.catalog.service import (
     _unique_sku,
     _slug,
     _next_display_order,
-    reorder_variants,
-    VariantReorderError,
 )
 from app.api.v1.catalog.schemas import (
     VariantCreate,
     VariantUpdate,
     VariantResponse,
-    VariantReorderRequest,
-    VariantReorderResponse,
-    RecipeSet,
     RecipeItemResponse,
     OptionGroupCreate,
     OptionGroupUpdate,
@@ -39,7 +34,6 @@ from app.api.v1.catalog.schemas import (
     OptionCreate,
     OptionUpdate,
     OptionResponse,
-    VariantOptionGroupSet,
     VariantOptionGroupResponse,
 )
 
@@ -145,40 +139,6 @@ def create_variant(
 
 
 @router.patch(
-    "/products/{product_id}/variants/reorder",
-    response_model=VariantReorderResponse,
-    summary="Reordenar las presentaciones activas de un producto",
-    responses={
-        404: {"description": "El producto no existe."},
-        422: {"description": "variant_ids no coincide exactamente con las presentaciones activas del producto."},
-    },
-)
-def reorder_product_variants(
-    product_id: UUID,
-    body: VariantReorderRequest,
-    db: Session = Depends(get_db),
-    _: User = Depends(require_tenant_admin),
-):
-    get_or_404(db, Product, product_id, "Product not found")
-    try:
-        variants = reorder_variants(db, product_id, body.variant_ids)
-    except VariantReorderError as exc:
-        # La validación de reorder_variants ocurre antes de tocar ninguna fila --
-        # no hay nada que revertir; no se llama rollback() aquí a propósito.
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "error": str(exc),
-                "missing": [str(v) for v in exc.missing],
-                "extra": [str(v) for v in exc.extra],
-            },
-        )
-    return VariantReorderResponse(
-        variants=[{"id": v.id, "display_order": v.display_order} for v in variants]
-    )
-
-
-@router.patch(
     "/variants/{variant_id}",
     response_model=VariantResponse,
     summary="Actualizar una variante (nombre, precio, sku, activa)",
@@ -244,42 +204,6 @@ def get_recipe(
     ).scalars().all()
 
 
-@router.put(
-    "/variants/{variant_id}/recipe",
-    response_model=list[RecipeItemResponse],
-    summary="Definir/reemplazar la receta de una variante",
-)
-def set_recipe(
-    variant_id: UUID,
-    body: RecipeSet,
-    db: Session = Depends(get_db),
-    _: User = Depends(require_tenant_admin),
-):
-    get_or_404(db, ProductVariant, variant_id, "Variant not found")
-
-    # Reemplazo total (idempotente).
-    db.execute(
-        RecipeItem.__table__.delete().where(RecipeItem.product_variant_id == variant_id)
-    )
-    vistos: set[UUID] = set()
-    for it in body.items:
-        if it.inventory_item_id in vistos:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY, "Insumo repetido en la receta"
-            )
-        get_or_404(db, InventoryItem, it.inventory_item_id, "Inventory item not found")
-        vistos.add(it.inventory_item_id)
-        db.add(RecipeItem(
-            product_variant_id=variant_id,
-            inventory_item_id=it.inventory_item_id,
-            quantity=it.quantity,
-        ))
-    db.commit()
-    return db.execute(
-        select(RecipeItem).where(RecipeItem.product_variant_id == variant_id)
-    ).scalars().all()
-
-
 # ================= Grupos de opciones de una variante =================
 @router.get(
     "/variants/{variant_id}/option-groups",
@@ -292,59 +216,6 @@ def get_variant_option_groups(
     _: User = Depends(get_current_user),
 ):
     get_or_404(db, ProductVariant, variant_id, "Variant not found")
-    return db.execute(
-        select(VariantOptionGroup).where(
-            VariantOptionGroup.product_variant_id == variant_id
-        )
-    ).scalars().all()
-
-
-@router.put(
-    "/variants/{variant_id}/option-groups",
-    response_model=list[VariantOptionGroupResponse],
-    summary="Definir/reemplazar los grupos de opciones de una variante",
-)
-def set_variant_option_groups(
-    variant_id: UUID,
-    body: VariantOptionGroupSet,
-    db: Session = Depends(get_db),
-    _: User = Depends(require_tenant_admin),
-):
-    """Reemplazo total e idempotente, igual que la receta.
-
-    Cada fila dice «esta presentación ofrece este grupo: elige N–M, descuenta X de cada
-    opción elegida». Es lo que permite que la ensalada pequeña elija 1 sabor de 60 g y
-    la mediana 2 de 120 g sin duplicar el grupo ni el producto.
-    """
-    get_or_404(db, ProductVariant, variant_id, "Variant not found")
-
-    db.execute(
-        VariantOptionGroup.__table__.delete().where(
-            VariantOptionGroup.product_variant_id == variant_id
-        )
-    )
-    vistos: set[UUID] = set()
-    for g in body.groups:
-        if g.option_group_id in vistos:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "Grupo de opciones repetido en esta presentación",
-            )
-        group = get_or_404(db, OptionGroup, g.option_group_id, "Option group not found")
-        if not group.active:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"El grupo «{group.name}» está inactivo",
-            )
-        vistos.add(g.option_group_id)
-        db.add(VariantOptionGroup(
-            product_variant_id=variant_id,
-            option_group_id=g.option_group_id,
-            min_select=g.min_select,
-            max_select=g.max_select,
-            quantity_per_option=g.quantity_per_option,
-        ))
-    db.commit()
     return db.execute(
         select(VariantOptionGroup).where(
             VariantOptionGroup.product_variant_id == variant_id
@@ -566,6 +437,6 @@ def delete_option(
 
 
 # La asignación grupo<->producto se retiró: los grupos cuelgan de la VARIANTE, vía
-# `GET`/`PUT /variants/{id}/option-groups` (más arriba). Un solo `PUT` idempotente por
-# presentación sustituye al par assign/unassign, y con él desaparece el orden obligado
-# que tenía que respetar el editor al guardar.
+# `GET /variants/{id}/option-groups` (más arriba). El `PUT` que definía/reemplazaba esos
+# grupos se retiró en spec 043 (A-55): ahora se define dentro del guardado consolidado de
+# `POST`/`PATCH /products` (`ProductService._save_variant_tree`/`_reconcile_variants`).
