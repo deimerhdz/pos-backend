@@ -286,6 +286,48 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(sale.discount, esperado_descuento)
         self.assertIsNone(sale.promotion_id)
 
+    # ---------------------------------------- spec 056: valor del domicilio en pay_order
+
+    def test_pay_order_orden_delivery_suma_el_valor_del_domicilio_al_total(self):
+        """FR-011: el total de la venta incluye el valor del domicilio de la
+        orden asociada, y `Sale.delivery_fee` queda persistido."""
+        s = self._seed_order_con_receta()
+        db, order, variant = s["db"], s["order"], s["variant"]
+        order.order_type = "DELIVERY"
+        order.delivery_fee = Decimal("6000")
+        fx.make_order_item(db, order, variant, quantity=1)
+        order.status = "bloqueada"
+        register = fx.make_cash_register(db)
+        shift = fx.make_cash_shift(db, register=register)
+        method = fx.make_payment_method(db)
+        db.commit()
+        cashier = self._user()
+
+        esperado_total = PRECIO + Decimal("6000")
+        data = PayIn(cash_shift_id=shift.id, payments=[self._pago(method.id, esperado_total)])
+        sale = checkout.pay_order(db, order.id, data, cashier)
+
+        self.assertEqual(sale.delivery_fee, Decimal("6000"))
+        self.assertEqual(sale.total, esperado_total)
+
+    def test_pay_order_orden_no_delivery_no_suma_ningun_valor_de_domicilio(self):
+        """FR-012: sin efecto sobre el total de una orden que no es DELIVERY
+        (no regresión)."""
+        s = self._seed_order_con_receta()
+        db, order, variant = s["db"], s["order"], s["variant"]
+        fx.make_order_item(db, order, variant, quantity=1)
+        order.status = "bloqueada"
+        register = fx.make_cash_register(db)
+        shift = fx.make_cash_shift(db, register=register)
+        method = fx.make_payment_method(db)
+        db.commit()
+        cashier = self._user()
+
+        data = PayIn(cash_shift_id=shift.id, payments=[self._pago(method.id, PRECIO)])
+        sale = checkout.pay_order(db, order.id, data, cashier)
+
+        self.assertEqual(sale.total, PRECIO)
+
     # -------------------------------------------------------- confirm_order (T028)
 
     def test_confirm_order_descuenta_una_vez_y_stock_insuficiente_revierte(self):
@@ -692,6 +734,27 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(len(movimientos), 1)
         db.refresh(insumo)
         self.assertEqual(Decimal(insumo.current_stock), Decimal("998"))
+
+    def test_checkout_and_send_orden_delivery_suma_el_valor_del_domicilio(self):
+        """spec 056, FR-011: este es el camino real que sigue un pedido
+        "Domicilio" creado desde la pantalla de creación manual
+        (`hold_for_payment=True` → 'recibida' → checkout_and_send)."""
+        s = self._seed_hold_order_con_receta()
+        db, order, shift, method = s["db"], s["order"], s["shift"], s["method"]
+        order.order_type = "DELIVERY"
+        order.delivery_fee = Decimal("6000")
+        db.commit()
+        cashier = self._user()
+
+        esperado_total = PRECIO + Decimal("6000")
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=shift.id,
+            payments=[self._pago(method.id, esperado_total)],
+        )
+        sale = checkout.checkout_and_send(db, order.id, data, cashier)
+
+        self.assertEqual(sale.delivery_fee, Decimal("6000"))
+        self.assertEqual(sale.total, esperado_total)
 
     def test_checkout_and_send_version_desactualizada_409_sin_doble_venta(self):
         """Idempotencia / doble clic (spec 028, T016): una segunda llamada con

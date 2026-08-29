@@ -135,6 +135,12 @@ class OrderCreate(BaseModel):
     participant_id: UUID | None = None
     dining_table_id: UUID | None = None
     customer_name: str | None = Field(None, max_length=255)
+    #: Solo aplican (y son obligatorios, salvo el teléfono) cuando
+    #: order_type == DELIVERY — validado en orders.service.create_order, no
+    #: aquí, porque la obligatoriedad depende del valor de order_type (spec 056).
+    delivery_address: str | None = Field(None, max_length=255)
+    delivery_phone: str | None = Field(None, max_length=30)
+    delivery_fee: Decimal | None = Field(None, ge=0)
     notes: str | None = Field(None, max_length=500)
     items: list[OrderItemIn] = Field(..., min_length=1)
     #: Terminal de Mesas modo híbrido (spec 028): comanda de mostrador/mesero
@@ -202,6 +208,9 @@ class OrderResponse(BaseModel):
     participant_id: UUID | None = None
     dining_table_id: UUID | None = None
     customer_name: str | None = None
+    delivery_address: str | None = None
+    delivery_phone: str | None = None
+    delivery_fee: Decimal | None = None
     notes: str | None = None
     created_at: UtcDatetime
     items: list[OrderItemResponse] = Field(default_factory=list)

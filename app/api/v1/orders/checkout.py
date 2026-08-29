@@ -285,6 +285,7 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
             payments=data.payments,
             discount=Decimal(data.discount) + promo_discount + combo_discount,
             tax=data.tax, tip=data.tip,
+            delivery_fee=order.delivery_fee or Decimal("0"),
             customer_name=order.customer_name,
             dining_table_id=order.dining_table_id,
             table_session_id=order.table_session_id,
@@ -476,6 +477,7 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
             payments=data.payments,
             discount=Decimal(data.discount) + promo_discount + combo_discount,
             tax=data.tax, tip=data.tip,
+            delivery_fee=order.delivery_fee or Decimal("0"),
             customer_name=data.billing_customer_name or "Consumidor Final",
             dining_table_id=order.dining_table_id,
             table_session_id=order.table_session_id,
@@ -783,13 +785,21 @@ def release_table(
 
 def _order_total(db: Session, order_id: UUID) -> Decimal:
     """Total cobrable de la orden (líneas no anuladas), mismo criterio que
-    `compute_bill` — usado para validar FR-010a (monto recibido >= total)."""
+    `compute_bill` — usado para validar FR-010a (monto recibido >= total).
+
+    Spec 056: incluye el valor del domicilio de la orden (0 si no es
+    DELIVERY o no tiene valor) — de lo contrario este chequeo previo
+    aceptaría un monto de efectivo que no alcanza a cubrir el domicilio,
+    aunque `build_sale` (con su propio total ya corregido) lo rechazaría
+    de todas formas más adelante."""
+    order = get_or_404(db, CustomerOrder, order_id, "Order not found")
     items = db.execute(
         select(OrderItem).where(
             OrderItem.order_id == order_id, OrderItem.estado_cocina != "anulado"
         )
     ).scalars().all()
-    return sum((Decimal(it.unit_price) * it.quantity for it in items), start=Decimal("0"))
+    items_total = sum((Decimal(it.unit_price) * it.quantity for it in items), start=Decimal("0"))
+    return items_total + (order.delivery_fee or Decimal("0"))
 
 
 def _load_pending_attempt_for_update(db: Session, attempt_id: UUID) -> OrderPaymentAttempt:
@@ -871,7 +881,15 @@ def approve_payment_attempt(
         combo_discount = promotions.combo_discount_for_lines(db, lines, now)
         combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
         final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
-        total = sum((line.line_total for line in lines), Decimal("0")) - promo_discount - combo_discount
+        # Spec 056, research.md Decisión 5: el domicilio debe quedar incluido
+        # en el ÚNICO pago que se autogenera aquí — de lo contrario queda
+        # corto exactamente en ese valor y el propio chequeo `paid < total`
+        # de build_sale (ya con el domicilio sumado) rechazaría este pago.
+        delivery_fee = order.delivery_fee or Decimal("0")
+        total = (
+            sum((line.line_total for line in lines), Decimal("0"))
+            - promo_discount - combo_discount + delivery_fee
+        )
 
         build_sale(
             db,
@@ -880,6 +898,7 @@ def approve_payment_attempt(
             cashier=user,
             payments=[PaymentIn(payment_method_id=attempt.payment_method_id, amount=total)],
             discount=promo_discount + combo_discount,
+            delivery_fee=delivery_fee,
             customer_name=order.customer_name,
             dining_table_id=order.dining_table_id,
             table_session_id=order.table_session_id,
@@ -999,6 +1018,7 @@ def confirm_cash_payment_attempt(
             cashier=user,
             payments=[PaymentIn(payment_method_id=attempt.payment_method_id, amount=amount_received)],
             discount=promo_discount + combo_discount,
+            delivery_fee=order.delivery_fee or Decimal("0"),
             customer_name=order.customer_name,
             dining_table_id=order.dining_table_id,
             table_session_id=order.table_session_id,

@@ -153,6 +153,20 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             f"'{data.order_type.value}' no es válida.",
         )
 
+    # spec 056, FR-007: un pedido a domicilio requiere nombre del cliente,
+    # dirección y valor del domicilio (el teléfono queda fuera a propósito,
+    # FR-008 — siempre opcional).
+    if data.order_type is OrderType.DELIVERY and (
+        not (data.customer_name or "").strip()
+        or not (data.delivery_address or "").strip()
+        or data.delivery_fee is None
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Un pedido a domicilio requiere nombre del cliente, dirección y "
+            "valor del domicilio.",
+        )
+
     customer_name = data.customer_name
     table_id = data.dining_table_id
 
@@ -204,6 +218,9 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             customer_name=customer_name,
             channel=data.channel.value,
             order_type=data.order_type.value,
+            delivery_address=data.delivery_address,
+            delivery_phone=data.delivery_phone,
+            delivery_fee=data.delivery_fee,
             # T013: con hold_for_payment nace 'recibida', igual que un pedido
             # QR sin confirmar — no compromete stock ni es visible para cocina
             # hasta que se cobre (`checkout.checkout_and_send`).

@@ -1,10 +1,11 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy import (
-    String, Integer, Boolean, ForeignKey, DateTime, func, CheckConstraint, Index, text,
+    String, Integer, Boolean, Numeric, ForeignKey, DateTime, func, CheckConstraint, Index, text,
 )
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import Optional, List
+from decimal import Decimal
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,14 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
         Boolean, nullable=False, server_default=text("false")
     )
 
+    # Spec 056 — solo diligenciados cuando order_type == 'DELIVERY'. Sin default
+    # de ningún tipo (ni de columna ni de aplicación): un pedido a domicilio
+    # incompleto no es un pedido válido, no un pedido con "$0"/"" implícito
+    # (spec.md FR-006, Edge Cases).
+    delivery_address: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    delivery_phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    delivery_fee: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+
     status: Mapped[str] = mapped_column(String(12), nullable=False, server_default="abierta")
 
     # Lock optimista para la transición abierta→bloqueada del cobro (Fase 7).
@@ -122,6 +131,10 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
         CheckConstraint(
             "status IN ('recibida', 'abierta', 'bloqueada', 'pagada', 'cancelada')",
             name="ck_customer_order_status",
+        ),
+        CheckConstraint(
+            "delivery_fee IS NULL OR delivery_fee >= 0",
+            name="ck_customer_order_delivery_fee_non_negative",
         ),
         Index("idx_customer_orders_channel", "channel"),
         Index("idx_customer_orders_order_type", "order_type"),
