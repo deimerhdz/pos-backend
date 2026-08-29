@@ -667,6 +667,33 @@ class TestTableSessionsService(unittest.TestCase):
         db.refresh(ts)
         self.assertEqual(ts.status, "active")
 
+    def test_release_paid_session_libera_pese_a_cocina_pendiente_de_un_pedido_cancelado(self):
+        """Bugfix (spec 050): un pedido `'cancelada'` no anula el `estado_cocina`
+        de sus ítems (`cancel_order`, `orders/checkout.py` — deliberado, para no
+        interferir con el ajuste de inventario), así que antes de este fix
+        `_assert_closable` seguía viendo ese ítem como cocina en curso y
+        bloqueaba `release_paid_session` para siempre, sin ninguna acción
+        posible desde la UI (el pedido ya es terminal). Contraste directo con
+        `test_release_paid_session_409_con_cocina_en_curso_sobre_pedido_pagado`
+        (mismo escenario de ítem `'en_preparacion'`, pero con `status='pagada'`,
+        que sí debe seguir bloqueando)."""
+        db, table, ts = self._seed_bare_session()
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="cancelada")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        cashier = fx.make_user_double()
+        db.commit()
+
+        resp = service.release_paid_session(db, ts.id, cashier)
+
+        self.assertEqual(resp.status, "libre")
+        db.refresh(ts)
+        db.refresh(table)
+        self.assertEqual(ts.status, "closed")
+        self.assertEqual(table.status, "libre")
+
     def test_release_paid_session_libera_la_mesa_cuando_todo_esta_pagado_y_listo(self):
         """Camino feliz: nada billable y la comida del único pedido 'pagada'
         ya está 'listo' → cierra la sesión en cascada y libera la mesa, igual
