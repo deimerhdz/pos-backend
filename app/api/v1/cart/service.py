@@ -586,7 +586,7 @@ def submit_cart(
     active_manual_order = db.execute(
         select(CustomerOrder.id).where(
             CustomerOrder.table_session_id == participant.table_session_id,
-            CustomerOrder.channel.in_(("counter", "waiter")),
+            CustomerOrder.channel == "POS",
             CustomerOrder.status.in_(_NON_TERMINAL_ORDER_STATUSES),
         )
     ).scalar_one_or_none()
@@ -620,7 +620,8 @@ def submit_cart(
             participant_id=participant.id,
             dining_table_id=participant.dining_table_id,
             customer_name=participant.display_label or participant.display_name,
-            channel="qr",
+            channel="QR_MENU",
+            order_type="DINE_IN",
             status="recibida",
             user_id=None,  # lo envió el comensal, no un usuario del sistema
         )

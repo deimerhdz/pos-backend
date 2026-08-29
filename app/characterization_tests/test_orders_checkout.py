@@ -52,7 +52,7 @@ class TestCheckout(unittest.TestCase):
     # ------------------------------------------------------------- Helpers
 
     def _seed_order_con_receta(self, *, order_status="abierta", table_status="ocupada"):
-        """Mesa ocupada + sesión + orden 'waiter', con una variante que sí
+        """Mesa ocupada + sesión + orden 'POS', con una variante que sí
         descuenta inventario (receta con stock de sobra)."""
         db = fx.new_session()
         table = fx.make_dining_table(db, status=table_status)
@@ -62,7 +62,7 @@ class TestCheckout(unittest.TestCase):
         variant = fx.make_variant(db, product=product, price=PRECIO)
         insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
         fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
-        order = fx.make_customer_order(db, ts, status=order_status, channel="waiter")
+        order = fx.make_customer_order(db, ts, status=order_status, channel="POS")
         db.commit()
         return dict(
             db=db, table=table, ts=ts, category=category, product=product,
@@ -322,7 +322,7 @@ class TestCheckout(unittest.TestCase):
         fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
         metodo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
 
-        order = fx.make_customer_order(db, ts, status="recibida", channel="qr")
+        order = fx.make_customer_order(db, ts, status="recibida", channel="QR_MENU")
         fx.make_order_item(db, order, variant, quantity=1, estado_cocina="pendiente")
         fx.make_payment_attempt(db, order, metodo, status="confirmado")
         db.commit()
@@ -338,7 +338,7 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(Decimal(insumo.current_stock), Decimal("3"))
 
         # Stock insuficiente para un segundo pedido (necesita 10, sobran 3).
-        order2 = fx.make_customer_order(db, ts, status="recibida", channel="qr")
+        order2 = fx.make_customer_order(db, ts, status="recibida", channel="QR_MENU")
         fx.make_order_item(db, order2, variant, quantity=5, estado_cocina="pendiente")
         fx.make_payment_attempt(db, order2, metodo, status="confirmado")
         db.commit()
@@ -371,7 +371,7 @@ class TestCheckout(unittest.TestCase):
         insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
         fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
 
-        order = fx.make_customer_order(db, ts, status="abierta", channel="waiter")
+        order = fx.make_customer_order(db, ts, status="abierta", channel="POS")
         item_en_prep = fx.make_order_item(db, order, variant, estado_cocina="en_preparacion")
         item_listo = fx.make_order_item(db, order, variant, estado_cocina="listo")
         fx.make_order_item(db, order, variant, estado_cocina="pendiente")
@@ -410,7 +410,7 @@ class TestCheckout(unittest.TestCase):
         category = fx.make_category(db)
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=PRECIO)
-        order = fx.make_customer_order(db, ts, status="abierta", channel="counter")
+        order = fx.make_customer_order(db, ts, status="abierta", channel="POS")
         fx.make_order_item(db, order, variant, estado_cocina="pendiente")
         shift = fx.make_cash_shift(db)
         cashier = fx.make_user_double()
@@ -444,7 +444,7 @@ class TestCheckout(unittest.TestCase):
         category = fx.make_category(db)
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=PRECIO)
-        order = fx.make_customer_order(db, ts, status="recibida", channel="qr")
+        order = fx.make_customer_order(db, ts, status="recibida", channel="QR_MENU")
         fx.make_order_item(db, order, variant, estado_cocina="pendiente")
         method = fx.make_payment_method(db, is_cash=True)
         attempt = fx.make_payment_attempt(db, order, method, status="pendiente")
@@ -466,7 +466,7 @@ class TestCheckout(unittest.TestCase):
         category = fx.make_category(db)
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=PRECIO)
-        order = fx.make_customer_order(db, ts, status="recibida", channel="qr")
+        order = fx.make_customer_order(db, ts, status="recibida", channel="QR_MENU")
         fx.make_order_item(db, order, variant, estado_cocina="pendiente")
         method = fx.make_payment_method(db, is_cash=False)
         attempt = fx.make_payment_attempt(
@@ -489,7 +489,7 @@ class TestCheckout(unittest.TestCase):
         category = fx.make_category(db)
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=PRECIO)
-        order = fx.make_customer_order(db, ts, status="abierta", channel="waiter")
+        order = fx.make_customer_order(db, ts, status="abierta", channel="POS")
         fx.make_order_item(db, order, variant, estado_cocina="pendiente")
         db.commit()
         user = self._user()
@@ -505,7 +505,7 @@ class TestCheckout(unittest.TestCase):
         category = fx.make_category(db)
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=PRECIO)
-        order = fx.make_customer_order(db, ts, status="abierta", channel="waiter")
+        order = fx.make_customer_order(db, ts, status="abierta", channel="POS")
         fx.make_order_item(db, order, variant, estado_cocina="pendiente")
         method = fx.make_payment_method(db, is_cash=True)
         confirmado = fx.make_payment_attempt(db, order, method, status="confirmado")
@@ -650,7 +650,7 @@ class TestCheckout(unittest.TestCase):
         variant = fx.make_variant(db, product=product, price=PRECIO)
         insumo = fx.make_inventory_item(db, current_stock=stock)
         fx.make_recipe_item(db, variant, insumo, quantity=recipe_qty)
-        order = fx.make_customer_order(db, ts, status="recibida", channel="waiter")
+        order = fx.make_customer_order(db, ts, status="recibida", channel="POS")
         fx.make_order_item(db, order, variant, quantity=1, estado_cocina="pendiente")
         register = fx.make_cash_register(db)
         shift = fx.make_cash_shift(db, register=register)

@@ -30,6 +30,7 @@ from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import consolidation, service
 from app.api.v1.orders.schemas import OrderCreate, OrderItemIn, OrderChannel
 from app.models.customer_order import CustomerOrder
+from app.models.sale import Sale
 
 PRECIO = Decimal("10000")
 
@@ -159,7 +160,7 @@ class TestConsolidation(unittest.TestCase):
             consolidation.add_item_to_table(db, table.id, data_add, user)
 
         data_create = OrderCreate(
-            channel=OrderChannel.COUNTER,
+            channel=OrderChannel.POS,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[])],
         )
         with self.assertRaises(HTTPException) as ctx_create:
@@ -183,7 +184,7 @@ class TestConsolidation(unittest.TestCase):
         db.commit()
 
         data = OrderCreate(
-            channel=OrderChannel.COUNTER,
+            channel=OrderChannel.POS,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[])],
         )
         with self.assertRaises(HTTPException) as ctx:
@@ -227,9 +228,11 @@ class TestConsolidation(unittest.TestCase):
 
     def test_get_or_create_open_order_crea_y_reutiliza(self):
         """CONGELA comportamiento actual (`consolidation.py:69-104`): mesa sin
-        orden `abierta`/`waiter` crea una nueva vía
+        orden `abierta` de consolidación crea una nueva vía
         `get_or_create_table_session_id`; con una ya existente, la reutiliza
-        sin duplicar."""
+        sin duplicar. Spec 055 (research.md D2): el canal ahora es `POS`
+        (estandarizado) y la distinción interna que antes vivía en
+        `channel == 'waiter'` vive en `is_consolidation_order`."""
         db = fx.new_session()
         table = fx.make_dining_table(db)
         db.commit()
@@ -238,7 +241,9 @@ class TestConsolidation(unittest.TestCase):
         order = consolidation.get_or_create_open_order(db, table.id, user_id)
         db.commit()
         self.assertEqual(order.status, "abierta")
-        self.assertEqual(order.channel, "waiter")
+        self.assertEqual(order.channel, "POS")
+        self.assertTrue(order.is_consolidation_order)
+        self.assertEqual(order.order_type, "DINE_IN")
         self.assertIsNotNone(order.table_session_id)
 
         order_2 = consolidation.get_or_create_open_order(db, table.id, user_id)
@@ -260,7 +265,8 @@ class TestConsolidation(unittest.TestCase):
         order = consolidation.add_item_to_table(db, table.id, data, user)
 
         self.assertEqual(order.status, "abierta")
-        self.assertEqual(order.channel, "waiter")
+        self.assertEqual(order.channel, "POS")
+        self.assertTrue(order.is_consolidation_order)
         self.assertIsNotNone(order.table_session_id)
         self.assertEqual(len(order.items), 1)
 
@@ -268,11 +274,12 @@ class TestConsolidation(unittest.TestCase):
 
     def test_consolidate_table_consolida_carritos_en_orden_existente(self):
         """CONGELA comportamiento actual (spec.md Historia 1, escenario 4):
-        orden `abierta`/`waiter` ya existente con ítems previos + comensales
-        con carritos abiertos → `consolidate_table` agrega las líneas de los
-        carritos a la orden existente sin duplicar los ítems ya presentes.
-        Documenta también la ausencia de idempotencia: invocado una segunda
-        vez sin carritos abiertos nuevos, responde 409 en vez de no-op."""
+        orden `abierta` de consolidación ya existente con ítems previos +
+        comensales con carritos abiertos → `consolidate_table` agrega las
+        líneas de los carritos a la orden existente sin duplicar los ítems ya
+        presentes. Documenta también la ausencia de idempotencia: invocado
+        una segunda vez sin carritos abiertos nuevos, responde 409 en vez de
+        no-op."""
         db = fx.new_session()
         table = fx.make_dining_table(db)
         ts = fx.make_table_session(db, table=table)
@@ -282,7 +289,7 @@ class TestConsolidation(unittest.TestCase):
         _, _, variant, _ = self._seed_variant_con_receta(db)
 
         order = fx.make_customer_order(
-            db, ts, channel="waiter", status="abierta",
+            db, ts, channel="POS", is_consolidation_order=True, status="abierta",
         )
         item_previo = fx.make_order_item(db, order, variant, estado_cocina="pendiente")
 
@@ -363,6 +370,40 @@ class TestConsolidation(unittest.TestCase):
         # La orden no quedó creada a medias.
         orders = db.query(CustomerOrder).all()
         self.assertEqual(orders, [])
+
+    # ------------------------- spec 055, research.md D2: no reabrir lo cobrado
+
+    def test_get_or_create_open_order_no_reabre_una_comanda_de_mostrador_ya_cobrada(self):
+        """El hallazgo central del plan de spec 055: fusionar 'counter' y
+        'waiter' en un único canal 'POS' no puede hacer que el mesero, al
+        agregar un ítem directo a la mesa, reabra por accidente una comanda
+        de mostrador que ya se cobró (`checkout_and_send` deja la orden en
+        'abierta' a propósito, con la venta ya emitida) — `is_consolidation_order`
+        es justo lo que evita esa colisión."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db)
+        ts = fx.make_table_session(db, table=table)
+        db.commit()
+
+        # Comanda de mostrador ya cobrada: status='abierta' + Sale emitida,
+        # is_consolidation_order=False (no la abrió el mesero).
+        comanda_cobrada = fx.make_customer_order(
+            db, ts, dining_table_id=table.id, channel="POS",
+            is_consolidation_order=False, status="abierta",
+        )
+        shift = fx.make_cash_shift(db)
+        cajero = fx.make_user_double()
+        db.add(Sale(
+            cash_shift_id=shift.id, customer_order_id=comanda_cobrada.id,
+            table_session_id=ts.id, user_id=cajero.id, status="paid",
+        ))
+        db.commit()
+
+        # El mesero agrega un ítem directo a la misma mesa.
+        order = consolidation.get_or_create_open_order(db, table.id, uuid4())
+
+        self.assertNotEqual(order.id, comanda_cobrada.id)
+        self.assertTrue(order.is_consolidation_order)
 
 
 if __name__ == "__main__":

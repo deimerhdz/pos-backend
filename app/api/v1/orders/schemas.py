@@ -10,9 +10,22 @@ from app.core.timezone import UtcDatetime
 
 
 class OrderChannel(str, Enum):
-    QR = "qr"
-    COUNTER = "counter"
-    WAITER = "waiter"
+    """Canal de origen del pedido, estandarizado (spec 055). `COUNTER`/`WAITER`
+    (personal del punto de venta) y `QR` se fusionaron/renombraron: `POS`
+    cubre tanto el mostrador/cajero como al mesero (Terminal de Mesas, modo
+    híbrido) — ver `app/api/v1/orders/consolidation.py` para cómo se preserva
+    esa distinción internamente sin exponerla aquí."""
+    POS = "POS"
+    QR_MENU = "QR_MENU"
+    WHATSAPP = "WHATSAPP"
+    API = "API"
+
+
+class OrderType(str, Enum):
+    """Cómo se atiende el pedido (spec 055)."""
+    DINE_IN = "DINE_IN"
+    TAKEAWAY = "TAKEAWAY"
+    DELIVERY = "DELIVERY"
 
 
 class OrderStatus(str, Enum):
@@ -114,7 +127,11 @@ class OrderItemIn(BaseModel):
 
 
 class OrderCreate(BaseModel):
-    channel: OrderChannel = OrderChannel.COUNTER
+    channel: OrderChannel = OrderChannel.POS
+    #: Cómo se atiende el pedido (spec 055). Validado contra `channel` en
+    #: `orders.service.create_order` (no toda combinación tiene sentido de
+    #: negocio — p. ej. WHATSAPP nunca admite DINE_IN).
+    order_type: OrderType = OrderType.DINE_IN
     participant_id: UUID | None = None
     dining_table_id: UUID | None = None
     customer_name: str | None = Field(None, max_length=255)
@@ -123,8 +140,8 @@ class OrderCreate(BaseModel):
     #: Terminal de Mesas modo híbrido (spec 028): comanda de mostrador/mesero
     #: que nace en 'recibida' en lugar de 'abierta' — el staff cobra primero
     #: (`POST /orders/{id}/checkout-and-send`) y recién ahí se descuenta
-    #: inventario y se envía a cocina. Solo aplica a `channel` counter/waiter;
-    #: combinado con `channel=qr` es 400 (ese canal ya tiene su propio flujo
+    #: inventario y se envía a cocina. Solo aplica a `channel=POS`; combinado
+    #: con `channel=QR_MENU` es 400 (ese canal ya tiene su propio flujo
     #: `recibida` vía `/cart/submit`).
     hold_for_payment: bool = False
 
@@ -178,6 +195,7 @@ class CurrentPaymentAttemptSummary(BaseModel):
 class OrderResponse(BaseModel):
     id: UUID
     channel: str
+    order_type: str | None = None
     status: str
     version: int
     table_session_id: UUID | None = None

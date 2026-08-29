@@ -247,7 +247,8 @@ def make_customer_order(
     kw.setdefault("table_session_id", table_session.id)
     kw.setdefault("participant_id", participant.id if participant is not None else None)
     kw.setdefault("dining_table_id", table_session.dining_table_id)
-    kw.setdefault("channel", "waiter")
+    kw.setdefault("channel", "POS")
+    kw.setdefault("order_type", "DINE_IN")
     # Estado por defecto 'abierta': ni recién recibido ni terminal, cobrable de
     # inmediato — los tests que ejercitan A-01 (recibida/en_preparacion/
     # cancelada/pagada) lo sobreescriben explícitamente.
