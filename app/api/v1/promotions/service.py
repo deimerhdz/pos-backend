@@ -22,7 +22,7 @@ Tres cambios estructurales respecto de la versión anterior:
    sola promoción por línea.
 """
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -98,13 +98,29 @@ def _valid_now(promo: Promotion, now: datetime) -> bool:
         return False
     if promo.starts_at is not None and now < promo.starts_at:
         return False
+
+    # FR-004 / CL-8 (spec 040, A-55): cuando la ventana cruza la medianoche
+    # (`start_time > end_time`) y estamos en el tramo posterior a la medianoche
+    # (`now.time() <= end_time`), el día de aplicación es el día en que INICIA la
+    # ventana — la fecha de referencia para `days_of_week` y `ends_at` retrocede
+    # 24 h. `starts_at` y `start_time` no cambian. Afecta a TODOS los tipos de
+    # promoción (este chequeo es compartido).
+    ref = now
+    if (
+        promo.start_time is not None
+        and promo.end_time is not None
+        and promo.start_time > promo.end_time
+        and now.time() <= promo.end_time
+    ):
+        ref = now - timedelta(days=1)
+
     # `ends_at` llega como medianoche del día elegido en el selector "Hasta":
     # se compara por fecha para que "Hasta 04/08" cubra el 04/08 completo.
-    if promo.ends_at is not None and now.date() > promo.ends_at.date():
+    if promo.ends_at is not None and ref.date() > promo.ends_at.date():
         return False
     if promo.days_of_week:
         allowed = {d.strip() for d in promo.days_of_week.split(",") if d.strip()}
-        if str(now.weekday()) not in allowed:  # 0=lunes..6=domingo
+        if str(ref.weekday()) not in allowed:  # 0=lunes..6=domingo
             return False
     return _in_time_window(now.time(), promo.start_time, promo.end_time)
 
