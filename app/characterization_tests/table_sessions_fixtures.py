@@ -108,6 +108,10 @@ _TABLE_SESSIONS_TABLE_NAMES = [
     "promotions",
     "promotion_targets",
     "promotion_combo_items",
+    # spec 040: `presentation_rules` de `Promotion` + FK `presentation_id` de la
+    # variante — contrapartida de la migración `f03274730367`.
+    "presentations",
+    "promotion_presentation_rules",
     "cash_registers",
     "cash_shifts",
     "payment_methods",

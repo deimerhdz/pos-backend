@@ -2,6 +2,7 @@
 # Catálogo / menú
 from .category import Category
 from .unit_measure import UnitMeasure
+from .presentation import Presentation
 from .product import Product
 from .product_variant import ProductVariant
 from .option_group import OptionGroup
@@ -40,7 +41,9 @@ from .payment import PaymentMethod, Payment
 from .payment_method_catalog import PaymentMethodCatalog
 
 # Promociones
-from .promotion import Promotion, PromotionTarget, PromotionComboItem
+from .promotion import (
+    Promotion, PromotionTarget, PromotionComboItem, PromotionPresentationRule,
+)
 
 # Administración (horarios, auditoría)
 from .business_hours import BusinessHours

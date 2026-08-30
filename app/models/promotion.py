@@ -5,9 +5,12 @@ from sqlalchemy import (
     UniqueConstraint, Index, text,
 )
 from sqlalchemy.orm import mapped_column, Mapped, relationship
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from decimal import Decimal
 from datetime import datetime, time
+
+if TYPE_CHECKING:
+    from .presentation import Presentation
 
 
 # Máquina de estados del RF. `draft` es el único estado en el que se puede
@@ -27,7 +30,12 @@ PROMOTION_TRANSITIONS = {
 
 # `buy_x_get_y` sale del dominio: mientras `_line_discount` le devuelva 0, ser
 # configurable solo sirve para que un admin cree un "2x1" que no descuenta.
-PROMOTION_TYPES = ("percent", "fixed", "combo", "qty_price")
+#
+# `qty_price_presentation` (spec 040): precio de paquete por presentación de
+# catálogo, con sus reglas en `promotion_presentation_rules`. Como `combo`, se
+# calcula agrupando varias líneas y por eso NO entra en `AUTO_TYPES`
+# (`service.py`) — el motor línea-por-línea no lo toca.
+PROMOTION_TYPES = ("percent", "fixed", "combo", "qty_price", "qty_price_presentation")
 
 
 class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -57,7 +65,10 @@ class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    type: Mapped[str] = mapped_column(String(20), nullable=False)
+    # `String(50)` (antes 20): `qty_price_presentation` (spec 040) tiene 22
+    # caracteres y no cabía en `varchar(20)` — la ampliación va en la migración
+    # `f03274730367`.
+    type: Mapped[str] = mapped_column(String(50), nullable=False)
 
     value: Mapped[Decimal] = mapped_column(
         Numeric(12, 2), nullable=False, default=0, server_default="0"
@@ -87,10 +98,13 @@ class Promotion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     combo_items: Mapped[List["PromotionComboItem"]] = relationship(
         back_populates="promotion", cascade="all, delete-orphan"
     )
+    presentation_rules: Mapped[List["PromotionPresentationRule"]] = relationship(
+        back_populates="promotion", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         CheckConstraint(
-            "type IN ('percent', 'fixed', 'combo', 'qty_price')",
+            "type IN ('percent', 'fixed', 'combo', 'qty_price', 'qty_price_presentation')",
             name="ck_promotion_type",
         ),
         CheckConstraint(
@@ -198,6 +212,45 @@ class PromotionComboItem(UUIDPrimaryKeyMixin, Base):
         UniqueConstraint(
             "promotion_id", "product_variant_id",
             name="uq__promotion_combo_items__promotion_id__product_variant_id",
+        ),
+        {"schema": "tenant"},
+    )
+
+
+class PromotionPresentationRule(UUIDPrimaryKeyMixin, Base):
+    """Regla de una promoción `qty_price_presentation` (spec 040), tabla hija de
+    `promotions` — misma forma que `PromotionComboItem`.
+
+    Una fila = la tripleta `(presentación, cantidad mínima, precio total del
+    paquete)` (FR-001). `Promotion.value` NO se usa: el precio vive aquí porque
+    una promoción de esta modalidad tiene un precio de paquete distinto por regla
+    (research.md D3).
+    """
+
+    __tablename__ = "promotion_presentation_rules"
+
+    promotion_id: Mapped[UUID] = mapped_column(
+        ForeignKey("promotions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    promotion: Mapped["Promotion"] = relationship(back_populates="presentation_rules")
+
+    presentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentations.id", ondelete="CASCADE"), nullable=False
+    )
+    presentation: Mapped["Presentation"] = relationship()
+
+    # `CHECK >= 1` — a diferencia de `qty_price` (`min_qty >= 2`), aquí `1` es
+    # válido: "precio especial por unidad de esa presentación" (CL-7).
+    min_qty: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    pack_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("min_qty >= 1", name="min_qty"),
+        CheckConstraint("pack_price >= 0", name="pack_price"),
+        UniqueConstraint(
+            "promotion_id", "presentation_id",
+            name="uq__promotion_presentation_rules__promotion_id__presentation_id",
         ),
         {"schema": "tenant"},
     )
