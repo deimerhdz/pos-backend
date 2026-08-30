@@ -104,7 +104,7 @@ def _staff(db) -> User:
 
 def _make_order(db, variant, table, *, status: str, estados: list[str]):
     """Pedido con una línea por cada estado de cocina pedido."""
-    order = CustomerOrder(dining_table_id=table.id, channel="qr", status=status)
+    order = CustomerOrder(dining_table_id=table.id, channel="QR_MENU", order_type="DINE_IN", status=status)
     db.add(order)
     db.flush()
     for est in estados:

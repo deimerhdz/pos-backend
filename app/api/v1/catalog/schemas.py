@@ -43,22 +43,10 @@ class VariantResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ---------- Orden de presentaciones (spec 042) ----------
-class VariantReorderRequest(BaseModel):
-    """IDs de las presentaciones ACTIVAS del producto, en el orden deseado."""
-
-    variant_ids: list[UUID] = Field(..., min_length=1)
-
-
-class VariantOrderEntry(BaseModel):
-    id: UUID
-    display_order: int
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class VariantReorderResponse(BaseModel):
-    variants: list[VariantOrderEntry]
+# Orden de presentaciones (spec 042): el endpoint dedicado de reordenamiento
+# (`VariantReorderRequest`/`VariantOrderEntry`/`VariantReorderResponse`) se retiró en spec 043
+# (A-55, registro-de-anomalias.md) -- el orden ahora se envía como la posición de cada
+# presentación dentro de `variants[]` del guardado consolidado (`VariantSaveIn` abajo).
 
 
 # ---------- Receta (BOM): insumos fijos ----------
@@ -68,10 +56,6 @@ class RecipeItemIn(BaseModel):
 
     inventory_item_id: UUID
     quantity: Decimal = Field(..., gt=0, max_digits=12, decimal_places=3)
-
-
-class RecipeSet(BaseModel):
-    items: list[RecipeItemIn] = Field(default_factory=list)
 
 
 class RecipeItemResponse(BaseModel):
@@ -104,10 +88,6 @@ class VariantOptionGroupIn(BaseModel):
         return self
 
 
-class VariantOptionGroupSet(BaseModel):
-    groups: list[VariantOptionGroupIn] = Field(default_factory=list)
-
-
 class VariantOptionGroupResponse(BaseModel):
     id: UUID
     product_variant_id: UUID
@@ -117,6 +97,31 @@ class VariantOptionGroupResponse(BaseModel):
     quantity_per_option: Decimal
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Guardado consolidado de producto (spec 043) ----------
+class VariantSaveIn(BaseModel):
+    """Una presentación dentro del árbol que aceptan `POST`/`PATCH`/`PUT /products` (spec 043).
+
+    `id` distingue crear de actualizar: ausente/`None` crea una presentación nueva; presente
+    actualiza la fila existente con ese id (debe pertenecer al producto). Solo tiene sentido en
+    `PATCH`/`PUT /products/{id}` -- en `POST /products` el producto todavía no tiene
+    presentaciones, así que siempre llega `None` ahí.
+
+    `recipe`/`option_groups` son reemplazo total (mismo patrón que tenían los endpoints ya
+    retirados `PUT /variants/{id}/recipe`/`PUT /variants/{id}/option-groups`, A-55). La posición
+    de esta entrada dentro de la lista `variants` del body determina su `display_order` (1-based).
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    id: UUID | None = None
+    name: str = Field(..., min_length=1, max_length=255, examples=["1 bola", "2 bolas"])
+    price: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
+    sku: str | None = Field(None, max_length=100)
+    active: bool = True
+    recipe: list[RecipeItemIn] = Field(default_factory=list)
+    option_groups: list[VariantOptionGroupIn] = Field(default_factory=list)
 
 
 # ---------- Grupos de opciones ----------

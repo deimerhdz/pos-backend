@@ -46,7 +46,7 @@ class TestKitchen(unittest.TestCase):
         variant = fx.make_variant(db, product=product, price=PRECIO)
         insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
         fx.make_recipe_item(db, variant, insumo, quantity=Decimal("1"))
-        order = fx.make_customer_order(db, ts, status=order_status, channel="waiter")
+        order = fx.make_customer_order(db, ts, status=order_status, channel="POS")
         item = fx.make_order_item(db, order, variant, estado_cocina=estado_cocina)
         db.commit()
         return dict(db=db, ts=ts, order=order, item=item, variant=variant, insumo=insumo)

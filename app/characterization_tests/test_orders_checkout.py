@@ -42,6 +42,7 @@ from app.api.v1.promotions import service as promotions
 from app.models.audit_log import AuditLog
 from app.models.cart import Cart
 from app.models.inventory_movement import InventoryMovement
+from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.sale import Sale
 
 PRECIO = Decimal("10000")
@@ -51,7 +52,7 @@ class TestCheckout(unittest.TestCase):
     # ------------------------------------------------------------- Helpers
 
     def _seed_order_con_receta(self, *, order_status="abierta", table_status="ocupada"):
-        """Mesa ocupada + sesión + orden 'waiter', con una variante que sí
+        """Mesa ocupada + sesión + orden 'POS', con una variante que sí
         descuenta inventario (receta con stock de sobra)."""
         db = fx.new_session()
         table = fx.make_dining_table(db, status=table_status)
@@ -61,7 +62,7 @@ class TestCheckout(unittest.TestCase):
         variant = fx.make_variant(db, product=product, price=PRECIO)
         insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
         fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
-        order = fx.make_customer_order(db, ts, status=order_status, channel="waiter")
+        order = fx.make_customer_order(db, ts, status=order_status, channel="POS")
         db.commit()
         return dict(
             db=db, table=table, ts=ts, category=category, product=product,
@@ -285,6 +286,48 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(sale.discount, esperado_descuento)
         self.assertIsNone(sale.promotion_id)
 
+    # ---------------------------------------- spec 056: valor del domicilio en pay_order
+
+    def test_pay_order_orden_delivery_suma_el_valor_del_domicilio_al_total(self):
+        """FR-011: el total de la venta incluye el valor del domicilio de la
+        orden asociada, y `Sale.delivery_fee` queda persistido."""
+        s = self._seed_order_con_receta()
+        db, order, variant = s["db"], s["order"], s["variant"]
+        order.order_type = "DELIVERY"
+        order.delivery_fee = Decimal("6000")
+        fx.make_order_item(db, order, variant, quantity=1)
+        order.status = "bloqueada"
+        register = fx.make_cash_register(db)
+        shift = fx.make_cash_shift(db, register=register)
+        method = fx.make_payment_method(db)
+        db.commit()
+        cashier = self._user()
+
+        esperado_total = PRECIO + Decimal("6000")
+        data = PayIn(cash_shift_id=shift.id, payments=[self._pago(method.id, esperado_total)])
+        sale = checkout.pay_order(db, order.id, data, cashier)
+
+        self.assertEqual(sale.delivery_fee, Decimal("6000"))
+        self.assertEqual(sale.total, esperado_total)
+
+    def test_pay_order_orden_no_delivery_no_suma_ningun_valor_de_domicilio(self):
+        """FR-012: sin efecto sobre el total de una orden que no es DELIVERY
+        (no regresión)."""
+        s = self._seed_order_con_receta()
+        db, order, variant = s["db"], s["order"], s["variant"]
+        fx.make_order_item(db, order, variant, quantity=1)
+        order.status = "bloqueada"
+        register = fx.make_cash_register(db)
+        shift = fx.make_cash_shift(db, register=register)
+        method = fx.make_payment_method(db)
+        db.commit()
+        cashier = self._user()
+
+        data = PayIn(cash_shift_id=shift.id, payments=[self._pago(method.id, PRECIO)])
+        sale = checkout.pay_order(db, order.id, data, cashier)
+
+        self.assertEqual(sale.total, PRECIO)
+
     # -------------------------------------------------------- confirm_order (T028)
 
     def test_confirm_order_descuenta_una_vez_y_stock_insuficiente_revierte(self):
@@ -321,7 +364,7 @@ class TestCheckout(unittest.TestCase):
         fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
         metodo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
 
-        order = fx.make_customer_order(db, ts, status="recibida", channel="qr")
+        order = fx.make_customer_order(db, ts, status="recibida", channel="QR_MENU")
         fx.make_order_item(db, order, variant, quantity=1, estado_cocina="pendiente")
         fx.make_payment_attempt(db, order, metodo, status="confirmado")
         db.commit()
@@ -337,7 +380,7 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(Decimal(insumo.current_stock), Decimal("3"))
 
         # Stock insuficiente para un segundo pedido (necesita 10, sobran 3).
-        order2 = fx.make_customer_order(db, ts, status="recibida", channel="qr")
+        order2 = fx.make_customer_order(db, ts, status="recibida", channel="QR_MENU")
         fx.make_order_item(db, order2, variant, quantity=5, estado_cocina="pendiente")
         fx.make_payment_attempt(db, order2, metodo, status="confirmado")
         db.commit()
@@ -370,7 +413,7 @@ class TestCheckout(unittest.TestCase):
         insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
         fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
 
-        order = fx.make_customer_order(db, ts, status="abierta", channel="waiter")
+        order = fx.make_customer_order(db, ts, status="abierta", channel="POS")
         item_en_prep = fx.make_order_item(db, order, variant, estado_cocina="en_preparacion")
         item_listo = fx.make_order_item(db, order, variant, estado_cocina="listo")
         fx.make_order_item(db, order, variant, estado_cocina="pendiente")
@@ -409,7 +452,7 @@ class TestCheckout(unittest.TestCase):
         category = fx.make_category(db)
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=PRECIO)
-        order = fx.make_customer_order(db, ts, status="abierta", channel="counter")
+        order = fx.make_customer_order(db, ts, status="abierta", channel="POS")
         fx.make_order_item(db, order, variant, estado_cocina="pendiente")
         shift = fx.make_cash_shift(db)
         cashier = fx.make_user_double()
@@ -430,6 +473,92 @@ class TestCheckout(unittest.TestCase):
         self.assertIsNotNone(
             db.execute(select(Sale).where(Sale.id == sale.id)).scalar_one_or_none()
         )
+
+    # --------- cancel_order también resuelve el intento de pago (spec 044) ---------
+    #
+    # Comportamiento NUEVO (spec 044, revierte research.md D5 de spec 028 para pago
+    # en efectivo y transferencia-sin-comprobante): rechazar un pedido con pago QR
+    # pendiente ya no lo deja "pendiente" para siempre en una orden cancelada.
+
+    def test_cancel_order_resuelve_intento_de_pago_pendiente_efectivo_spec_044(self):
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="recibida", channel="QR_MENU")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        method = fx.make_payment_method(db, is_cash=True)
+        attempt = fx.make_payment_attempt(db, order, method, status="pendiente")
+        db.commit()
+        user = self._user()
+
+        resultado = checkout.cancel_order(db, order.id, CancelIn(motivo="no llegó"), user)
+        self.assertEqual(resultado.status, "cancelada")
+
+        db.refresh(attempt)
+        self.assertEqual(attempt.status, "rechazado")
+        self.assertEqual(attempt.rejection_reason, "no llegó")
+        self.assertEqual(attempt.resolved_by_user_id, user.id)
+        self.assertIsNotNone(attempt.resolved_at)
+
+    def test_cancel_order_resuelve_intento_de_pago_pendiente_transferencia_sin_comprobante_spec_044(self):
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="recibida", channel="QR_MENU")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        method = fx.make_payment_method(db, is_cash=False)
+        attempt = fx.make_payment_attempt(
+            db, order, method, status="pendiente", receipt_file_url=None
+        )
+        db.commit()
+        user = self._user()
+
+        checkout.cancel_order(db, order.id, CancelIn(motivo="se fue sin pagar"), user)
+
+        db.refresh(attempt)
+        self.assertEqual(attempt.status, "rechazado")
+        self.assertEqual(attempt.rejection_reason, "se fue sin pagar")
+
+    def test_cancel_order_sin_intento_de_pago_no_falla_spec_044(self):
+        """Guarda de no-regresión: un pedido de mostrador/mesero (sin ningún
+        `OrderPaymentAttempt`) se cancela exactamente igual que antes de spec 044."""
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="abierta", channel="POS")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        db.commit()
+        user = self._user()
+
+        resultado = checkout.cancel_order(db, order.id, CancelIn(motivo="prueba"), user)
+        self.assertEqual(resultado.status, "cancelada")
+
+    def test_cancel_order_no_toca_intento_ya_confirmado_spec_044(self):
+        """La búsqueda solo matchea `status='pendiente'` -- un intento ya
+        resuelto (confirmado en otro pedido/momento) no se sobrescribe."""
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="abierta", channel="POS")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        method = fx.make_payment_method(db, is_cash=True)
+        confirmado = fx.make_payment_attempt(db, order, method, status="confirmado")
+        db.commit()
+        user = self._user()
+
+        checkout.cancel_order(db, order.id, CancelIn(motivo="prueba"), user)
+
+        db.refresh(confirmado)
+        self.assertEqual(confirmado.status, "confirmado")
+        self.assertIsNone(confirmado.rejection_reason)
 
     # ----------------------------------------------------- close_participants (T030)
 
@@ -563,7 +692,7 @@ class TestCheckout(unittest.TestCase):
         variant = fx.make_variant(db, product=product, price=PRECIO)
         insumo = fx.make_inventory_item(db, current_stock=stock)
         fx.make_recipe_item(db, variant, insumo, quantity=recipe_qty)
-        order = fx.make_customer_order(db, ts, status="recibida", channel="waiter")
+        order = fx.make_customer_order(db, ts, status="recibida", channel="POS")
         fx.make_order_item(db, order, variant, quantity=1, estado_cocina="pendiente")
         register = fx.make_cash_register(db)
         shift = fx.make_cash_shift(db, register=register)
@@ -605,6 +734,27 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(len(movimientos), 1)
         db.refresh(insumo)
         self.assertEqual(Decimal(insumo.current_stock), Decimal("998"))
+
+    def test_checkout_and_send_orden_delivery_suma_el_valor_del_domicilio(self):
+        """spec 056, FR-011: este es el camino real que sigue un pedido
+        "Domicilio" creado desde la pantalla de creación manual
+        (`hold_for_payment=True` → 'recibida' → checkout_and_send)."""
+        s = self._seed_hold_order_con_receta()
+        db, order, shift, method = s["db"], s["order"], s["shift"], s["method"]
+        order.order_type = "DELIVERY"
+        order.delivery_fee = Decimal("6000")
+        db.commit()
+        cashier = self._user()
+
+        esperado_total = PRECIO + Decimal("6000")
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=shift.id,
+            payments=[self._pago(method.id, esperado_total)],
+        )
+        sale = checkout.checkout_and_send(db, order.id, data, cashier)
+
+        self.assertEqual(sale.delivery_fee, Decimal("6000"))
+        self.assertEqual(sale.total, esperado_total)
 
     def test_checkout_and_send_version_desactualizada_409_sin_doble_venta(self):
         """Idempotencia / doble clic (spec 028, T016): una segunda llamada con

@@ -80,7 +80,8 @@ def get_or_create_open_order(db: Session, table_id: UUID, user_id: UUID) -> Cust
         .where(
             CustomerOrder.dining_table_id == table_id,
             CustomerOrder.status == "abierta",
-            CustomerOrder.channel == "waiter",
+            CustomerOrder.channel == "POS",
+            CustomerOrder.is_consolidation_order.is_(True),
         )
         .order_by(CustomerOrder.created_at)
         .limit(1)
@@ -90,7 +91,9 @@ def get_or_create_open_order(db: Session, table_id: UUID, user_id: UUID) -> Cust
         order = CustomerOrder(
             dining_table_id=table_id,
             table_session_id=session_id,
-            channel="waiter",
+            channel="POS",
+            order_type="DINE_IN",
+            is_consolidation_order=True,
             status="abierta",
             user_id=user_id,
         )

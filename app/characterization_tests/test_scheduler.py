@@ -116,7 +116,7 @@ class TestSweepSchema(unittest.TestCase):
 
         pedido_huerfano = CustomerOrder(
             id=uuid.uuid4(), dining_table_id=table.id, table_session_id=None,
-            participant_id=None, channel="waiter", status="abierta",
+            participant_id=None, channel="POS", status="abierta",
             created_at=datetime.now(),
         )
         db.add(pedido_huerfano)

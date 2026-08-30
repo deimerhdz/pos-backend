@@ -79,6 +79,7 @@ def build_sale(
     discount: Decimal = Decimal("0"),
     tax: Decimal = Decimal("0"),
     tip: Decimal = Decimal("0"),
+    delivery_fee: Decimal = Decimal("0"),
     customer_name: str | None = None,
     dining_table_id: UUID | None = None,
     table_session_id: UUID | None = None,
@@ -114,6 +115,7 @@ def build_sale(
         discount=discount,
         tax=tax,
         tip=tip,
+        delivery_fee=delivery_fee,
         promotion_id=promotion_id,
         status="issued",
     )
@@ -134,7 +136,9 @@ def build_sale(
             combo_id=line.combo_id,
         ))
 
-    total = subtotal - Decimal(discount) + Decimal(tax) + Decimal(tip)
+    # Spec 056, FR-011: el valor del domicilio (si la orden es DELIVERY) se
+    # suma al total igual que tax/tip — 0 para cualquier otra orden (FR-012).
+    total = subtotal - Decimal(discount) + Decimal(tax) + Decimal(tip) + Decimal(delivery_fee)
     if total < 0:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "El total no puede ser negativo"
