@@ -77,7 +77,8 @@ def _pedido(schema, table_id, participant_id, table_session_id, status_pedido):
             dining_table_id=table_id,
             table_session_id=table_session_id,
             participant_id=participant_id,
-            channel="qr",
+            channel="QR_MENU",
+            order_type="DINE_IN",
             status=status_pedido,
         )
         db.add(order)

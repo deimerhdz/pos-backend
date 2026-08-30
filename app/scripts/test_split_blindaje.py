@@ -122,8 +122,8 @@ def _fixture(db, suf: str):
                               display_name="Beto", display_label="Beto", status="open")
     db.add_all([ana, beto]); db.flush()
 
-    order = CustomerOrder(channel="waiter", status="abierta", dining_table_id=table.id,
-                          table_session_id=ts.id)
+    order = CustomerOrder(channel="POS", order_type="DINE_IN", status="abierta",
+                          dining_table_id=table.id, table_session_id=ts.id)
     db.add(order); db.flush()
     for participant_id in (ana.id, beto.id, None):
         db.add(OrderItem(

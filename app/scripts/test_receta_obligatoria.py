@@ -107,7 +107,7 @@ def _staff(db) -> User:
 
 def _order(db, variants, *, status="recibida"):
     """Pedido con una línea por variante dada."""
-    order = CustomerOrder(channel="qr", status=status)
+    order = CustomerOrder(channel="QR_MENU", order_type="DINE_IN", status=status)
     db.add(order); db.flush()
     for v in variants:
         db.add(OrderItem(order_id=order.id, product_variant_id=v.id, quantity=1,
@@ -139,7 +139,7 @@ def _cleanup(schema, product_id, item_id):
         '''), {"p": str(product_id)})
         db.execute(text(f'''
             DELETE FROM "{schema}".customer_orders WHERE id NOT IN (
-                SELECT order_id FROM "{schema}".order_items) AND channel = 'qr'
+                SELECT order_id FROM "{schema}".order_items) AND channel = 'QR_MENU'
                 AND status = 'recibida'
         '''))
         db.execute(text(f'''DELETE FROM "{schema}".recipe_items WHERE product_variant_id IN (

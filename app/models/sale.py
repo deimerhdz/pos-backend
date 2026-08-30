@@ -55,6 +55,10 @@ class Sale(UUIDPrimaryKeyMixin, Base):
     discount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
     tax: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
     tip: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
+    # Spec 056 — valor del domicilio de la CustomerOrder asociada, copiado aquí
+    # al facturar (incluido en `total`, ver sales/builder.py). Null/0 en toda
+    # venta que no venga de una orden DELIVERY.
+    delivery_fee: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
 
     # Promoción aplicada automáticamente (RF-012); su descuento está incluido en `discount`.

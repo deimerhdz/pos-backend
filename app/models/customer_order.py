@@ -1,10 +1,11 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy import (
-    String, Integer, ForeignKey, DateTime, func, CheckConstraint, Index, text,
+    String, Integer, Boolean, Numeric, ForeignKey, DateTime, func, CheckConstraint, Index, text,
 )
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import Optional, List
+from decimal import Decimal
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -48,7 +49,32 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
 
     customer_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    channel: Mapped[str] = mapped_column(String(10), nullable=False, server_default="qr")
+    # Canal de origen estandarizado (spec 055): POS/QR_MENU/WHATSAPP/API.
+    channel: Mapped[str] = mapped_column(String(10), nullable=False, server_default="POS")
+
+    # Cómo se atiende el pedido (spec 055): DINE_IN/TAKEAWAY/DELIVERY. Nulable:
+    # los pedidos de antes de esta mejora sin mesa quedan sin clasificar
+    # (data-model.md, backfill) — todo pedido nuevo lo trae siempre asignado.
+    order_type: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+
+    # Técnico, no expuesto en ningún schema de API (research.md D2): distingue
+    # las órdenes que abre/reusa `orders.consolidation.get_or_create_open_order`
+    # (mesero) de las que arma `orders.service.create_order` (staff, POS) —
+    # antes de esta spec esa distinción vivía en el propio `channel`
+    # ('waiter' vs 'counter'); fusionarlos en un único valor `POS` de canal
+    # exige preservarla aquí para no reabrir por accidente una comanda ya
+    # cobrada (`checkout_and_send` deja las órdenes pagadas en `'abierta'`).
+    is_consolidation_order: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
+    # Spec 056 — solo diligenciados cuando order_type == 'DELIVERY'. Sin default
+    # de ningún tipo (ni de columna ni de aplicación): un pedido a domicilio
+    # incompleto no es un pedido válido, no un pedido con "$0"/"" implícito
+    # (spec.md FR-006, Edge Cases).
+    delivery_address: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    delivery_phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    delivery_fee: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
 
     status: Mapped[str] = mapped_column(String(12), nullable=False, server_default="abierta")
 
@@ -96,12 +122,22 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
 
     __table_args__ = (
         CheckConstraint(
-            "channel IN ('qr', 'counter', 'waiter')", name="ck_customer_order_channel"
+            "channel IN ('POS', 'QR_MENU', 'WHATSAPP', 'API')", name="ck_customer_order_channel"
+        ),
+        CheckConstraint(
+            "order_type IS NULL OR order_type IN ('DINE_IN', 'TAKEAWAY', 'DELIVERY')",
+            name="ck_customer_order_order_type",
         ),
         CheckConstraint(
             "status IN ('recibida', 'abierta', 'bloqueada', 'pagada', 'cancelada')",
             name="ck_customer_order_status",
         ),
+        CheckConstraint(
+            "delivery_fee IS NULL OR delivery_fee >= 0",
+            name="ck_customer_order_delivery_fee_non_negative",
+        ),
+        Index("idx_customer_orders_channel", "channel"),
+        Index("idx_customer_orders_order_type", "order_type"),
         # Ya NO hay índice único de "una orden abierta por mesa": la mesa puede
         # tener varios pedidos simultáneos (uno por comensal, o varias rondas del
         # mismo). La agrupación para cobrar la da `table_session_id`.
