@@ -23,6 +23,7 @@ from app.models.payment import Payment, PaymentMethod
 from app.models.payment_method_catalog import PaymentMethodCatalog
 from app.models.sale import Sale, SaleItem
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
+from app.api.v1.orders import checkout
 from app.api.v1.sales.consumption import deduct_sale
 from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
 from app.api.v1.sales.schemas import (
@@ -225,11 +226,8 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
         #    normal; su ahorro se calcula aparte y no entra a promo_lines (un
         #    combo y un percent/fixed nunca se acumulan sobre la misma línea).
         lines: list[SaleLine] = []
-        promo_lines: list[dict] = []
-        combo_ids_used: set[UUID] = set()
         for line in data.items:
             if line.combo_id is not None:
-                combo_ids_used.add(line.combo_id)
                 for component in promotions.expand_combo(db, line.combo_id, line.quantity, now):
                     lines.append(SaleLine(
                         product_variant_id=component.product_variant_id,
@@ -266,19 +264,16 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
                 quantity=line.quantity,
                 unit_price=unit_price,
             ))
-            promo_lines.append({
-                "product_id": variant.product_id,
-                "category_id": product.category_id if product else None,
-                "quantity": line.quantity,
-                "line_total": unit_price * Decimal(line.quantity),
-            })
 
         # 2. Descuento automático: promociones percent/fixed (RF-012) sobre las
-        #    líneas normales, más el ahorro de los combos seleccionados. Ambos se
-        #    suman al descuento manual que haya escrito el cajero.
-        promo_discount, promo_id = promotions.evaluate(db, promo_lines, now)
-        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
-        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+        #    líneas normales, el ahorro de los combos seleccionados y el paquete
+        #    por presentación (spec 040), reconciliados por línea. Se suman al
+        #    descuento manual que haya escrito el cajero.
+        _combined = promotions.combined_discount_detailed(
+            db, checkout.promo_lines_for(db, lines), now
+        )
+        promo_discount = _combined.total
+        final_promotion_id = _combined.promotion_id
 
         sale = build_sale(
             db,
@@ -286,7 +281,7 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
             shift=shift,
             cashier=cashier,
             payments=data.payments,
-            discount=Decimal(data.discount) + promo_discount + combo_discount,
+            discount=Decimal(data.discount) + promo_discount,
             tax=data.tax,
             tip=data.tip,
             customer_name=data.customer_name,

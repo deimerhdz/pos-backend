@@ -26,7 +26,6 @@ from app.models.session_participant import SessionParticipant
 from app.models.table_session import TableSession
 from app.api.v1.orders import checkout
 from app.api.v1.sales.builder import build_sale, ensure_open_shift
-from app.api.v1.promotions import service as promotions
 from app.api.v1.table_sessions.schemas import (
     BillingMode, CloseSessionIn, CloseSessionResponse,
     ReleaseSessionResponse,
@@ -183,9 +182,10 @@ def compute_bill(db: Session, table_session_id: UUID) -> SessionBillResponse:
         for order in orders:
             lines.extend(checkout.order_sale_lines(db, order.id, participant_id=pid))
         raw_subtotal = sum((line.line_total for line in lines), Decimal("0"))
-        promo_discount, _ = promotions.evaluate(db, checkout.promo_lines_for(db, lines), now)
-        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
-        subtotal = raw_subtotal - promo_discount - combo_discount
+        # spec 040: la unidad de agrupación del paquete por presentación es el
+        # subconjunto de líneas evaluadas juntas — aquí, por comensal (research.md D16).
+        promo_discount, _ = checkout.auto_discount(db, lines, now)
+        subtotal = raw_subtotal - promo_discount
         total += subtotal
         split.append(SessionBillLine(
             participant_id=pid,
@@ -202,7 +202,7 @@ def compute_bill(db: Session, table_session_id: UUID) -> SessionBillResponse:
                 )
                 for line in lines
             ],
-            discount=promo_discount + combo_discount,
+            discount=promo_discount,
         ))
 
     return SessionBillResponse(
@@ -653,10 +653,7 @@ def _close_unified(
         lines.extend(checkout.order_sale_lines(db, order.id))
 
     now = utc_now()
-    promo_discount, promo_id = promotions.evaluate(db, checkout.promo_lines_for(db, lines), now)
-    combo_discount = promotions.combo_discount_for_lines(db, lines, now)
-    combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
-    final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+    promo_discount, final_promotion_id = checkout.auto_discount(db, lines, now)
 
     return build_sale(
         db,
@@ -664,7 +661,7 @@ def _close_unified(
         shift=shift,
         cashier=cashier,
         payments=data.payments,
-        discount=Decimal(data.discount) + promo_discount + combo_discount,
+        discount=Decimal(data.discount) + promo_discount,
         tax=data.tax, tip=data.tip,
         customer_name=_nombre_cuenta(db, ts, orders, data),
         dining_table_id=ts.dining_table_id,
@@ -748,12 +745,11 @@ def _close_split(
                 db, order.id, participant_id=bloque.participant_id
             ))
 
-        # Cada comensal evalúa promociones/combos sobre sus propias líneas: un
-        # combo agregado por un comensal no se mezcla con las de otro.
-        promo_discount, promo_id = promotions.evaluate(db, checkout.promo_lines_for(db, lines), now)
-        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
-        combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
-        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+        # Cada comensal evalúa promociones/combos/paquetes por presentación sobre
+        # sus propias líneas: nada se mezcla entre comensales (research.md D16).
+        # (El importe del descuento automático en el split lo maneja el caller vía
+        # `bloque.discount`, igual que antes — aquí solo se deriva `promotion_id`.)
+        _, final_promotion_id = checkout.auto_discount(db, lines, now)
 
         sales.append(build_sale(
             db,
