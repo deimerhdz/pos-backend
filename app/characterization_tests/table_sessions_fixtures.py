@@ -50,7 +50,7 @@ __all__ = [
     "make_product", "make_recipe_item", "make_unit", "make_variant",
     "link_variant_group",
     "new_session",
-    "make_dining_table", "make_table_session", "make_participant",
+    "make_dining_table", "make_table_session", "make_participant", "make_cart",
     "make_customer_order", "make_order_item",
     "make_promotion", "make_promotion_target", "make_combo_item",
     "make_cash_register", "make_cash_shift", "make_payment_method",
@@ -64,6 +64,7 @@ import app.models  # noqa: F401 - ya registrado vía fixtures.py; se repite por 
 from app.models.dining_table import DiningTable
 from app.models.table_session import TableSession
 from app.models.session_participant import SessionParticipant
+from app.models.cart import Cart
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
 from app.models.product_variant import ProductVariant
@@ -226,6 +227,18 @@ def make_participant(
     return obj
 
 
+def make_cart(db: Session, participant: SessionParticipant | None = None, **kw) -> Cart:
+    if participant is None:
+        participant = make_participant(db)
+    kw.setdefault("id", _uid())
+    kw.setdefault("participant_id", participant.id)
+    kw.setdefault("status", "abierto")
+    obj = Cart(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
 def make_customer_order(
     db: Session, table_session: TableSession, participant: SessionParticipant | None = None,
     **kw
@@ -234,7 +247,8 @@ def make_customer_order(
     kw.setdefault("table_session_id", table_session.id)
     kw.setdefault("participant_id", participant.id if participant is not None else None)
     kw.setdefault("dining_table_id", table_session.dining_table_id)
-    kw.setdefault("channel", "waiter")
+    kw.setdefault("channel", "POS")
+    kw.setdefault("order_type", "DINE_IN")
     # Estado por defecto 'abierta': ni recién recibido ni terminal, cobrable de
     # inmediato — los tests que ejercitan A-01 (recibida/en_preparacion/
     # cancelada/pagada) lo sobreescriben explícitamente.

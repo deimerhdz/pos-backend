@@ -88,6 +88,28 @@ class TestOrdersPaymentGate(unittest.TestCase):
         self.assertEqual(sale.status, "paid")
         self.assertIsNotNone(sale.invoice)
 
+    def test_approve_orden_delivery_suma_el_valor_del_domicilio_sin_fallar(self):
+        """spec 056, research.md Decisión 5 — punto de mayor riesgo: el pago
+        que este método autogenera para el intento de transferencia debe
+        cubrir subtotal + domicilio, o `build_sale` lo rechazaría con 422 en
+        cuanto su propio total (ya con el domicilio sumado) no coincida con
+        lo pagado."""
+        db, order = self._seed_order_recibida()
+        order.order_type = "DELIVERY"
+        order.delivery_fee = Decimal("6000")
+        nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
+        attempt = fx.make_payment_attempt(
+            db, order, nequi, status="pendiente", receipt_file_url="https://example.invalid/a.jpg"
+        )
+        db.commit()
+
+        result = checkout.approve_payment_attempt(db, attempt.id, self._shift(db).id, self._user())
+        self.assertEqual(result.status, "confirmado")
+        db.refresh(order)
+        sale = db.execute(select(Sale).where(Sale.customer_order_id == order.id)).scalar_one()
+        self.assertEqual(sale.delivery_fee, Decimal("6000"))
+        self.assertEqual(sale.total, PRECIO + Decimal("6000"))
+
     def test_approve_409_sin_comprobante_todavia(self):
         db, order = self._seed_order_recibida()
         nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
@@ -146,6 +168,33 @@ class TestOrdersPaymentGate(unittest.TestCase):
         self.assertEqual(sale.status, "paid")
         self.assertEqual(sale.change_given, Decimal("2000"))
         self.assertIsNotNone(sale.invoice)
+
+    def test_confirm_cash_orden_delivery_exige_cubrir_domicilio_y_lo_suma_al_total(self):
+        """spec 056: `_order_total` (usado por el chequeo previo FR-010a) y
+        `build_sale` deben coincidir en incluir el valor del domicilio."""
+        db, order = self._seed_order_recibida(precio=PRECIO)
+        order.order_type = "DELIVERY"
+        order.delivery_fee = Decimal("6000")
+        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
+        attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
+        db.commit()
+
+        # Monto que cubre solo el subtotal (sin domicilio) debe rechazarse.
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.confirm_cash_payment_attempt(
+                db, attempt.id, PRECIO, self._shift(db).id, self._user()
+            )
+        self.assertEqual(ctx.exception.status_code, 422)
+
+        # Monto que sí cubre subtotal + domicilio se confirma correctamente.
+        result = checkout.confirm_cash_payment_attempt(
+            db, attempt.id, PRECIO + Decimal("6000"), self._shift(db).id, self._user()
+        )
+        self.assertEqual(result.status, "confirmado")
+        db.refresh(order)
+        sale = db.execute(select(Sale).where(Sale.customer_order_id == order.id)).scalar_one()
+        self.assertEqual(sale.delivery_fee, Decimal("6000"))
+        self.assertEqual(sale.total, PRECIO + Decimal("6000"))
 
     def test_confirm_cash_monto_exacto_cambio_cero(self):
         """Acceptance Scenario 2 (US3)."""

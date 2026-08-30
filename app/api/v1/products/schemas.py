@@ -4,6 +4,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.v1.catalog.schemas import (
+    VariantSaveIn,
+    VariantResponse,
+    RecipeItemResponse,
+    VariantOptionGroupResponse,
+)
+
 
 class PreparationType(str, Enum):
     """'prepared' = se arma con receta; 'packaged' = se vende empacado."""
@@ -24,6 +31,14 @@ class ProductCreate(BaseModel):
     tracks_inventory: bool = Field(
         False, description="Si el producto exige y aplica descuento de inventario en sus presentaciones."
     )
+    variants: list[VariantSaveIn] = Field(
+        default_factory=list,
+        description=(
+            "Presentaciones iniciales del producto, con su receta y grupos de opciones (spec "
+            "043). Si viene vacía, se preserva el comportamiento actual: se crea automáticamente "
+            "la presentación 'Single' a precio 0 (RN-CAT-05)."
+        ),
+    )
 
 
 class ProductUpdate(BaseModel):
@@ -35,6 +50,16 @@ class ProductUpdate(BaseModel):
     active: bool | None = None
     available: bool | None = None
     tracks_inventory: bool | None = None
+    variants: list[VariantSaveIn] | None = Field(
+        None,
+        description=(
+            "Árbol completo de presentaciones deseado (spec 043). Ausente = no tocar ninguna "
+            "presentación (back-compat). Presente (incluida lista vacía) = reemplazo total: crea "
+            "las entradas sin `id`, actualiza las que traen `id`, desactiva cualquier "
+            "presentación activa no listada. Distinguir 'ausente' de '[]' requiere leer "
+            "`model_fields_set`, no solo `is None` (ver ProductService.update_product)."
+        ),
+    )
 
 
 class ProductResponse(BaseModel):
@@ -59,3 +84,24 @@ class ProductListResponse(ProductResponse):
 
 class ProductDetailResponse(ProductResponse):
     pass
+
+
+class VariantSaveOut(VariantResponse):
+    """Estado final de una presentación tras un guardado consolidado (spec 043).
+
+    Extiende `VariantResponse` (`id`, `product_id`, `name`, `sku`, `price`, `active`); `recipe` y
+    `option_groups` no se pueden poblar por `from_attributes` porque el modelo ORM los expone como
+    `recipe_items`/`option_groups` con otro shape -- el servicio los arma explícitamente al
+    construir la respuesta.
+    """
+
+    display_order: int
+    recipe: list[RecipeItemResponse] = Field(default_factory=list)
+    option_groups: list[VariantOptionGroupResponse] = Field(default_factory=list)
+
+
+class ProductSaveResponse(ProductResponse):
+    """Respuesta de `POST`/`PATCH`/`PUT /products` (spec 043, FR-006): el árbol completo y final
+    del producto guardado, para que el formulario no necesite una lectura adicional."""
+
+    variants: list[VariantSaveOut] = Field(default_factory=list)

@@ -11,7 +11,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.audit import record_audit
@@ -285,6 +285,7 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
             payments=data.payments,
             discount=Decimal(data.discount) + promo_discount + combo_discount,
             tax=data.tax, tip=data.tip,
+            delivery_fee=order.delivery_fee or Decimal("0"),
             customer_name=order.customer_name,
             dining_table_id=order.dining_table_id,
             table_session_id=order.table_session_id,
@@ -476,6 +477,7 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
             payments=data.payments,
             discount=Decimal(data.discount) + promo_discount + combo_discount,
             tax=data.tax, tip=data.tip,
+            delivery_fee=order.delivery_fee or Decimal("0"),
             customer_name=data.billing_customer_name or "Consumidor Final",
             dining_table_id=order.dining_table_id,
             table_session_id=order.table_session_id,
@@ -596,6 +598,27 @@ def cancel_order(
             participant_id=participant.id if participant is not None else None,
         ))
 
+        # Spec 044: rechazar un pedido con pago QR pendiente (efectivo, o
+        # transferencia sin comprobante aún) también resuelve ese intento —
+        # sin esto quedaba "pendiente" para siempre en una orden ya
+        # cancelada. Mismos campos que `reject_payment_attempt` (arriba),
+        # pero buscado por `order_id` porque este endpoint no recibe
+        # `attempt_id`; el índice único parcial garantiza a lo sumo un
+        # `pendiente` por orden, así que `scalar_one_or_none()` es seguro.
+        pending_attempt = db.execute(
+            select(OrderPaymentAttempt)
+            .where(
+                OrderPaymentAttempt.order_id == order.id,
+                OrderPaymentAttempt.status == "pendiente",
+            )
+            .with_for_update(of=OrderPaymentAttempt)
+        ).scalar_one_or_none()
+        if pending_attempt is not None:
+            pending_attempt.status = "rechazado"
+            pending_attempt.rejection_reason = data.motivo
+            pending_attempt.resolved_by_user_id = actor_id
+            pending_attempt.resolved_at = utc_now()
+
         if perdidos:
             # La pérdida no genera movimiento de inventario (ya está descontada);
             # queda trazada en auditoría para el reporte de mermas.
@@ -693,6 +716,23 @@ def close_table_sessions(
     return sessions
 
 
+def delete_orphan_carts(db: Session, sessions: list[TableSession]) -> None:
+    """Elimina físicamente los `Cart` de los participantes de `sessions`, sin
+    importar su `status` (spec 039, FR-001/FR-002/FR-004). Se invoca en el
+    call-site, exactamente donde la mesa ya quedó `libre` — nunca dentro de
+    `close_table_sessions`/`close_participants` (research.md Decisión 1), para no
+    borrar carritos cuando la mesa no termina liberándose (`_sweep_schema`,
+    RN-SCHED-04). No hace `commit()`/`flush()` propio: se une a la transacción
+    del caller.
+    """
+    if not sessions:
+        return
+
+    participant_ids = select(SessionParticipant.id).where(
+        SessionParticipant.table_session_id.in_([s.id for s in sessions])
+    )
+    db.execute(delete(Cart).where(Cart.participant_id.in_(participant_ids)))
+
 
 def release_table(
     db: Session, table_id: UUID, *, closed_by: User | None = None
@@ -725,7 +765,8 @@ def release_table(
 
     try:
         table.status = "libre"
-        close_table_sessions(db, table.id, closed_by=closed_by)
+        sessions = close_table_sessions(db, table.id, closed_by=closed_by)
+        delete_orphan_carts(db, sessions)
         db.commit()
     except Exception:
         db.rollback()
@@ -744,13 +785,21 @@ def release_table(
 
 def _order_total(db: Session, order_id: UUID) -> Decimal:
     """Total cobrable de la orden (líneas no anuladas), mismo criterio que
-    `compute_bill` — usado para validar FR-010a (monto recibido >= total)."""
+    `compute_bill` — usado para validar FR-010a (monto recibido >= total).
+
+    Spec 056: incluye el valor del domicilio de la orden (0 si no es
+    DELIVERY o no tiene valor) — de lo contrario este chequeo previo
+    aceptaría un monto de efectivo que no alcanza a cubrir el domicilio,
+    aunque `build_sale` (con su propio total ya corregido) lo rechazaría
+    de todas formas más adelante."""
+    order = get_or_404(db, CustomerOrder, order_id, "Order not found")
     items = db.execute(
         select(OrderItem).where(
             OrderItem.order_id == order_id, OrderItem.estado_cocina != "anulado"
         )
     ).scalars().all()
-    return sum((Decimal(it.unit_price) * it.quantity for it in items), start=Decimal("0"))
+    items_total = sum((Decimal(it.unit_price) * it.quantity for it in items), start=Decimal("0"))
+    return items_total + (order.delivery_fee or Decimal("0"))
 
 
 def _load_pending_attempt_for_update(db: Session, attempt_id: UUID) -> OrderPaymentAttempt:
@@ -832,7 +881,15 @@ def approve_payment_attempt(
         combo_discount = promotions.combo_discount_for_lines(db, lines, now)
         combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
         final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
-        total = sum((line.line_total for line in lines), Decimal("0")) - promo_discount - combo_discount
+        # Spec 056, research.md Decisión 5: el domicilio debe quedar incluido
+        # en el ÚNICO pago que se autogenera aquí — de lo contrario queda
+        # corto exactamente en ese valor y el propio chequeo `paid < total`
+        # de build_sale (ya con el domicilio sumado) rechazaría este pago.
+        delivery_fee = order.delivery_fee or Decimal("0")
+        total = (
+            sum((line.line_total for line in lines), Decimal("0"))
+            - promo_discount - combo_discount + delivery_fee
+        )
 
         build_sale(
             db,
@@ -841,6 +898,7 @@ def approve_payment_attempt(
             cashier=user,
             payments=[PaymentIn(payment_method_id=attempt.payment_method_id, amount=total)],
             discount=promo_discount + combo_discount,
+            delivery_fee=delivery_fee,
             customer_name=order.customer_name,
             dining_table_id=order.dining_table_id,
             table_session_id=order.table_session_id,
@@ -960,6 +1018,7 @@ def confirm_cash_payment_attempt(
             cashier=user,
             payments=[PaymentIn(payment_method_id=attempt.payment_method_id, amount=amount_received)],
             discount=promo_discount + combo_discount,
+            delivery_fee=order.delivery_fee or Decimal("0"),
             customer_name=order.customer_name,
             dining_table_id=order.dining_table_id,
             table_session_id=order.table_session_id,

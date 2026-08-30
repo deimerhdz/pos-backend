@@ -120,9 +120,9 @@ def _fixture(db):
     db.add(product); db.flush()
 
     grande = ProductVariant(product_id=product.id, name="Grande",
-                            price=Decimal("10.00"), active=True)
+                            price=Decimal("10.00"), active=True, display_order=1)
     pequena = ProductVariant(product_id=product.id, name="Pequeña",
-                             price=Decimal("6.00"), active=True)
+                             price=Decimal("6.00"), active=True, display_order=2)
     db.add_all([grande, pequena]); db.flush()
 
     # El mismo grupo, con cardinalidad Y cantidad distintas por tamaño: esto es
@@ -140,7 +140,7 @@ def _fixture(db):
 
 
 def _order(db, variant_id, option_ids, *, quantity=1, status="recibida"):
-    order = CustomerOrder(channel="qr", status=status)
+    order = CustomerOrder(channel="QR_MENU", order_type="DINE_IN", status=status)
     db.add(order); db.flush()
     item = OrderItem(order_id=order.id, product_variant_id=variant_id, quantity=quantity,
                      unit_price=Decimal("10.00"), estado_cocina="pendiente")
@@ -179,7 +179,7 @@ def _cleanup(schema, product_id, group_id, item_ids):
         '''), {"p": str(product_id)})
         db.execute(text(f'''
             DELETE FROM "{schema}".customer_orders WHERE id NOT IN (
-                SELECT order_id FROM "{schema}".order_items) AND channel = 'qr'
+                SELECT order_id FROM "{schema}".order_items) AND channel = 'QR_MENU'
         '''))
         db.execute(text(f'''DELETE FROM "{schema}".recipe_items WHERE product_variant_id IN (
                 SELECT id FROM "{schema}".product_variants WHERE product_id = :p)'''),

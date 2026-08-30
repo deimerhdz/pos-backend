@@ -29,6 +29,7 @@ from app.characterization_tests import table_sessions_fixtures as fx
 from app.api.v1.table_sessions import service
 from app.api.v1.table_sessions.schemas import CloseSessionIn, ItemAssignmentIn
 from app.api.v1.sales.schemas import PaymentIn
+from app.models.cart import Cart
 from app.models.dining_table import DiningTable
 from app.models.order_item import OrderItem
 from app.models.sale import Sale
@@ -153,6 +154,92 @@ class TestTableSessionsService(unittest.TestCase):
         db.refresh(ts2)
         self.assertEqual(ts2.status, "active")
 
+    def test_try_release_if_empty_borra_carritos_sin_importar_status(self):
+        """US1 escenario 2 (spec 039, Acceptance Scenario 2): dos comensales de
+        la misma sesión, uno con carrito ya 'abandonado' (salió antes) y otro
+        con carrito 'confirmado' (el mesero lo consolidó) — al salir el
+        segundo siendo el último activo sin nada por cobrar, se libera la
+        mesa y ninguno de los dos Cart sigue existiendo, sin importar su
+        status."""
+        db, table, ts = self._seed_bare_session()
+        p1 = fx.make_participant(db, table_session=ts, status="closed")
+        cart1 = fx.make_cart(db, participant=p1, status="abandonado")
+        cart1_id = cart1.id
+        p2 = fx.make_participant(db, table_session=ts, status="closed")
+        cart2 = fx.make_cart(db, participant=p2, status="confirmado")
+        cart2_id = cart2.id
+        db.commit()
+
+        released = service.try_release_if_empty(db, ts.id)
+
+        self.assertTrue(released)
+        db.refresh(table)
+        self.assertEqual(table.status, "libre")
+        self.assertIsNone(db.get(Cart, cart1_id))
+        self.assertIsNone(db.get(Cart, cart2_id))
+
+    def test_try_release_if_empty_libera_tras_cancelar_ultimo_pedido_activo(self):
+        """US1 escenario 3 (spec 039, Acceptance Scenario 3): comensal con un
+        Cart 'abierto' y un CustomerOrder vivo; al cancelarse ese último
+        pedido activo (has_billable_orders pasa a False, igual que hace
+        cart.service.cancel_my_order antes de llamar try_release_if_empty),
+        la mesa se libera y el Cart de ese comensal se elimina en la misma
+        operación."""
+        db, table, ts = self._seed_bare_session()
+        participant = fx.make_participant(db, table_session=ts, status="closed")
+        cart = fx.make_cart(db, participant=participant, status="abierto")
+        cart_id = cart.id
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, participant=participant, status="abierta")
+        fx.make_order_item(db, order, variant)
+        db.commit()
+        self.assertTrue(service.has_billable_orders(db, ts.id))
+
+        order.status = "cancelada"
+        db.commit()
+        self.assertFalse(service.has_billable_orders(db, ts.id))
+
+        released = service.try_release_if_empty(db, ts.id)
+
+        self.assertTrue(released)
+        db.refresh(table)
+        self.assertEqual(table.status, "libre")
+        self.assertIsNone(db.get(Cart, cart_id))
+
+    def test_try_release_if_empty_no_toca_carritos_de_otra_mesa(self):
+        """US4 (spec 039, Acceptance Scenario 1, FR-004): dos mesas activas
+        independientes, cada una con su propia sesión/participante y un
+        `Cart` huérfano — liberar solo una de las dos no afecta en absoluto
+        el `Cart` de la mesa que sigue ocupada: mismo `id`, mismo `status`,
+        sin eliminarse."""
+        db, table_a, ts_a = self._seed_bare_session()
+        participant_a = fx.make_participant(db, table_session=ts_a, status="closed")
+        cart_a = fx.make_cart(db, participant=participant_a, status="abandonado")
+        cart_a_id = cart_a.id
+
+        table_b = fx.make_dining_table(db, status="ocupada")
+        ts_b = fx.make_table_session(db, table=table_b)
+        participant_b = fx.make_participant(db, table_session=ts_b, status="open")
+        cart_b = fx.make_cart(db, participant=participant_b, status="abierto")
+        cart_b_id = cart_b.id
+        db.commit()
+
+        released = service.try_release_if_empty(db, ts_a.id)
+
+        self.assertTrue(released)
+        db.refresh(table_a)
+        self.assertEqual(table_a.status, "libre")
+        self.assertIsNone(db.get(Cart, cart_a_id))
+
+        db.refresh(table_b)
+        self.assertEqual(table_b.status, "ocupada")
+        cart_b_after = db.get(Cart, cart_b_id)
+        self.assertIsNotNone(cart_b_after)
+        self.assertEqual(cart_b_after.id, cart_b_id)
+        self.assertEqual(cart_b_after.status, "abierto")
+
     # -------------------------------------------------------- list_sessions (T020)
 
     def test_list_sessions_only_active_y_todas(self):
@@ -275,6 +362,61 @@ class TestTableSessionsService(unittest.TestCase):
         s["db"].refresh(s["table"])
         self.assertEqual(s["ts"].status, "closed")
         self.assertEqual(s["table"].status, "libre")
+
+    def test_close_session_borra_carrito_huerfano_de_comensal_ya_cerrado(self):
+        """US2 escenario 1 (spec 039, Acceptance Scenario 1): además de los
+        comensales activos de la sesión, un comensal ya `closed` desde antes
+        del cobro con un `Cart` huérfano — al cobrar y cerrar
+        (`close_session`), la mesa queda `libre` y ese `Cart` deja de
+        existir."""
+        s = self._seed_billable_session()
+        huerfano = fx.make_participant(s["db"], table_session=s["ts"], status="closed")
+        cart = fx.make_cart(s["db"], participant=huerfano, status="abandonado")
+        cart_id = cart.id
+        s["db"].commit()
+
+        data = CloseSessionIn.model_validate({
+            "cash_shift_id": str(s["shift"].id),
+            "billing_mode": "unified",
+            "payments": [self._pago(s["method"].id)],
+        })
+
+        service.close_session(s["db"], s["ts"].id, data, s["cashier"])
+
+        s["db"].refresh(s["table"])
+        self.assertEqual(s["table"].status, "libre")
+        self.assertIsNone(s["db"].get(Cart, cart_id))
+
+    def test_close_session_rollback_no_borra_carrito_ante_fallo_generico(self):
+        """US3 escenario 3 (spec 039, Acceptance Scenario 3, FR-002): un
+        fallo genérico dentro de `close_session` (mockeando
+        `_close_unified`) sobre una sesión con un `Cart` huérfano — tras el
+        `rollback()` ya existente, el `Cart` sigue existiendo con el mismo
+        `id` y `status` que tenía antes del intento; ninguna eliminación
+        parcial."""
+        s = self._seed_billable_session()
+        huerfano = fx.make_participant(s["db"], table_session=s["ts"], status="closed")
+        cart = fx.make_cart(s["db"], participant=huerfano, status="abandonado")
+        cart_id = cart.id
+        s["db"].commit()
+
+        data = CloseSessionIn.model_validate({
+            "cash_shift_id": str(s["shift"].id),
+            "billing_mode": "unified",
+            "payments": [self._pago(s["method"].id)],
+        })
+
+        with mock.patch(
+            "app.api.v1.table_sessions.service._close_unified",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                service.close_session(s["db"], s["ts"].id, data, s["cashier"])
+
+        reloaded = s["db"].get(Cart, cart_id)
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded.id, cart_id)
+        self.assertEqual(reloaded.status, "abandonado")
 
     # ------------------------------------------------- A-17 (R12) — spy_load (T023)
 
@@ -525,6 +667,33 @@ class TestTableSessionsService(unittest.TestCase):
         db.refresh(ts)
         self.assertEqual(ts.status, "active")
 
+    def test_release_paid_session_libera_pese_a_cocina_pendiente_de_un_pedido_cancelado(self):
+        """Bugfix (spec 050): un pedido `'cancelada'` no anula el `estado_cocina`
+        de sus ítems (`cancel_order`, `orders/checkout.py` — deliberado, para no
+        interferir con el ajuste de inventario), así que antes de este fix
+        `_assert_closable` seguía viendo ese ítem como cocina en curso y
+        bloqueaba `release_paid_session` para siempre, sin ninguna acción
+        posible desde la UI (el pedido ya es terminal). Contraste directo con
+        `test_release_paid_session_409_con_cocina_en_curso_sobre_pedido_pagado`
+        (mismo escenario de ítem `'en_preparacion'`, pero con `status='pagada'`,
+        que sí debe seguir bloqueando)."""
+        db, table, ts = self._seed_bare_session()
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="cancelada")
+        fx.make_order_item(db, order, variant, estado_cocina="pendiente")
+        cashier = fx.make_user_double()
+        db.commit()
+
+        resp = service.release_paid_session(db, ts.id, cashier)
+
+        self.assertEqual(resp.status, "libre")
+        db.refresh(ts)
+        db.refresh(table)
+        self.assertEqual(ts.status, "closed")
+        self.assertEqual(table.status, "libre")
+
     def test_release_paid_session_libera_la_mesa_cuando_todo_esta_pagado_y_listo(self):
         """Camino feliz: nada billable y la comida del único pedido 'pagada'
         ya está 'listo' → cierra la sesión en cascada y libera la mesa, igual
@@ -546,6 +715,29 @@ class TestTableSessionsService(unittest.TestCase):
         db.refresh(table)
         self.assertEqual(ts.status, "closed")
         self.assertEqual(table.status, "libre")
+
+    def test_release_paid_session_borra_carrito_huerfano(self):
+        """US2 escenario 2 (spec 039, Acceptance Scenario 2): sobre una sesión
+        ya completamente pagada con un `Cart` huérfano, `release_paid_session`
+        libera la mesa y ese `Cart` deja de existir."""
+        db, table, ts = self._seed_bare_session()
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        order = fx.make_customer_order(db, ts, status="pagada")
+        fx.make_order_item(db, order, variant, estado_cocina="listo")
+        huerfano = fx.make_participant(db, table_session=ts, status="closed")
+        cart = fx.make_cart(db, participant=huerfano, status="abandonado")
+        cart_id = cart.id
+        cashier = fx.make_user_double()
+        db.commit()
+
+        resp = service.release_paid_session(db, ts.id, cashier)
+
+        self.assertEqual(resp.status, "libre")
+        db.refresh(table)
+        self.assertEqual(table.status, "libre")
+        self.assertIsNone(db.get(Cart, cart_id))
 
     def test_release_paid_session_libera_una_mesa_pagada_por_qr_aunque_la_orden_siga_abierta(self):
         """Regresión (spec 028): `approve_payment_attempt`/

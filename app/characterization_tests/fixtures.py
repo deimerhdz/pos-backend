@@ -44,7 +44,7 @@ for _k, _v in {
 }.items():
     os.environ.setdefault(_k, _v)
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.core.models import Base
@@ -132,6 +132,15 @@ def make_variant(db: Session, product: Product | None = None, **kw) -> ProductVa
     kw.setdefault("name", f"variante-{kw['id']}")
     kw.setdefault("price", Decimal("0"))
     kw.setdefault("active", True)
+    if "display_order" not in kw:
+        # spec 042: sin default de ORM -- se asigna aquí igual que lo hace la app
+        # real al crear una presentación (MAX(display_order) del producto + 1).
+        current_max = db.execute(
+            select(func.max(ProductVariant.display_order)).where(
+                ProductVariant.product_id == kw["product_id"]
+            )
+        ).scalar()
+        kw["display_order"] = (current_max or 0) + 1
     obj = ProductVariant(**kw)
     db.add(obj)
     db.flush()

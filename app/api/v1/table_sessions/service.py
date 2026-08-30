@@ -123,10 +123,11 @@ def try_release_if_empty(db: Session, table_session_id: UUID) -> bool:
     if has_billable_orders(db, ts.id):
         return False
 
-    checkout.close_table_sessions(db, ts.dining_table_id, closed_by=None)
+    sessions = checkout.close_table_sessions(db, ts.dining_table_id, closed_by=None)
     table = db.get(DiningTable, ts.dining_table_id)
     if table is not None:
         table.status = "libre"
+        checkout.delete_orphan_carts(db, sessions)
     return True
 
 
@@ -281,11 +282,12 @@ def close_session(
             order.status = "pagada"
 
         ts.billing_mode = data.billing_mode.value
-        checkout.close_table_sessions(db, ts.dining_table_id, closed_by=cashier)
+        sessions = checkout.close_table_sessions(db, ts.dining_table_id, closed_by=cashier)
 
         table = db.get(DiningTable, ts.dining_table_id)
         if table is not None:
             table.status = "libre"
+            checkout.delete_orphan_carts(db, sessions)
 
         db.commit()
     except HTTPException:
@@ -346,9 +348,16 @@ def release_paid_session(
 
     Aun sin nada por cobrar, la comida puede seguir en curso en cocina sobre
     pedidos ya `pagada` (se cobró antes de que terminara de prepararse): se
-    cargan **todos** los pedidos de la sesión, no solo los billables, y se
-    reusa `_assert_closable` sin modificar para que ese chequeo de cocina
-    siga aplicando.
+    cargan **todos los pedidos de la sesión salvo los cancelados**, no solo
+    los billables, y se reusa `_assert_closable` sin modificar para que ese
+    chequeo de cocina siga aplicando sobre `'pagada'`.
+
+    Bugfix (spec 050): un pedido `'cancelada'` no anula el `estado_cocina` de
+    sus ítems (`cancel_order`, `orders/checkout.py` — deliberado, para no
+    interferir con el ajuste de inventario), así que antes de excluirlo aquí,
+    un ítem que se quedó `'pendiente'`/`'en_preparacion'` al cancelar su
+    pedido bloqueaba esta función para siempre, sin ninguna acción posible
+    desde la UI (el pedido ya es terminal).
     """
     ts = _load(db, table_session_id, lock=True)
     if ts.status != "active":
@@ -365,16 +374,20 @@ def release_paid_session(
     orders = db.execute(
         select(CustomerOrder)
         .options(selectinload(CustomerOrder.items))
-        .where(CustomerOrder.table_session_id == ts.id)
+        .where(
+            CustomerOrder.table_session_id == ts.id,
+            CustomerOrder.status != "cancelada",
+        )
     ).scalars().all()
     _assert_closable(db, orders)
 
     try:
-        checkout.close_table_sessions(db, ts.dining_table_id, closed_by=cashier)
+        sessions = checkout.close_table_sessions(db, ts.dining_table_id, closed_by=cashier)
 
         table = db.get(DiningTable, ts.dining_table_id)
         if table is not None:
             table.status = "libre"
+            checkout.delete_orphan_carts(db, sessions)
 
         db.commit()
     except Exception:

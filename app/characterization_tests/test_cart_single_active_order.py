@@ -57,6 +57,17 @@ class TestCartSingleActiveOrder(unittest.TestCase):
             service.submit_cart(db, participant, efectivo.id)
         self.assertEqual(ctx.exception.status_code, 409)
 
+    def test_submit_cart_crea_la_orden_con_order_type_dine_in(self):
+        """spec 055, research.md D4: el flujo QR es inherentemente de mesa —
+        `submit_cart` siempre fija `order_type='DINE_IN'` (y `channel=
+        'QR_MENU'`). Sin esto, todo pedido nuevo por QR quedaría con
+        `order_type` vacío (hallazgo G1 del análisis de spec 055)."""
+        db, participant, variant, efectivo = self._seed_session_con_carrito()
+        order = service.submit_cart(db, participant, efectivo.id)
+
+        self.assertEqual(order.channel, "QR_MENU")
+        self.assertEqual(order.order_type, "DINE_IN")
+
     def test_segunda_orden_tras_finalizar_la_primera_se_permite(self):
         """Acceptance Scenario 2 (US6): 'finalizada' = pagada o cancelada
         (research.md spec 024, Decisión 8)."""
@@ -128,13 +139,13 @@ class TestCartSingleActiveOrder(unittest.TestCase):
         """spec 028, FR-013 (T015): simetría inversa de
         `orders.service.create_order` (T014) — una mesa no mezcla orígenes de
         pedido a la vez. Si el staff ya abrió una comanda de mostrador/mesero
-        activa (`channel` counter/waiter, status no terminal) en la sesión, un
+        activa (`channel='POS'`, status no terminal) en la sesión, un
         pedido nuevo por QR no puede coexistir con ella. No es un
         characterization test: `submit_cart` no valida esto hoy — es una
         restricción nueva."""
         db, participant, variant, efectivo = self._seed_session_con_carrito()
         fx.make_customer_order(
-            db, participant, participant_id=None, channel="counter", status="abierta",
+            db, participant, participant_id=None, channel="POS", status="abierta",
         )
         db.commit()
 
@@ -148,7 +159,7 @@ class TestCartSingleActiveOrder(unittest.TestCase):
         pedido nuevo por QR en la misma mesa."""
         db, participant, variant, efectivo = self._seed_session_con_carrito()
         fx.make_customer_order(
-            db, participant, participant_id=None, channel="waiter", status="pagada",
+            db, participant, participant_id=None, channel="POS", status="pagada",
         )
         db.commit()
 

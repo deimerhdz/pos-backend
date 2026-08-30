@@ -16,6 +16,7 @@ Ejecutar solo este módulo:
 from datetime import datetime, time, timezone
 from decimal import Decimal
 import unittest
+from unittest import mock
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -464,9 +465,11 @@ class TestCartService(unittest.TestCase):
 
     def test_leave_session_cierra_participante_abandona_carrito_y_libera_mesa(self):
         """CONGELA comportamiento actual: `leave_session` cierra al
-        comensal (`status='closed'`), abandona su carrito abierto
-        (`status='abandonado'`) y, al ser el último de la mesa sin nada que
-        cobrar, libera la mesa en el acto (`try_release_if_empty`)."""
+        comensal (`status='closed'`) y, al ser el último de la mesa sin nada
+        que cobrar, libera la mesa en el acto (`try_release_if_empty`).
+        `close_participants` sigue marcando el carrito `'abandonado'` como
+        paso intermedio, pero spec 039 (`delete_orphan_carts`) lo elimina
+        físicamente en la misma operación en la que la mesa queda `libre`."""
         db = cart_fixtures.new_session()
         table = cart_fixtures.make_dining_table(db, status="libre")
         resp = service.open_session(db, 1, table, "Ana")
@@ -475,18 +478,20 @@ class TestCartService(unittest.TestCase):
         service.leave_session(db, participant)
 
         self.assertEqual(participant.status, "closed")
-        cart = db.get(Cart, resp.cart_id)
-        self.assertEqual(cart.status, "abandonado")
+        self.assertIsNone(db.get(Cart, resp.cart_id))
         self.assertEqual(table.status, "libre")
 
     # ----------------------------------------------------------------- submit_cart (T021)
 
-    def test_submit_cart_confirma_pedido_y_abre_carrito_nuevo(self):
-        """CONGELA comportamiento actual: un carrito con ítems se confirma en
-        una `CustomerOrder` 'recibida'; el carrito queda 'confirmado' y un
-        carrito 'abierto' nuevo puede crearse después para el mismo
-        comensal — posible gracias a la remoción del índice único parcial en
-        el fixture (research.md §3).
+    def test_submit_cart_elimina_carrito_y_abre_uno_nuevo_tras_pedido(self):
+        """CONGELA comportamiento corregido — spec 038 (FR-003/FR-004): un
+        carrito con ítems se confirma en una `CustomerOrder` 'recibida' y el
+        carrito del participante se ELIMINA físicamente (no queda ninguna
+        fila, ni 'confirmado' ni de ningún otro status) en la misma
+        transacción del pedido. Antes de esta spec la fila quedaba
+        `status='confirmado'`, huérfana para siempre (research.md Decisión
+        9) — renombrado desde
+        `test_submit_cart_confirma_pedido_y_abre_carrito_nuevo`.
 
         Actualizado por spec 025-revision-pago-antes-envio: `submit_cart`
         exige `payment_method_id` — el pedido nace con su primer intento de
@@ -508,18 +513,143 @@ class TestCartService(unittest.TestCase):
         self.assertEqual(order.current_payment_attempt.payment_method_id, efectivo.id)
         self.assertEqual(order.current_payment_attempt.status, "pendiente")
 
-        db.refresh(old_cart)
-        self.assertEqual(old_cart.status, "confirmado")
+        # spec 038, FR-003/FR-004: la fila y sus CartItem/CartItemOption ya
+        # no existen — borrado físico, no archivado.
+        self.assertIsNone(db.get(Cart, old_cart.id))
 
         # `submit_cart` no abre el carrito siguiente por sí solo: lo hace
         # `_get_or_create_open_cart` en la próxima operación del comensal
         # (aquí, `get_cart`) — posible sin violar el índice único parcial
         # porque el fixture lo removió (research.md §3).
-        service.get_cart(db, participant.id)
+        cart_resp = service.get_cart(db, participant.id)
         new_cart = db.execute(
             select(Cart).where(Cart.participant_id == participant.id, Cart.status == "abierto")
         ).scalar_one()
         self.assertNotEqual(new_cart.id, old_cart.id)
+        self.assertEqual(cart_resp.items, [])
+
+        # spec 038, US3 (Acceptance Scenario 1): agregar un ítem nuevo tras
+        # confirmar no arrastra ninguna línea de la ronda ya confirmada — el
+        # carrito de la segunda ronda contiene únicamente lo que se agrega
+        # ahora.
+        variant2, _, _ = self._seed_variant(db, price=Decimal("2500"))
+        second_round = service.add_item(
+            db, participant.id, CartItemIn(product_variant_id=variant2.id, quantity=1)
+        )
+        self.assertEqual(len(second_round.items), 1)
+        self.assertEqual(second_round.items[0].product_variant_id, variant2.id)
+
+    def test_submit_cart_snapshot_de_descuento_coincide_con_el_carrito(self):
+        """spec 038, US1 (Acceptance Scenario 3 / CA-6, SC-005): el snapshot
+        de descuento persistido en los `OrderItem` coincide exactamente con
+        lo que `serialize_cart`/`GET /cart` mostraba justo antes de
+        confirmar — la línea con promoción activa trae su
+        `discounted_unit_price`/`discounted_line_total`, la otra queda en
+        `None` (mismo motor, función compartida, research.md Decisión 4)."""
+        db, table, ts, participant = self._seed_session()
+        variant1, product, category = self._seed_variant(db, price=Decimal("10000"))
+        variant2, _, _ = self._seed_variant(db, price=Decimal("5000"))
+        promo = cart_fixtures.make_promotion(db, type="percent", value=Decimal("10"), status="active")
+        cart_fixtures.make_promotion_target(db, promo, category_id=category.id)
+        efectivo = self._seed_efectivo(db)
+
+        service.add_item(db, participant.id, CartItemIn(product_variant_id=variant1.id, quantity=1))
+        service.add_item(db, participant.id, CartItemIn(product_variant_id=variant2.id, quantity=1))
+
+        order = service.submit_cart(db, participant, efectivo.id)
+
+        self.assertEqual(len(order.items), 2)
+        with_promo = next(it for it in order.items if it.product_variant_id == variant1.id)
+        without_promo = next(it for it in order.items if it.product_variant_id == variant2.id)
+        self.assertEqual(with_promo.discounted_unit_price, Decimal("9000.00"))
+        self.assertEqual(with_promo.discounted_line_total, Decimal("9000.00"))
+        self.assertIsNone(without_promo.discounted_unit_price)
+        self.assertIsNone(without_promo.discounted_line_total)
+
+    def test_submit_cart_fallo_en_transaccion_no_toca_el_carrito(self):
+        """spec 038, US1 (Acceptance Scenario 4 / CA-8, FR-004): si la
+        creación del pedido falla dentro de la transacción (aquí, forzando
+        un error al resolver el snapshot de descuento — FR-005/research.md
+        Decisión 5), el `Cart`/`CartItem[]` del participante siguen
+        existiendo intactos (mismo `id`, mismas líneas) y no se creó ningún
+        `CustomerOrder` — el `rollback()` deshace tanto el pedido a medias
+        como el borrado del carrito."""
+        db, table, ts, participant = self._seed_session()
+        variant, _, _ = self._seed_variant(db, price=Decimal("4000"))
+        efectivo = self._seed_efectivo(db)
+        service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=2))
+        cart = db.execute(
+            select(Cart).where(Cart.participant_id == participant.id, Cart.status == "abierto")
+        ).scalar_one()
+        cart_id = cart.id
+        item_ids = {it.id for it in cart.items}
+
+        with mock.patch(
+            "app.api.v1.cart.service.promotions.active_discount_promotions",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                service.submit_cart(db, participant, efectivo.id)
+
+        persisted = db.get(Cart, cart_id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual({it.id for it in persisted.items}, item_ids)
+        orders = db.execute(
+            select(CustomerOrder).where(CustomerOrder.participant_id == participant.id)
+        ).scalars().all()
+        self.assertEqual(orders, [])
+
+    def test_submit_cart_segunda_ronda_crea_orden_independiente(self):
+        """spec 038, US3 (Acceptance Scenario 2): confirmar el carrito de la
+        segunda ronda crea un segundo `CustomerOrder` independiente del
+        primero, con ambos coexistiendo con sus respectivas líneas. Usa dos
+        participantes para no chocar con el 409 de "orden activa" de FR-008
+        (esa garantía es por participante, no por mesa)."""
+        db, table, ts, participant1 = self._seed_session()
+        participant2 = cart_fixtures.make_participant(db, table_session=ts)
+        variant1, _, _ = self._seed_variant(db, price=Decimal("4000"))
+        variant2, _, _ = self._seed_variant(db, price=Decimal("3000"))
+        efectivo = self._seed_efectivo(db)
+
+        service.add_item(db, participant1.id, CartItemIn(product_variant_id=variant1.id, quantity=1))
+        order1 = service.submit_cart(db, participant1, efectivo.id)
+
+        service.add_item(db, participant2.id, CartItemIn(product_variant_id=variant2.id, quantity=1))
+        order2 = service.submit_cart(db, participant2, efectivo.id)
+
+        self.assertNotEqual(order1.id, order2.id)
+        orders = db.execute(
+            select(CustomerOrder).where(CustomerOrder.table_session_id == ts.id)
+        ).scalars().all()
+        self.assertEqual({o.id for o in orders}, {order1.id, order2.id})
+        self.assertEqual(len(order1.items), 1)
+        self.assertEqual(len(order2.items), 1)
+
+    def test_submit_cart_no_afecta_el_carrito_de_otro_comensal_de_la_mesa(self):
+        """spec 038, US4 (Acceptance Scenario 1 / CA-5, FR-006): confirmar
+        el pedido de un comensal no toca el carrito de otro comensal de la
+        misma mesa — el borrado es estrictamente por `participant_id`."""
+        db, table, ts, ana = self._seed_session()
+        beto = cart_fixtures.make_participant(db, table_session=ts)
+        variant_ana, _, _ = self._seed_variant(db, price=Decimal("4000"))
+        variant_beto, _, _ = self._seed_variant(db, price=Decimal("3000"))
+        efectivo = self._seed_efectivo(db)
+
+        service.add_item(db, ana.id, CartItemIn(product_variant_id=variant_ana.id, quantity=1))
+        service.add_item(db, beto.id, CartItemIn(product_variant_id=variant_beto.id, quantity=2))
+        beto_cart = db.execute(
+            select(Cart).where(Cart.participant_id == beto.id, Cart.status == "abierto")
+        ).scalar_one()
+        beto_cart_id = beto_cart.id
+        beto_item_ids = {it.id for it in beto_cart.items}
+
+        service.submit_cart(db, ana, efectivo.id)
+
+        persisted = db.get(Cart, beto_cart_id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual({it.id for it in persisted.items}, beto_item_ids)
+        self.assertEqual(len(persisted.items), 1)
+        self.assertEqual(persisted.items[0].quantity, 2)
 
     def test_submit_cart_vacio_409(self):
         """CONGELA comportamiento actual: enviar un carrito sin ítems

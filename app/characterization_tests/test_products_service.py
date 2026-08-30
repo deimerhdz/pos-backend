@@ -18,11 +18,19 @@ Ejecutar solo este módulo:
     python -m unittest app.characterization_tests.test_products_service -v
 """
 import unittest
+from decimal import Decimal
 from unittest import mock
+
+from fastapi import HTTPException
+from sqlalchemy import select
 
 from app.characterization_tests import fixtures as fx
 from app.api.v1.products.service import ProductService
-from app.api.v1.products.schemas import ProductUpdate
+from app.api.v1.products.schemas import ProductCreate, ProductUpdate
+from app.api.v1.catalog.schemas import VariantSaveIn, RecipeItemIn, VariantOptionGroupIn
+from app.models.product_variant import ProductVariant
+from app.models.recipe_item import RecipeItem
+from app.models.variant_option_group import VariantOptionGroup
 
 OLD_URL = "https://example.invalid/tenant/products/old.jpg"
 NEW_URL = "https://example.invalid/tenant/products/new.jpg"
@@ -95,6 +103,287 @@ class TestUpdateProductA44(unittest.TestCase):
             result = service.update_product(db, product.id, ProductUpdate(image_url=NEW_URL))
 
         self.assertEqual(result.image_url, NEW_URL)
+
+
+class TestCreateProductWithVariantTree(unittest.TestCase):
+    """Spec 043 (US1, FR-001/FR-006): `POST /products` con `variants` crea el árbol completo
+    (presentaciones, receta, grupos de opciones y orden) en una sola transacción."""
+
+    def test_variants_anidadas_crean_presentaciones_receta_y_grupos_en_el_orden_recibido(self):
+        db = fx.new_session()
+        category = fx.make_category(db)
+        item = fx.make_inventory_item(db)
+        group = fx.make_option_group(db)
+        db.commit()
+        service = ProductService()
+
+        data = ProductCreate(
+            category_id=category.id,
+            name="Cono Waffle",
+            preparation_type="prepared",
+            variants=[
+                VariantSaveIn(
+                    name="Pequeño",
+                    price=Decimal("8000"),
+                    recipe=[RecipeItemIn(inventory_item_id=item.id, quantity=Decimal("0.2"))],
+                    option_groups=[
+                        VariantOptionGroupIn(option_group_id=group.id, min_select=1, max_select=1)
+                    ],
+                ),
+                VariantSaveIn(name="Grande", price=Decimal("12000")),
+            ],
+        )
+        product = service.create_product(db, data)
+
+        variants = db.execute(
+            select(ProductVariant)
+            .where(ProductVariant.product_id == product.id)
+            .order_by(ProductVariant.display_order)
+        ).scalars().all()
+        self.assertEqual([v.name for v in variants], ["Pequeño", "Grande"])
+        self.assertEqual([v.display_order for v in variants], [1, 2])
+
+        # `Product.variants` (spec 042, `order_by=ProductVariant.display_order`) es la misma
+        # relación que recorre el Menú QR (menu/router.py) -- confirma que el orden asignado por
+        # el guardado consolidado también se ve por ese camino, no solo por query directa.
+        db.expire(product)
+        self.assertEqual([v.name for v in product.variants], ["Pequeño", "Grande"])
+
+        recipe = db.execute(
+            select(RecipeItem).where(RecipeItem.product_variant_id == variants[0].id)
+        ).scalars().all()
+        self.assertEqual(len(recipe), 1)
+        self.assertEqual(recipe[0].inventory_item_id, item.id)
+
+        groups = db.execute(
+            select(VariantOptionGroup).where(
+                VariantOptionGroup.product_variant_id == variants[0].id
+            )
+        ).scalars().all()
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].option_group_id, group.id)
+
+    def test_sin_variants_sigue_creando_single_automatica_back_compat(self):
+        """RN-CAT-05: sin `variants` (u omitido), el comportamiento no cambia."""
+        db = fx.new_session()
+        category = fx.make_category(db)
+        db.commit()
+        service = ProductService()
+
+        product = service.create_product(
+            db, ProductCreate(category_id=category.id, name="Cono Simple", preparation_type="prepared")
+        )
+
+        variants = db.execute(
+            select(ProductVariant).where(ProductVariant.product_id == product.id)
+        ).scalars().all()
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(variants[0].name, "Single")
+        self.assertEqual(variants[0].price, Decimal("0"))
+
+    def test_respuesta_incluye_variants_con_receta_y_grupos_resueltos(self):
+        """FR-006: la respuesta del guardado trae el árbol completo, sin lectura adicional."""
+        db = fx.new_session()
+        category = fx.make_category(db)
+        item = fx.make_inventory_item(db)
+        db.commit()
+        service = ProductService()
+
+        data = ProductCreate(
+            category_id=category.id,
+            name="Cono Waffle",
+            preparation_type="prepared",
+            variants=[
+                VariantSaveIn(
+                    name="Único",
+                    price=Decimal("5000"),
+                    recipe=[RecipeItemIn(inventory_item_id=item.id, quantity=Decimal("0.1"))],
+                )
+            ],
+        )
+        product = service.create_product(db, data)
+        response = service.to_save_response(product)
+
+        self.assertEqual(len(response.variants), 1)
+        self.assertEqual(response.variants[0].name, "Único")
+        self.assertEqual(len(response.variants[0].recipe), 1)
+        self.assertEqual(response.variants[0].recipe[0].inventory_item_id, item.id)
+
+
+class TestUpdateProductWithVariantTree(unittest.TestCase):
+    """Spec 043 (US2, FR-002): `PATCH /products/{id}` con `variants` reconcilia el conjunto de
+    presentaciones activas -- crea, actualiza, desactiva las no listadas -- en una transacción."""
+
+    def test_mezcla_de_crear_actualizar_y_desactivar_reasigna_el_orden_por_posicion(self):
+        db = fx.new_session()
+        product = fx.make_product(db)
+        v1 = fx.make_variant(db, product, name="Pequeña", price=Decimal("1000"))
+        v2 = fx.make_variant(db, product, name="Mediana", price=Decimal("2000"))
+        db.commit()
+        service = ProductService()
+
+        data = ProductUpdate(
+            variants=[
+                VariantSaveIn(id=v1.id, name="Pequeña", price=Decimal("1500")),  # editar
+                VariantSaveIn(name="Grande", price=Decimal("3000")),  # crear
+                # v2 ("Mediana") no aparece -> se desactiva
+            ]
+        )
+        service.update_product(db, product.id, data)
+        db.expire_all()
+
+        v1_db = db.get(ProductVariant, v1.id)
+        v2_db = db.get(ProductVariant, v2.id)
+        self.assertEqual(v1_db.price, Decimal("1500.00"))
+        self.assertTrue(v1_db.active)
+        self.assertFalse(v2_db.active)
+
+        active = db.execute(
+            select(ProductVariant)
+            .where(ProductVariant.product_id == product.id, ProductVariant.active.is_(True))
+            .order_by(ProductVariant.display_order)
+        ).scalars().all()
+        self.assertEqual([v.name for v in active], ["Pequeña", "Grande"])
+        self.assertEqual([v.display_order for v in active], [1, 2])
+
+    def test_reactivar_una_desactivada_conserva_la_receta_reenviada(self):
+        """spec 002 FR-010: reactivar dentro del guardado consolidado conserva la receta que el
+        formulario ya cargó y reenvía (no el orden -- ver spec.md Edge Cases)."""
+        db = fx.new_session()
+        product = fx.make_product(db)
+        item = fx.make_inventory_item(db)
+        v1 = fx.make_variant(db, product, name="Pequeña", price=Decimal("1000"), active=False)
+        fx.make_recipe_item(db, v1, item, quantity=Decimal("0.5"))
+        db.commit()
+        service = ProductService()
+
+        data = ProductUpdate(
+            variants=[
+                VariantSaveIn(
+                    id=v1.id,
+                    name="Pequeña",
+                    price=v1.price,
+                    recipe=[RecipeItemIn(inventory_item_id=item.id, quantity=Decimal("0.5"))],
+                )
+            ]
+        )
+        service.update_product(db, product.id, data)
+        db.expire_all()
+
+        v1_db = db.get(ProductVariant, v1.id)
+        self.assertTrue(v1_db.active)
+        recipe = db.execute(
+            select(RecipeItem).where(RecipeItem.product_variant_id == v1.id)
+        ).scalars().all()
+        self.assertEqual(len(recipe), 1)
+        self.assertEqual(recipe[0].quantity, Decimal("0.500"))
+
+    def test_sin_variants_en_el_body_no_toca_ninguna_presentacion(self):
+        """Back-compat: `variants` ausente del body deja las presentaciones intactas."""
+        db = fx.new_session()
+        product = fx.make_product(db)
+        v1 = fx.make_variant(db, product, name="Pequeña", price=Decimal("1000"))
+        db.commit()
+        service = ProductService()
+
+        service.update_product(db, product.id, ProductUpdate(name="Nuevo nombre"))
+        db.expire_all()
+
+        v1_db = db.get(ProductVariant, v1.id)
+        self.assertTrue(v1_db.active)
+        self.assertEqual(v1_db.name, "Pequeña")
+        self.assertEqual(v1_db.price, Decimal("1000.00"))
+
+
+class TestConsolidatedSaveAtomicity(unittest.TestCase):
+    """Spec 043 (US3, FR-004): cualquier fallo de validación en cualquier parte del árbol aborta
+    el guardado completo -- nada se persiste, ni siquiera las partes válidas."""
+
+    def test_nombre_duplicado_en_una_presentacion_no_persiste_ninguna(self):
+        db = fx.new_session()
+        product = fx.make_product(db)
+        existente = fx.make_variant(db, product, name="Pequeña")
+        db.commit()
+        service = ProductService()
+
+        data = ProductUpdate(
+            variants=[
+                VariantSaveIn(id=existente.id, name="Pequeña", price=Decimal("1000")),
+                VariantSaveIn(name="Mediana", price=Decimal("2000")),
+                VariantSaveIn(name="Grande", price=Decimal("3000")),
+                VariantSaveIn(name="Pequeña", price=Decimal("4000")),  # choca con `existente`
+            ]
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.update_product(db, product.id, data)
+        self.assertEqual(ctx.exception.detail["variant_index"], 3)
+
+        db.expire_all()
+        variants = db.execute(
+            select(ProductVariant).where(ProductVariant.product_id == product.id)
+        ).scalars().all()
+        # Solo sigue existiendo la presentación original -- ninguna de las tres nuevas del
+        # payload se creó, y "Pequeña" no cambió de precio.
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(variants[0].price, Decimal("0"))
+
+    def test_insumo_repetido_en_receta_no_persiste_nada_del_guardado(self):
+        db = fx.new_session()
+        product = fx.make_product(db)
+        item = fx.make_inventory_item(db)
+        db.commit()
+        service = ProductService()
+
+        data = ProductCreate(
+            category_id=product.category_id,
+            name="Producto con receta inválida",
+            preparation_type="prepared",
+            variants=[
+                VariantSaveIn(name="Única", price=Decimal("1000"), recipe=[
+                    RecipeItemIn(inventory_item_id=item.id, quantity=Decimal("1")),
+                    RecipeItemIn(inventory_item_id=item.id, quantity=Decimal("2")),
+                ])
+            ],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_product(db, data)
+        self.assertEqual(ctx.exception.detail["variant_index"], 0)
+
+        db.expire_all()
+        creados = db.execute(
+            select(ProductVariant).where(ProductVariant.product_id == product.id)
+        ).scalars().all()
+        self.assertEqual(len(creados), 0)
+
+    def test_grupo_de_opciones_inactivo_no_persiste_nada_del_guardado(self):
+        db = fx.new_session()
+        product = fx.make_product(db)
+        group = fx.make_option_group(db, active=False)
+        v1 = fx.make_variant(db, product, name="Pequeña", price=Decimal("1000"))
+        db.commit()
+        service = ProductService()
+
+        data = ProductUpdate(
+            variants=[
+                VariantSaveIn(
+                    id=v1.id,
+                    name="Pequeña",
+                    price=Decimal("9999"),
+                    option_groups=[VariantOptionGroupIn(option_group_id=group.id)],
+                )
+            ]
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.update_product(db, product.id, data)
+        self.assertEqual(ctx.exception.detail["variant_index"], 0)
+
+        db.expire_all()
+        v1_db = db.get(ProductVariant, v1.id)
+        self.assertEqual(v1_db.price, Decimal("1000.00"))
+        groups = db.execute(
+            select(VariantOptionGroup).where(VariantOptionGroup.product_variant_id == v1.id)
+        ).scalars().all()
+        self.assertEqual(len(groups), 0)
 
 
 if __name__ == "__main__":

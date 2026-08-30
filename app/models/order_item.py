@@ -39,6 +39,17 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
         Numeric(12, 2), nullable=False, default=0, server_default="0"
     )
 
+    # Snapshot del descuento vigente al momento de confirmar el pedido (spec
+    # 038, FR-013): `None` si ninguna promoción aplicó a esta línea (o es una
+    # línea de combo, cuyo ahorro se calcula aparte). Nullable sin default:
+    # las filas anteriores a esta spec quedan en NULL, sin backfill (FR-015).
+    discounted_unit_price: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )
+    discounted_line_total: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )
+
     # Promoción de combo que generó esta línea (selección explícita, copiada
     # tal cual desde el cart_item). Varias líneas comparten el mismo combo_id:
     # son los componentes de un mismo combo.

@@ -26,7 +26,7 @@ from sqlalchemy import select
 
 from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import service
-from app.api.v1.orders.schemas import OrderChannel, OrderCreate, OrderItemIn
+from app.api.v1.orders.schemas import OrderChannel, OrderCreate, OrderItemIn, OrderType
 from app.models.inventory_movement import InventoryMovement
 from app.models.sale import Sale
 
@@ -57,7 +57,7 @@ class TestService(unittest.TestCase):
         db.commit()
 
         data = OrderCreate(
-            channel=OrderChannel.COUNTER,
+            channel=OrderChannel.POS,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
         )
         order = service.create_order(db, data, uuid4())
@@ -84,7 +84,7 @@ class TestService(unittest.TestCase):
         db.commit()
 
         data = OrderCreate(
-            channel=OrderChannel.COUNTER,
+            channel=OrderChannel.POS,
             items=[OrderItemIn(product_variant_id=variant_sin_receta.id, quantity=1)],
         )
         with self.assertRaises(HTTPException) as ctx:
@@ -110,7 +110,7 @@ class TestService(unittest.TestCase):
         db.commit()
 
         data = OrderCreate(
-            channel=OrderChannel.WAITER,
+            channel=OrderChannel.POS,
             dining_table_id=table.id,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1)],
         )
@@ -131,7 +131,7 @@ class TestService(unittest.TestCase):
         db.commit()
 
         data = OrderCreate(
-            channel=OrderChannel.COUNTER,
+            channel=OrderChannel.POS,
             hold_for_payment=True,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
         )
@@ -147,14 +147,14 @@ class TestService(unittest.TestCase):
 
     def test_create_order_hold_for_payment_con_channel_qr_400(self):
         """spec 028, T013: `hold_for_payment` es exclusivo de mostrador/mesero
-        — combinado con `channel='qr'` es 400 (ese canal ya tiene su propio
-        flujo 'recibida' vía `/cart/submit`)."""
+        — combinado con `channel='QR_MENU'` es 400 (ese canal ya tiene su
+        propio flujo 'recibida' vía `/cart/submit`)."""
         db = fx.new_session()
         variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
         db.commit()
 
         data = OrderCreate(
-            channel=OrderChannel.QR,
+            channel=OrderChannel.QR_MENU,
             hold_for_payment=True,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
         )
@@ -172,12 +172,12 @@ class TestService(unittest.TestCase):
         db = fx.new_session()
         table = fx.make_dining_table(db, status="ocupada")
         ts = fx.make_table_session(db, table=table)
-        fx.make_customer_order(db, ts, channel="qr", status="recibida")
+        fx.make_customer_order(db, ts, channel="QR_MENU", status="recibida")
         variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
         db.commit()
 
         data = OrderCreate(
-            channel=OrderChannel.WAITER,
+            channel=OrderChannel.POS,
             dining_table_id=table.id,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
         )
@@ -192,17 +192,316 @@ class TestService(unittest.TestCase):
         db = fx.new_session()
         table = fx.make_dining_table(db, status="ocupada")
         ts = fx.make_table_session(db, table=table)
-        fx.make_customer_order(db, ts, channel="qr", status="pagada")
+        fx.make_customer_order(db, ts, channel="QR_MENU", status="pagada")
         variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
         db.commit()
 
         data = OrderCreate(
-            channel=OrderChannel.WAITER,
+            channel=OrderChannel.POS,
             dining_table_id=table.id,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
         )
         order = service.create_order(db, data, uuid4())
         self.assertEqual(order.status, "abierta")
+
+    # ---------------------------------------------- spec 055: "Para Llevar"
+
+    def test_create_order_takeaway_con_mesa_rechaza_422(self):
+        """spec 055, research.md Decisión 5: un pedido TAKEAWAY o DELIVERY
+        nunca lleva mesa asociada."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db, status="libre")
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.TAKEAWAY,
+            dining_table_id=table.id,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_create_order_delivery_con_mesa_rechaza_422(self):
+        db = fx.new_session()
+        table = fx.make_dining_table(db, status="libre")
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.DELIVERY,
+            dining_table_id=table.id,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_create_order_takeaway_sin_mesa_crea_correctamente(self):
+        """spec 055, FR-011: el pedido "Para Llevar" queda con order_type
+        TAKEAWAY, canal POS y sin mesa asociada."""
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.TAKEAWAY,
+            customer_name="Consumidor final",
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            hold_for_payment=True,
+        )
+        order = service.create_order(db, data, uuid4())
+
+        self.assertEqual(order.order_type, "TAKEAWAY")
+        self.assertEqual(order.channel, "POS")
+        self.assertIsNone(order.dining_table_id)
+        self.assertEqual(order.customer_name, "Consumidor final")
+        self.assertEqual(order.status, "recibida")
+
+    # ---------------------- spec 055, FR-006/FR-007: combinaciones canal/tipo
+
+    def test_create_order_combinacion_invalida_whatsapp_dine_in_rechaza_400(self):
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.WHATSAPP,
+            order_type=OrderType.DINE_IN,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_create_order_combinacion_invalida_api_dine_in_rechaza_400(self):
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.API,
+            order_type=OrderType.DINE_IN,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_create_order_combinacion_invalida_qr_menu_takeaway_rechaza_400(self):
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.QR_MENU,
+            order_type=OrderType.TAKEAWAY,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_create_order_combinacion_invalida_qr_menu_delivery_rechaza_400(self):
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.QR_MENU,
+            order_type=OrderType.DELIVERY,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_create_order_combinaciones_validas_no_rechaza(self):
+        """data-model.md, tabla de combinaciones: POS admite los tres tipos;
+        WHATSAPP/API admiten TAKEAWAY y DELIVERY."""
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        combinaciones = [
+            (OrderChannel.POS, OrderType.DINE_IN),
+            (OrderChannel.POS, OrderType.TAKEAWAY),
+            (OrderChannel.POS, OrderType.DELIVERY),
+            (OrderChannel.WHATSAPP, OrderType.TAKEAWAY),
+            (OrderChannel.WHATSAPP, OrderType.DELIVERY),
+            (OrderChannel.API, OrderType.TAKEAWAY),
+            (OrderChannel.API, OrderType.DELIVERY),
+        ]
+        for channel, order_type in combinaciones:
+            with self.subTest(channel=channel, order_type=order_type):
+                # spec 056, FR-007: DELIVERY exige cliente/dirección/valor del
+                # domicilio — se completan aquí para que este test siga
+                # verificando únicamente la combinación canal×tipo de orden
+                # (spec 055), no la obligatoriedad de esos campos nuevos
+                # (cubierta aparte en TestCreateOrderDelivery).
+                extra = (
+                    dict(
+                        customer_name="Ana Torres",
+                        delivery_address="Cra 45 #12-30",
+                        delivery_fee=Decimal("6000"),
+                    )
+                    if order_type is OrderType.DELIVERY else {}
+                )
+                data = OrderCreate(
+                    channel=channel,
+                    order_type=order_type,
+                    items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+                    **extra,
+                )
+                order = service.create_order(db, data, uuid4())
+                self.assertEqual(order.channel, channel.value)
+                self.assertEqual(order.order_type, order_type.value)
+
+
+class TestCreateOrderDelivery(unittest.TestCase):
+    """spec 056: habilitación del tipo de orden DELIVERY en la creación
+    manual — campos de entrega, obligatoriedad, y persistencia."""
+
+    def _seed_variant_con_receta_y_opciones(self, db):
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=PRECIO)
+        insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
+        fx.make_recipe_item(db, variant, insumo, quantity=Decimal("2"))
+        group = fx.make_option_group(db, min_select=1, max_select=1)
+        option = fx.make_option(db, group=group, extra_price=Decimal("500"))
+        fx.link_variant_group(db, variant, group, min_select=1, max_select=1)
+        return variant, insumo, option
+
+    def test_create_order_delivery_completo_crea_correctamente(self):
+        """FR-010: la orden queda con order_type DELIVERY, canal POS, sin
+        mesa, y los cuatro datos de entrega guardados tal cual se enviaron."""
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.DELIVERY,
+            customer_name="Ana Torres",
+            delivery_address="Cra 45 #12-30, apto 301",
+            delivery_phone="3011234567",
+            delivery_fee=Decimal("6000"),
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            hold_for_payment=True,
+        )
+        order = service.create_order(db, data, uuid4())
+
+        self.assertEqual(order.order_type, "DELIVERY")
+        self.assertEqual(order.channel, "POS")
+        self.assertIsNone(order.dining_table_id)
+        self.assertEqual(order.customer_name, "Ana Torres")
+        self.assertEqual(order.delivery_address, "Cra 45 #12-30, apto 301")
+        self.assertEqual(order.delivery_phone, "3011234567")
+        self.assertEqual(order.delivery_fee, Decimal("6000"))
+
+    def test_create_order_delivery_sin_telefono_crea_correctamente(self):
+        """FR-008: el teléfono nunca es obligatorio, ni siquiera para DELIVERY."""
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.DELIVERY,
+            customer_name="Ana Torres",
+            delivery_address="Cra 45 #12-30",
+            delivery_fee=Decimal("0"),
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        order = service.create_order(db, data, uuid4())
+
+        self.assertIsNone(order.delivery_phone)
+        self.assertEqual(order.delivery_fee, Decimal("0"))
+
+    def test_create_order_delivery_sin_nombre_cliente_rechaza_422(self):
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.DELIVERY,
+            delivery_address="Cra 45 #12-30",
+            delivery_fee=Decimal("6000"),
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_create_order_delivery_sin_direccion_rechaza_422(self):
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.DELIVERY,
+            customer_name="Ana Torres",
+            delivery_fee=Decimal("6000"),
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_create_order_delivery_sin_valor_domicilio_rechaza_422(self):
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.DELIVERY,
+            customer_name="Ana Torres",
+            delivery_address="Cra 45 #12-30",
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_create_order_delivery_nombre_cliente_solo_espacios_rechaza_422(self):
+        """FR-007: un nombre de solo espacios no cuenta como diligenciado."""
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.DELIVERY,
+            customer_name="   ",
+            delivery_address="Cra 45 #12-30",
+            delivery_fee=Decimal("6000"),
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_create_order_delivery_valor_negativo_rechaza_422(self):
+        """FR-006: el valor del domicilio no admite negativos (validado ya en
+        el schema Pydantic, Field(ge=0) — 422 de FastAPI/Pydantic)."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            OrderCreate(
+                channel=OrderChannel.POS,
+                order_type=OrderType.DELIVERY,
+                customer_name="Ana Torres",
+                delivery_address="Cra 45 #12-30",
+                delivery_fee=Decimal("-1"),
+                items=[OrderItemIn(product_variant_id=uuid4(), quantity=1)],
+            )
 
 
 class TestOrderHasSale(unittest.TestCase):
@@ -218,7 +517,7 @@ class TestOrderHasSale(unittest.TestCase):
         category = fx.make_category(db)
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=PRECIO)
-        order = fx.make_customer_order(db, ts, status=order_status, channel="waiter")
+        order = fx.make_customer_order(db, ts, status=order_status, channel="POS")
         shift = fx.make_cash_shift(db)
         cashier = fx.make_user_double()
         db.add(Sale(
@@ -243,7 +542,7 @@ class TestOrderHasSale(unittest.TestCase):
     def test_order_has_sale_false_sobre_orden_abierta_sin_sale(self):
         db = fx.new_session()
         ts = fx.make_table_session(db)
-        order = fx.make_customer_order(db, ts, status="abierta", channel="waiter")
+        order = fx.make_customer_order(db, ts, status="abierta", channel="POS")
         db.commit()
 
         self.assertFalse(service.order_has_sale(db, order.id))
@@ -253,7 +552,7 @@ class TestOrderHasSale(unittest.TestCase):
         de N — el pedido sin `Sale` no aparece en el resultado."""
         db, pagado = self._seed_order_con_sale(order_status="abierta")
         ts = fx.make_table_session(db)
-        sin_pagar = fx.make_customer_order(db, ts, status="abierta", channel="waiter")
+        sin_pagar = fx.make_customer_order(db, ts, status="abierta", channel="POS")
         db.commit()
 
         resultado = service.paid_order_ids(db, [pagado.id, sin_pagar.id])
@@ -276,7 +575,7 @@ class TestListOrdersActiveSessionsOnly(unittest.TestCase):
     def _seed(self, *, session_status: str, order_status: str, con_sale: bool):
         db = fx.new_session()
         ts = fx.make_table_session(db, status=session_status)
-        order = fx.make_customer_order(db, ts, status=order_status, channel="waiter")
+        order = fx.make_customer_order(db, ts, status=order_status, channel="POS")
         if con_sale:
             shift = fx.make_cash_shift(db)
             cashier = fx.make_user_double()
@@ -313,7 +612,7 @@ class TestListOrdersActiveSessionsOnly(unittest.TestCase):
         ts = fx.make_table_session(db)  # solo para satisfacer la firma del fixture
         order = fx.make_customer_order(
             db, ts, table_session_id=None, dining_table_id=None,
-            status="abierta", channel="counter",
+            status="abierta", channel="POS",
         )
         db.commit()
 

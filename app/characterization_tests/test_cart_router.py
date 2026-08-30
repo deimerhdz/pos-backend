@@ -217,7 +217,12 @@ class TestCartRouter(unittest.TestCase):
         """CONGELA comportamiento actual: `events.order_created` se publica
         DESPUÉS de que la transacción de `service.submit_cart` ya hizo
         commit — en el momento de la llamada, una consulta SQL fresca sobre
-        `db` ya ve el pedido `recibida` y el carrito anterior `confirmado`.
+        `db` ya ve el pedido `recibida`.
+
+        Actualizado por spec 038 (FR-003/FR-004, research.md Decisión 9): ya
+        no queda ninguna fila de `Cart` para el participante en ese momento
+        (antes se verificaba `status == 'confirmado'`; ahora la fila fue
+        eliminada físicamente, no archivada).
 
         Actualizado por spec 025-revision-pago-antes-envio: el endpoint
         exige un cuerpo `SubmitCartIn` con `payment_method_id`."""
@@ -238,9 +243,8 @@ class TestCartRouter(unittest.TestCase):
             seen["order_status"] = db.execute(
                 select(CustomerOrder.status).where(CustomerOrder.id == order_id)
             ).scalar_one()
-            seen["cart_confirmado"] = db.execute(
-                select(Cart.status)
-                .where(Cart.participant_id == participant.id, Cart.status == "confirmado")
+            seen["cart_exists"] = db.execute(
+                select(Cart.id).where(Cart.participant_id == participant.id)
             ).scalar_one_or_none()
 
         with mock.patch("app.core.events.order_created", side_effect=_spy) as spy, \
@@ -249,8 +253,48 @@ class TestCartRouter(unittest.TestCase):
 
         spy.assert_called_once()
         self.assertEqual(seen["order_status"], "recibida")
-        self.assertEqual(seen["cart_confirmado"], "confirmado")
+        self.assertIsNone(seen["cart_exists"])
         self.assertEqual(result.status, "recibida")
+
+    def test_submit_cart_segundo_intento_responde_ya_fue_enviado(self):
+        """spec 038, US2 (Acceptance Scenarios 1-2 / CA-3, CA-4, FR-007):
+        tras confirmar un carrito con éxito, un segundo intento de
+        `submit_cart` para el mismo participante (carrito ya vaciado por la
+        primera confirmación) responde `409` con el mensaje explícito de
+        "ya fue enviado" — no el genérico de carrito vacío — y no crea
+        ningún `CustomerOrder` adicional. Mismo camino de código que "dos
+        pestañas": ambas apuntan al mismo `participant_id`."""
+        db, table, ts, participant = self._seed_session()
+        variant = self._seed_variant(db)
+        efectivo = cart_fixtures.make_payment_method(db, name="Efectivo", is_cash=True)
+        service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
+
+        service.submit_cart(db, participant, efectivo.id)
+
+        with self.assertRaises(HTTPException) as ctx_err:
+            service.submit_cart(db, participant, efectivo.id)
+        self.assertEqual(ctx_err.exception.status_code, 409)
+        self.assertIn("ya fue enviado", ctx_err.exception.detail)
+
+        from sqlalchemy import select
+        from app.models.customer_order import CustomerOrder
+        orders = db.execute(
+            select(CustomerOrder.id).where(CustomerOrder.participant_id == participant.id)
+        ).scalars().all()
+        self.assertEqual(len(orders), 1)
+
+    def test_submit_cart_vacio_sin_orden_previa_409_generico(self):
+        """spec 038, US2 (Acceptance Scenario 3 / CA-7, FR-009): un
+        participante con carrito vacío (sin ítems) y sin ninguna orden no
+        terminal previa recibe el `409`/"El carrito está vacío" genérico —
+        distinguible del mensaje de "ya fue enviado" — sin crear nada."""
+        db, table, ts, participant = self._seed_session()
+        cart_fixtures.make_cart(db, participant=participant)
+
+        with self.assertRaises(HTTPException) as ctx_err:
+            service.submit_cart(db, participant, uuid4())
+        self.assertEqual(ctx_err.exception.status_code, 409)
+        self.assertNotIn("ya fue enviado", ctx_err.exception.detail)
 
     # ---------------------------------------------------------- GET /cart/orders (T032)
 

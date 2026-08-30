@@ -36,7 +36,7 @@ from app.models.table_session import TableSession
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.orders.consolidation import get_or_create_table_session_id
 from app.api.v1.orders.consumption import deduct_order_items
-from app.api.v1.orders.schemas import OrderChannel, OrderCreate
+from app.api.v1.orders.schemas import OrderChannel, OrderCreate, OrderType
 from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,19 @@ logger = logging.getLogger(__name__)
 #: `checkout.TERMINAL`), y `cart.service` ya importa de `table_sessions.service`,
 #: que a su vez depende de `orders.checkout`.
 _NON_TERMINAL_ORDER_STATUSES = ("recibida", "abierta", "bloqueada")
+
+#: Combinaciones canal × tipo de orden con sentido de negocio (spec 055,
+#: FR-006; research.md D4) — validado solo aquí: es el único punto donde
+#: ambos valores llegan como datos arbitrarios de un llamador (`OrderCreate`).
+#: El flujo QR (`cart.service.submit_cart`) y el de consolidación/mesero
+#: (`orders.consolidation.get_or_create_open_order`) construyen su propia
+#: combinación fija y ya válida por construcción, sin pasar por aquí.
+_COMBINACIONES_CANAL_TIPO_ORDEN: dict[OrderChannel, frozenset[OrderType]] = {
+    OrderChannel.POS: frozenset({OrderType.DINE_IN, OrderType.TAKEAWAY, OrderType.DELIVERY}),
+    OrderChannel.QR_MENU: frozenset({OrderType.DINE_IN}),
+    OrderChannel.WHATSAPP: frozenset({OrderType.TAKEAWAY, OrderType.DELIVERY}),
+    OrderChannel.API: frozenset({OrderType.TAKEAWAY, OrderType.DELIVERY}),
+}
 
 
 def order_has_sale(db: Session, order_id: UUID) -> bool:
@@ -118,10 +131,40 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
     # después" del mostrador/mesero. El canal QR ya tiene su propio flujo
     # 'recibida' (vía /cart/submit, con OrderPaymentAttempt) — mezclarlo con
     # esta bandera duplicaría ese camino con reglas distintas.
-    if data.hold_for_payment and data.channel is OrderChannel.QR:
+    if data.hold_for_payment and data.channel is OrderChannel.QR_MENU:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "hold_for_payment solo aplica a comandas de mostrador/mesero, no a pedidos por QR.",
+        )
+
+    # spec 055, research.md D5: un pedido para llevar o a domicilio nunca
+    # lleva mesa asociada.
+    if data.order_type in (OrderType.TAKEAWAY, OrderType.DELIVERY) and data.dining_table_id is not None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Un pedido para llevar o a domicilio no puede tener una mesa asociada.",
+        )
+
+    # spec 055, FR-006/FR-007.
+    if data.order_type not in _COMBINACIONES_CANAL_TIPO_ORDEN[data.channel]:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"La combinación de canal '{data.channel.value}' y tipo de orden "
+            f"'{data.order_type.value}' no es válida.",
+        )
+
+    # spec 056, FR-007: un pedido a domicilio requiere nombre del cliente,
+    # dirección y valor del domicilio (el teléfono queda fuera a propósito,
+    # FR-008 — siempre opcional).
+    if data.order_type is OrderType.DELIVERY and (
+        not (data.customer_name or "").strip()
+        or not (data.delivery_address or "").strip()
+        or data.delivery_fee is None
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Un pedido a domicilio requiere nombre del cliente, dirección y "
+            "valor del domicilio.",
         )
 
     customer_name = data.customer_name
@@ -152,11 +195,11 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
     # Si ya hay un pedido QR activo en la sesión, una comanda de
     # mostrador/mesero no puede abrirse encima (y viceversa: ver
     # `cart.service.submit_cart`, T015).
-    if table_session_id is not None and data.channel is not OrderChannel.QR:
+    if table_session_id is not None and data.channel is not OrderChannel.QR_MENU:
         conflicto_qr = db.execute(
             select(CustomerOrder.id).where(
                 CustomerOrder.table_session_id == table_session_id,
-                CustomerOrder.channel == "qr",
+                CustomerOrder.channel == "QR_MENU",
                 CustomerOrder.status.in_(_NON_TERMINAL_ORDER_STATUSES),
             ).limit(1)
         ).scalar()
@@ -174,6 +217,10 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             dining_table_id=table_id,
             customer_name=customer_name,
             channel=data.channel.value,
+            order_type=data.order_type.value,
+            delivery_address=data.delivery_address,
+            delivery_phone=data.delivery_phone,
+            delivery_fee=data.delivery_fee,
             # T013: con hold_for_payment nace 'recibida', igual que un pedido
             # QR sin confirmar — no compromete stock ni es visible para cocina
             # hasta que se cobre (`checkout.checkout_and_send`).

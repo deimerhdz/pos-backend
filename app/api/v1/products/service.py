@@ -15,9 +15,23 @@ from sqlalchemy.sql import Select
 from app.core.crud import get_or_404
 from app.core.storage import delete_object, key_from_public_url
 from app.models.product import Product
+from app.models.product_variant import ProductVariant
 from app.models.category import Category
-from app.api.v1.catalog.service import ensure_default_variant
-from app.api.v1.products.schemas import ProductCreate, ProductUpdate
+from app.api.v1.catalog.service import (
+    ensure_default_variant,
+    _save_variant_entry,
+    _assign_display_orders,
+)
+from app.api.v1.catalog.schemas import VariantSaveIn
+from app.api.v1.products.schemas import (
+    ProductCreate,
+    ProductUpdate,
+    ProductResponse,
+    ProductSaveResponse,
+    VariantSaveOut,
+    RecipeItemResponse,
+    VariantOptionGroupResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +66,13 @@ class ProductService:
             )
             db.add(product)
             db.flush()
-            # Todo vendible es una variante; el producto nace con su default 'Single'.
-            ensure_default_variant(db, product)
+            if data.variants:
+                # spec 043 (FR-001): árbol completo en la misma transacción --
+                # `ensure_default_variant` no aplica, ya hay al menos una presentación explícita.
+                self._save_variant_tree(db, product, data.variants)
+            else:
+                # Todo vendible es una variante; el producto nace con su default 'Single'.
+                ensure_default_variant(db, product)
             db.commit()
         except HTTPException:
             db.rollback()
@@ -88,7 +107,22 @@ class ProductService:
             product.available = data.available
         if data.tracks_inventory is not None:
             product.tracks_inventory = data.tracks_inventory
-        db.commit()
+
+        try:
+            # spec 043 (FR-002): `variants` ausente del body = no tocar ninguna presentación
+            # (back-compat); presente (incluida `[]`) = reconciliación completa. Todo esto entra
+            # en el mismo `db.commit()` de abajo que ya persistía los campos del producto --
+            # ningún cambio de esta llamada se guarda si la reconciliación falla (FR-004).
+            if "variants" in data.model_fields_set:
+                self._reconcile_variants(db, product, data.variants or [])
+            db.commit()
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception:
+            db.rollback()
+            logger.exception("Error actualizando producto")
+            raise
         db.refresh(product)
         if old_key:
             delete_object(old_key)
@@ -100,3 +134,70 @@ class ProductService:
         db.commit()
         db.refresh(product)
         return product
+
+    # ===================== Guardado consolidado (spec 043) =====================
+
+    def _save_variant_tree(
+        self, db: Session, product: Product, entries: list[VariantSaveIn]
+    ) -> None:
+        """Crea todas las presentaciones iniciales de un producto nuevo, en el orden recibido
+        (FR-001). No hace `commit()` -- lo controla `create_product`."""
+        variants = [
+            _save_variant_entry(db, product, entry, index, {})
+            for index, entry in enumerate(entries)
+        ]
+        _assign_display_orders(db, product.id, variants)
+
+    def _reconcile_variants(
+        self, db: Session, product: Product, entries: list[VariantSaveIn]
+    ) -> None:
+        """Reconcilia el conjunto de presentaciones activas del producto contra `entries` (spec
+        043, FR-002, data-model.md tabla de reconciliación): las entradas sin `id` se crean, las
+        que traen `id` se actualizan (incluida una presentación **inactiva** -- así se reactiva,
+        `RN-CAT-09`), y cualquier presentación activa existente que `entries` no mencione se
+        desactiva (`RN-CAT-10`). `display_order` queda según la posición de cada entrada dentro de
+        `entries`. No hace `commit()` -- lo controla `update_product`.
+        """
+        all_existing = db.execute(
+            select(ProductVariant).where(ProductVariant.product_id == product.id)
+        ).scalars().all()
+        existing_by_id = {v.id: v for v in all_existing}
+        kept_ids = {entry.id for entry in entries if entry.id is not None}
+
+        for variant in all_existing:
+            if variant.active and variant.id not in kept_ids:
+                variant.active = False
+
+        resolved = [
+            _save_variant_entry(db, product, entry, index, existing_by_id)
+            for index, entry in enumerate(entries)
+        ]
+        _assign_display_orders(db, product.id, resolved)
+
+    def to_save_response(self, product: Product) -> ProductSaveResponse:
+        """Arma la respuesta completa de `POST`/`PATCH`/`PUT /products` (FR-006): el producto más
+        sus presentaciones activas (`product.variants` ya viene ordenado por `display_order`,
+        spec 042), cada una con su receta y sus grupos de opciones resueltos -- no se puede confiar
+        en el mapeo automático de Pydantic porque el modelo ORM expone `recipe_items`, no
+        `recipe`."""
+        base = ProductResponse.model_validate(product)
+        return ProductSaveResponse(
+            **base.model_dump(),
+            variants=[
+                VariantSaveOut(
+                    id=v.id,
+                    product_id=v.product_id,
+                    name=v.name,
+                    sku=v.sku,
+                    price=v.price,
+                    active=v.active,
+                    display_order=v.display_order,
+                    recipe=[RecipeItemResponse.model_validate(r) for r in v.recipe_items],
+                    option_groups=[
+                        VariantOptionGroupResponse.model_validate(g) for g in v.option_groups
+                    ],
+                )
+                for v in product.variants
+                if v.active
+            ],
+        )
