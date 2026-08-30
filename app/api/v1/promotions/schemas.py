@@ -11,6 +11,9 @@ class PromotionType(str, Enum):
     FIXED = "fixed"
     COMBO = "combo"
     QTY_PRICE = "qty_price"
+    # spec 040: precio de paquete por presentación de catálogo. Como `combo`, NO
+    # entra en `AUTO_TYPES` (`service.py`): se calcula agrupando varias líneas.
+    QTY_PRICE_PRESENTATION = "qty_price_presentation"
 
 
 class PromotionStatus(str, Enum):
@@ -91,6 +94,55 @@ class ComboItemIn(BaseModel):
     quantity: int = Field(1, ge=1)
 
 
+class PresentationRuleIn(BaseModel):
+    """Regla de una promoción `qty_price_presentation` (spec 040): la tripleta
+    `(presentación, cantidad mínima, precio total del paquete)` (FR-001).
+
+    `min_qty >= 1` — a diferencia de `qty_price`, aquí `1` es válido (CL-7).
+    """
+
+    presentation_id: UUID
+    min_qty: int = Field(..., ge=1)
+    pack_price: Decimal = Field(..., ge=0, max_digits=12, decimal_places=2)
+
+
+def _validate_presentation_rules_shape(
+    type_: "PromotionType | None",
+    presentation_rules: "list[PresentationRuleIn] | None",
+    targets: "list[TargetIn]",
+    combo_items: "list[ComboItemIn]",
+) -> None:
+    """Forma de `presentation_rules` común a create y shape (research.md D3/D4).
+
+    `type_` es `None` en `PromotionShapeUpdate` cuando no se cambia el tipo — el
+    servicio revalida "no vacía para `qty_price_presentation`" contra el tipo
+    real; aquí solo se validan las reglas independientes del tipo destino.
+    """
+    is_presentation = type_ == PromotionType.QTY_PRICE_PRESENTATION
+
+    if presentation_rules is not None and not is_presentation and type_ is not None:
+        raise ValueError(
+            "Las reglas por presentación solo aplican a promociones de ese tipo"
+        )
+    if is_presentation and not presentation_rules:
+        raise ValueError(
+            "Una promoción de precio por presentación necesita al menos una regla"
+        )
+    if presentation_rules:
+        ids = [r.presentation_id for r in presentation_rules]
+        if len(ids) != len(set(ids)):
+            raise ValueError("No puede haber dos reglas para la misma presentación")
+        if targets:
+            raise ValueError(
+                "Una promoción de precio por presentación define su alcance en las "
+                "reglas, no en targets"
+            )
+        if combo_items:
+            raise ValueError(
+                "Una promoción de precio por presentación no lleva combo_items"
+            )
+
+
 class _PromotionRules(BaseModel):
     """Reglas que dependen del `type` y que deben valer igual en create y update.
 
@@ -127,11 +179,25 @@ class PromotionCreate(_VigenciaMixin, _PromotionRules):
     min_qty: int = Field(1, ge=1)
     targets: list[TargetIn] = Field(default_factory=list)
     combo_items: list[ComboItemIn] = Field(default_factory=list)
+    # spec 040: reglas por presentación (`qty_price_presentation`). Requeridas y
+    # no vacías para ese tipo; prohibidas para el resto.
+    presentation_rules: list[PresentationRuleIn] | None = None
+    # Confirmación explícita de FR-017 (precio no uniforme) y FR-022 (la regla no
+    # representa un descuento real). Sin el flag, el servicio devuelve 422.
+    confirm_precio_no_uniforme: bool = False
+    confirm_sin_descuento: bool = False
 
     @model_validator(mode="after")
     def _status_on_create(self):
         if self.status == PromotionStatus.FINISHED:
             raise ValueError("Una promoción no puede crearse finalizada")
+        return self
+
+    @model_validator(mode="after")
+    def _presentation_rules_shape(self):
+        _validate_presentation_rules_shape(
+            self.type, self.presentation_rules, self.targets, self.combo_items,
+        )
         return self
 
     @model_validator(mode="after")
@@ -201,6 +267,17 @@ class PromotionShapeUpdate(BaseModel):
     type: PromotionType | None = None
     targets: list[TargetIn] | None = None
     combo_items: list[ComboItemIn] | None = None
+    presentation_rules: list[PresentationRuleIn] | None = None
+    confirm_precio_no_uniforme: bool = False
+    confirm_sin_descuento: bool = False
+
+    @model_validator(mode="after")
+    def _presentation_rules_shape(self):
+        _validate_presentation_rules_shape(
+            self.type, self.presentation_rules,
+            self.targets or [], self.combo_items or [],
+        )
+        return self
 
 
 class PromotionStatusUpdate(BaseModel):
@@ -222,6 +299,21 @@ class TargetResponse(BaseModel):
 class ComboItemResponse(BaseModel):
     product_variant_id: UUID
     quantity: int
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PresentationRuleResponse(BaseModel):
+    """Regla por presentación con el alcance ya resuelto (FR-005): el
+    `presentation_name` y cuántas variantes activas alcanza.
+
+    Los defaults de `presentation_name` / `applicable_variant_count` permiten
+    `model_validate` directo desde el ORM; el router los rellena con el nombre y
+    el conteo reales (`_serialize`)."""
+    presentation_id: UUID
+    presentation_name: str = ""
+    min_qty: int
+    pack_price: Decimal
+    applicable_variant_count: int = 0
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -249,6 +341,7 @@ class PromotionResponse(BaseModel):
     min_qty: int
     targets: list[TargetResponse] = Field(default_factory=list)
     combo_items: list[ComboItemResponse] = Field(default_factory=list)
+    presentation_rules: list[PresentationRuleResponse] = Field(default_factory=list)
     model_config = ConfigDict(from_attributes=True)
 
 
