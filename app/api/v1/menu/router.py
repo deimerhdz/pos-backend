@@ -23,11 +23,13 @@ from app.models.product_variant import ProductVariant
 from app.models.option_group import OptionGroup
 from app.models.variant_option_group import VariantOptionGroup
 from app.models.dining_table import DiningTable
-from app.api.v1.promotions.service import active_discount_promotions, best_line_discount
+from app.api.v1.promotions.service import (
+    active_discount_promotions, active_presentation_promotions, best_line_discount,
+)
 from app.api.v1.menu.schemas import (
     MenuCategoryResponse, MenuProductResponse, MenuVariantResponse,
     MenuOptionGroupResponse, MenuOptionResponse, MenuTableResponse,
-    MenuBusinessResponse,
+    MenuBusinessResponse, MenuPromotionAnnouncement, MenuPromotionRule,
 )
 
 router = APIRouter(prefix="/menu", tags=["menu"])
@@ -179,9 +181,47 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
     return result
 
 
+def _money(value: Decimal) -> str:
+    """`$12.000` — formato de pesos colombianos con separador de miles."""
+    return "$" + f"{int(value):,}".replace(",", ".")
+
+
+def _build_menu_promotions(db: Session, now: datetime) -> list[MenuPromotionAnnouncement]:
+    """Anuncios de promociones de precio por presentación **vigentes en este
+    instante** (spec 040, FR-021): `status == "active"` **y** `_valid_now`
+    verdadero (ventana de día/hora en la zona del tenant). `_build_menu` no se
+    toca. `now` viene aware (`datetime.now(timezone.utc)`), no arrastra A-08."""
+    anuncios: list[MenuPromotionAnnouncement] = []
+    for promo in active_presentation_promotions(db, now):
+        reglas = [
+            MenuPromotionRule(
+                presentation_name=r.presentation.name if r.presentation else "",
+                min_qty=r.min_qty,
+                pack_price=r.pack_price,
+                text=(
+                    f"Llevando {r.min_qty} de cualquier sabor en presentación "
+                    f"{r.presentation.name if r.presentation else ''} por "
+                    f"{_money(r.pack_price)}"
+                ),
+            )
+            for r in promo.presentation_rules
+        ]
+        if reglas:
+            anuncios.append(MenuPromotionAnnouncement(
+                promotion_id=promo.id, promotion_name=promo.name, rules=reglas,
+            ))
+    return anuncios
+
+
 @router.get("", response_model=list[MenuCategoryResponse], summary="Menú público (catálogo activo)")
 def public_menu(db: Session = Depends(get_db)):
     return _build_menu(db)
+
+
+@router.get("/promotions", response_model=list[MenuPromotionAnnouncement],
+            summary="Anuncios de promociones de precio por presentación vigentes")
+def public_menu_promotions(db: Session = Depends(get_db)):
+    return _build_menu_promotions(db, datetime.now(timezone.utc))
 
 
 # NOTA: se eliminó `GET /menu/qr/{qr_token}` (UUID plano + header x-tenant-host).
@@ -210,4 +250,6 @@ async def menu_by_signed_qr(token: str, request: Request):
             "table": MenuTableResponse.model_validate(table),
             "business": MenuBusinessResponse.model_validate(ctx.tenant),
             "menu": _build_menu(ctx.db),
+            # spec 040 (FR-021): clave aditiva; el resto del dict no cambia.
+            "promotions": _build_menu_promotions(ctx.db, datetime.now(timezone.utc)),
         }

@@ -71,6 +71,24 @@ class MenuCategoryResponse(BaseModel):
     products: list[MenuProductResponse] = Field(default_factory=list)
 
 
+class MenuPromotionRule(BaseModel):
+    presentation_name: str
+    min_qty: int
+    pack_price: Decimal
+    # Texto legible construido en el backend, p. ej.:
+    # "Llevando 2 de cualquier sabor en presentación 8oz por $12.000".
+    text: str
+
+
+class MenuPromotionAnnouncement(BaseModel):
+    """Anuncio de una promoción de precio por presentación **vigente en este
+    instante** (spec 040, FR-021). Se expone aparte de `GET /menu`: su
+    `response_model` y `_build_menu` no cambian (research.md D12)."""
+    promotion_id: UUID
+    promotion_name: str
+    rules: list[MenuPromotionRule] = Field(default_factory=list)
+
+
 class MenuTableResponse(BaseModel):
     id: UUID
     number: int
