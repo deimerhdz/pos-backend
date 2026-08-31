@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db, get_tenant
 from app.core.dependencies import require_tenant_admin
 from app.core.models import Tenant, User
+from app.core.plan_limits import require_module_access
 from app.api.v1.reports import service
 from app.api.v1.reports.schemas import (
     SalesReport, ProductRow, CategoryRow, CashierRow, InventoryRow, ProfitabilityReport,
@@ -68,12 +69,18 @@ def cashiers(
     return service.cashiers_report(db, tenant, date_from, date_to)
 
 
-@router.get("/inventory", response_model=list[InventoryRow], summary="Reporte de inventario (RF-063)")
+@router.get(
+    "/inventory", response_model=list[InventoryRow], summary="Reporte de inventario (RF-063)",
+    dependencies=[Depends(require_module_access("inventario"))],
+)
 def inventory(db: Session = Depends(get_db), _: User = Depends(require_tenant_admin)):
     return service.inventory_report(db)
 
 
-@router.get("/profitability", response_model=ProfitabilityReport, summary="Rentabilidad (RF-065)")
+@router.get(
+    "/profitability", response_model=ProfitabilityReport, summary="Rentabilidad (RF-065)",
+    dependencies=[Depends(require_module_access("inventario"))],
+)
 def profitability(
     date_from: date | None = Query(None), date_to: date | None = Query(None),
     db: Session = Depends(get_db), _: User = Depends(require_tenant_admin),
