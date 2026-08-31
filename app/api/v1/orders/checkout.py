@@ -233,18 +233,23 @@ def order_sale_lines(
             quantity=it.quantity,
             unit_price=Decimal(it.unit_price),
             combo_id=it.combo_id,
+            line_id=it.id,
         ))
     return lines
 
 
 def promo_lines_for(db: Session, lines: list[SaleLine]) -> list[dict]:
-    """`promo_lines` (product_id/category_id/quantity/line_total) para las
-    líneas que NO vienen de un combo — las de combo ya tienen su propio ahorro
-    vía `combo_discount_for_lines` y no se acumulan con percent/fixed."""
+    """`promo_lines` para el motor de promociones: un dict por línea con todo lo
+    que necesitan `combined_discount_detailed` y sus tres mecanismos —
+    `product_id`/`category_id`/`quantity`/`line_total` (percent/fixed/qty_price),
+    `combo_id` (`combo_discount_for_lines`, que ignora el resto de campos) y
+    `presentation_id`/`product_variant_id`/`unit_price`/`line_id`/`_variant_active`
+    (paquete por presentación, spec 040 FR-011/FR-015).
+
+    El motor línea-por-línea salta las líneas con `combo_id` internamente, así que
+    un combo y un percent/fixed nunca se acumulan sobre la misma línea."""
     promo_lines: list[dict] = []
     for line in lines:
-        if line.combo_id is not None:
-            continue
         variant = db.get(ProductVariant, line.product_variant_id)
         product = db.get(Product, variant.product_id) if variant else None
         promo_lines.append({
@@ -252,8 +257,24 @@ def promo_lines_for(db: Session, lines: list[SaleLine]) -> list[dict]:
             "category_id": product.category_id if product else None,
             "quantity": line.quantity,
             "line_total": line.line_total,
+            "unit_price": line.unit_price,
+            "combo_id": line.combo_id,
+            "product_variant_id": line.product_variant_id,
+            "line_id": getattr(line, "line_id", None),
+            "presentation_id": variant.presentation_id if variant else None,
+            "_variant_active": bool(variant.active) if variant else False,
         })
     return promo_lines
+
+
+def auto_discount(db: Session, lines: list[SaleLine], now: datetime) -> tuple[Decimal, UUID | None]:
+    """`(descuento_automático_total, promotion_id)` — percent/fixed/qty_price
+    línea-por-línea + ahorro de combos + paquete por presentación (spec 040),
+    todo reconciliado por línea (una sola promoción por línea, la de menor
+    total). Reemplaza el par `evaluate` + `combo_discount_for_lines` de antes
+    (contracts/cobro-y-preview.md §2)."""
+    r = promotions.combined_discount_detailed(db, promo_lines_for(db, lines), now)
+    return r.total, r.promotion_id
 
 
 def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
@@ -272,10 +293,7 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
         # Descuento automático (RF-012): percent/fixed sobre las líneas sin
         # combo, más el ahorro de los combos presentes. Antes esta orden no
         # aplicaba ninguna promoción; ahora usa el mismo motor que mostrador.
-        promo_discount, promo_id = promotions.evaluate(db, promo_lines_for(db, lines), now)
-        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
-        combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
-        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+        promo_discount, final_promotion_id = auto_discount(db, lines, now)
 
         sale = build_sale(
             db,
@@ -283,7 +301,7 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
             shift=shift,
             cashier=cashier,
             payments=data.payments,
-            discount=Decimal(data.discount) + promo_discount + combo_discount,
+            discount=Decimal(data.discount) + promo_discount,
             tax=data.tax, tip=data.tip,
             delivery_fee=order.delivery_fee or Decimal("0"),
             customer_name=order.customer_name,
@@ -464,10 +482,7 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
 
         # Descuento automático (RF-012), igual que `pay_order`: percent/fixed
         # sobre las líneas sin combo, más el ahorro de los combos presentes.
-        promo_discount, promo_id = promotions.evaluate(db, promo_lines_for(db, lines), now)
-        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
-        combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
-        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+        promo_discount, final_promotion_id = auto_discount(db, lines, now)
 
         sale = build_sale(
             db,
@@ -475,7 +490,7 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
             shift=shift,
             cashier=cashier,
             payments=data.payments,
-            discount=Decimal(data.discount) + promo_discount + combo_discount,
+            discount=Decimal(data.discount) + promo_discount,
             tax=data.tax, tip=data.tip,
             delivery_fee=order.delivery_fee or Decimal("0"),
             customer_name=data.billing_customer_name or "Consumidor Final",
@@ -877,10 +892,7 @@ def approve_payment_attempt(
 
         now = utc_now()
         lines = order_sale_lines(db, order.id)
-        promo_discount, promo_id = promotions.evaluate(db, promo_lines_for(db, lines), now)
-        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
-        combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
-        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+        promo_discount, final_promotion_id = auto_discount(db, lines, now)
         # Spec 056, research.md Decisión 5: el domicilio debe quedar incluido
         # en el ÚNICO pago que se autogenera aquí — de lo contrario queda
         # corto exactamente en ese valor y el propio chequeo `paid < total`
@@ -888,7 +900,7 @@ def approve_payment_attempt(
         delivery_fee = order.delivery_fee or Decimal("0")
         total = (
             sum((line.line_total for line in lines), Decimal("0"))
-            - promo_discount - combo_discount + delivery_fee
+            - promo_discount + delivery_fee
         )
 
         build_sale(
@@ -897,7 +909,7 @@ def approve_payment_attempt(
             shift=shift,
             cashier=user,
             payments=[PaymentIn(payment_method_id=attempt.payment_method_id, amount=total)],
-            discount=promo_discount + combo_discount,
+            discount=promo_discount,
             delivery_fee=delivery_fee,
             customer_name=order.customer_name,
             dining_table_id=order.dining_table_id,
@@ -1006,10 +1018,7 @@ def confirm_cash_payment_attempt(
 
         now = utc_now()
         lines = order_sale_lines(db, order.id)
-        promo_discount, promo_id = promotions.evaluate(db, promo_lines_for(db, lines), now)
-        combo_discount = promotions.combo_discount_for_lines(db, lines, now)
-        combo_ids_used = {line.combo_id for line in lines if line.combo_id is not None}
-        final_promotion_id = next(iter(combo_ids_used)) if len(combo_ids_used) == 1 else promo_id
+        promo_discount, final_promotion_id = auto_discount(db, lines, now)
 
         build_sale(
             db,
@@ -1017,7 +1026,7 @@ def confirm_cash_payment_attempt(
             shift=shift,
             cashier=user,
             payments=[PaymentIn(payment_method_id=attempt.payment_method_id, amount=amount_received)],
-            discount=promo_discount + combo_discount,
+            discount=promo_discount,
             delivery_fee=order.delivery_fee or Decimal("0"),
             customer_name=order.customer_name,
             dining_table_id=order.dining_table_id,

@@ -48,6 +48,7 @@ __all__ = [
     "make_dining_table", "make_table_session", "make_participant",
     "make_cart", "make_cart_item", "make_customer_order",
     "make_promotion", "make_promotion_target", "make_combo_item",
+    "make_presentation", "make_presentation_rule", "assign_presentation",
     "make_payment_method", "make_payment_attempt",
     "frozen_now",
     "build_session_context", "patched_qr_context", "patched_session_context",
@@ -64,8 +65,11 @@ from app.models.session_participant import SessionParticipant
 from app.models.cart import Cart
 from app.models.cart_item import CartItem
 from app.models.customer_order import CustomerOrder
+from app.models.presentation import Presentation
 from app.models.product_variant import ProductVariant
-from app.models.promotion import Promotion, PromotionTarget, PromotionComboItem
+from app.models.promotion import (
+    Promotion, PromotionTarget, PromotionComboItem, PromotionPresentationRule,
+)
 from app.models.payment import PaymentMethod
 from app.models.order_payment_attempt import OrderPaymentAttempt
 
@@ -98,6 +102,10 @@ _CART_TABLE_NAMES = [
     "promotions",
     "promotion_targets",
     "promotion_combo_items",
+    # spec 040: `presentation_rules` de `Promotion` + FK `presentation_id` de la
+    # variante — contrapartida de la migración `f03274730367`.
+    "presentations",
+    "promotion_presentation_rules",
     "order_cancel_logs",
     "audit_logs",
     "payment_methods",
@@ -327,6 +335,41 @@ def make_combo_item(
     db.add(obj)
     db.flush()
     return obj
+
+
+def make_presentation(db: Session, **kw) -> Presentation:
+    """spec 040: presentación de catálogo compartido del tenant."""
+    kw.setdefault("id", _uid())
+    kw.setdefault("name", f"presentacion-{kw['id']}")
+    kw.setdefault("active", True)
+    obj = Presentation(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def make_presentation_rule(
+    db: Session, promotion: Promotion, presentation: Presentation, *,
+    min_qty: int = 2, pack_price: Decimal | str | int = Decimal("0"), **kw,
+) -> PromotionPresentationRule:
+    kw.setdefault("id", _uid())
+    kw.setdefault("promotion_id", promotion.id)
+    kw.setdefault("presentation_id", presentation.id)
+    kw.setdefault("min_qty", min_qty)
+    kw.setdefault("pack_price", Decimal(str(pack_price)))
+    obj = PromotionPresentationRule(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def assign_presentation(
+    db: Session, variant: ProductVariant, presentation: Presentation | None
+) -> ProductVariant:
+    variant.presentation_id = presentation.id if presentation is not None else None
+    db.add(variant)
+    db.flush()
+    return variant
 
 
 def make_payment_method(db: Session, **kw) -> PaymentMethod:

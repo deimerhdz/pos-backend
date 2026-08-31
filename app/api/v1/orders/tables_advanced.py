@@ -16,7 +16,6 @@ from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import EN_CURSO
 from app.api.v1.orders import checkout
-from app.api.v1.promotions import service as promotions
 
 
 def _has_pending_kitchen_work(order: CustomerOrder) -> bool:
@@ -152,11 +151,8 @@ def group_bill(db: Session, group_id: UUID) -> dict:
         else:
             lines = checkout.order_sale_lines(db, o.id)
             raw = sum((l.line_total for l in lines), start=Decimal("0"))
-            promo_discount, _ = promotions.evaluate(
-                db, checkout.promo_lines_for(db, lines), now
-            )
-            combo_discount = promotions.combo_discount_for_lines(db, lines, now)
-            sub = raw - promo_discount - combo_discount
+            promo_discount, _ = checkout.auto_discount(db, lines, now)
+            sub = raw - promo_discount
             total += sub
         per_order.append({
             "order_id": o.id, "dining_table_id": o.dining_table_id,

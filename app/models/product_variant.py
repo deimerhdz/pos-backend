@@ -1,3 +1,5 @@
+import uuid
+
 from app.core.models import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy import String, Boolean, Integer, Numeric, ForeignKey, CheckConstraint, UniqueConstraint
@@ -6,6 +8,7 @@ from typing import List, Optional, TYPE_CHECKING
 from decimal import Decimal
 
 if TYPE_CHECKING:
+    from .presentation import Presentation
     from .product import Product
     from .recipe_item import RecipeItem
     from .variant_option_group import VariantOptionGroup
@@ -36,6 +39,19 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # formulario y en el detalle del Menú QR. Sin default de ORM -- toda ruta que crea
     # una variante (fixtures de test incluidas) debe asignarlo explícitamente.
     display_order: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Presentación de catálogo compartido a la que apunta esta variante (spec 040).
+    # NULL = la variante no participa de ninguna regla de promoción por presentación
+    # (FR-008). `ondelete="SET NULL"`: borrar una presentación (solo posible sin
+    # regla activa que la use, FR-020) deja la variante sin presentación, no rompe
+    # el catálogo. Indexada: el motor filtra por ella en cada cobro (research.md D5/D11).
+    presentation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("presentations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    presentation: Mapped[Optional["Presentation"]] = relationship()
 
     recipe_items: Mapped[List["RecipeItem"]] = relationship(
         back_populates="product_variant", cascade="all, delete-orphan"

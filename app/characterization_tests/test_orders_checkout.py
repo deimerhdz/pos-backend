@@ -842,5 +842,99 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(sale.total, PRECIO)
 
 
+class TestCoexistenciaPromoPresentacion(unittest.TestCase):
+    """spec 040 — FR-013 / FR-023: coexistencia del descuento por presentación con
+    las promociones `qty_price` a nivel de producto. Casos NUEVOS (no CONGELA):
+    ninguna línea acumula dos descuentos, gana la de menor total, y el recálculo
+    del pool (research.md D6) evita que una línea conserve el precio de paquete
+    cuando su pareja se fue al descuento de producto.
+    """
+
+    def _pl(self, variant, *, qty, presentation_id):
+        return {
+            "product_id": variant.product_id,
+            "category_id": None,
+            "quantity": qty,
+            "line_total": Decimal(variant.price) * qty,
+            "unit_price": Decimal(variant.price),
+            "combo_id": None,
+            "product_variant_id": variant.id,
+            "line_id": None,
+            "presentation_id": presentation_id,
+            "_variant_active": True,
+        }
+
+    def _setup(self):
+        db = fx.new_session()
+        p8 = fx.make_presentation(db, name="8oz")
+        cat = fx.make_category(db)
+        px = fx.make_product(db, name="X", category=cat)
+        py = fx.make_product(db, name="Y", category=cat)
+        vx = fx.make_variant(db, product=px, name="X 8oz", price="7000")
+        vy = fx.make_variant(db, product=py, name="Y 8oz", price="7000")
+        fx.assign_presentation(db, vx, p8)
+        fx.assign_presentation(db, vy, p8)
+        return db, p8, px, py, vx, vy
+
+    def test_una_linea_recibe_una_sola_promocion_la_de_menor_total(self):
+        db, p8, px, _, vx, _ = self._setup()
+        # producto: 2 x X por $12.000 (descuenta 2000 sobre 2 unidades a 7000)
+        prod_promo = fx.make_promotion(db, type="qty_price", value=0, status="active", min_qty=2)
+        fx.make_promotion_target(db, prod_promo, product_id=px.id, value=Decimal("12000"), min_qty=2)
+        # presentación: 2 x 8oz por $13.000 (peor: descuenta 1000)
+        pres_promo = fx.make_promotion(
+            db, type="qty_price_presentation", value=0, status="active",
+        )
+        fx.make_presentation_rule(db, pres_promo, p8, min_qty=2, pack_price="13000")
+        db.commit()
+
+        now = datetime.now(timezone.utc)
+        r = promotions.combined_discount_detailed(
+            db, [self._pl(vx, qty=2, presentation_id=p8.id)], now,
+        )
+        # gana la de producto (menor total): 2000, nunca 3000 (la suma)
+        self.assertEqual(r.total, Decimal("2000.00"))
+
+    def test_recalculo_del_pool_x_al_producto_y_a_precio_normal(self):
+        """research.md D6: 3× X + 1× Y en 8oz ($7.000), regla '2×8oz $12.000' +
+        producto '3×X $15.000' → X al producto ($15.000), Y a $7.000 → total
+        $22.000, NO $21.000 (Y no conserva el precio de paquete)."""
+        db, p8, px, _, vx, vy = self._setup()
+        prod_promo = fx.make_promotion(db, type="qty_price", value=0, status="active", min_qty=3)
+        fx.make_promotion_target(db, prod_promo, product_id=px.id, value=Decimal("15000"), min_qty=3)
+        pres_promo = fx.make_promotion(
+            db, type="qty_price_presentation", value=0, status="active",
+        )
+        fx.make_presentation_rule(db, pres_promo, p8, min_qty=2, pack_price="12000")
+        db.commit()
+
+        now = datetime.now(timezone.utc)
+        lines = [
+            self._pl(vx, qty=3, presentation_id=p8.id),
+            self._pl(vy, qty=1, presentation_id=p8.id),
+        ]
+        r = promotions.combined_discount_detailed(db, lines, now)
+        bruto = Decimal("28000")  # 4 x 7000
+        self.assertEqual(bruto - r.total, Decimal("22000.00"))
+
+    def test_fr023_nunca_deja_la_linea_peor_que_sin_promocion(self):
+        db, p8, _, _, vx, vy = self._setup()
+        # regla marcada "sin descuento": 2 x 8oz por $15.000 (> 2 x 7000)
+        pres_promo = fx.make_promotion(
+            db, type="qty_price_presentation", value=0, status="active",
+        )
+        fx.make_presentation_rule(db, pres_promo, p8, min_qty=2, pack_price="15000")
+        db.commit()
+
+        now = datetime.now(timezone.utc)
+        r = promotions.combined_discount_detailed(
+            db,
+            [self._pl(vx, qty=1, presentation_id=p8.id),
+             self._pl(vy, qty=1, presentation_id=p8.id)],
+            now,
+        )
+        self.assertEqual(r.total, Decimal("0.00"))  # nunca aplica un "descuento" negativo
+
+
 if __name__ == "__main__":
     unittest.main()

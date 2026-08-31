@@ -266,6 +266,37 @@ def _line_discount(
     return discounted_unit_price, discounted_line_total
 
 
+def _cart_promo_lines(db: Session, cart: Cart) -> list[dict]:
+    """`promo_lines` con la forma de `checkout.promo_lines_for`, para pasar las
+    líneas del carrito por `combined_discount_detailed` (spec 040): incluye
+    `presentation_id` y `_variant_active` de la variante."""
+    rows = db.execute(
+        select(
+            ProductVariant.id, ProductVariant.product_id, ProductVariant.presentation_id,
+            ProductVariant.active, Product.category_id,
+        )
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(ProductVariant.id.in_({it.product_variant_id for it in cart.items}))
+    ).all()
+    meta = {r.id: r for r in rows}
+    lines: list[dict] = []
+    for it in cart.items:
+        m = meta.get(it.product_variant_id)
+        lines.append({
+            "product_id": m.product_id if m else None,
+            "category_id": m.category_id if m else None,
+            "quantity": it.quantity,
+            "line_total": Decimal(it.unit_price) * it.quantity,
+            "unit_price": Decimal(it.unit_price),
+            "combo_id": it.combo_id,
+            "product_variant_id": it.product_variant_id,
+            "line_id": it.id,
+            "presentation_id": m.presentation_id if m else None,
+            "_variant_active": bool(m.active) if m else False,
+        })
+    return lines
+
+
 def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> CartResponse:
     now = datetime.now(timezone.utc)
     promos = promotions.active_discount_promotions(db, now)
@@ -273,7 +304,6 @@ def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> 
 
     items: list[CartItemResponse] = []
     total = Decimal("0")
-    discounted_total = Decimal("0")
     any_discount = False
     for it in cart.items:
         line_total = Decimal(it.unit_price) * it.quantity
@@ -284,7 +314,6 @@ def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> 
         )
         if discounted_line_total is not None:
             any_discount = True
-        discounted_total += discounted_line_total if discounted_line_total is not None else line_total
         items.append(CartItemResponse(
             id=it.id,
             product_variant_id=it.product_variant_id,
@@ -297,12 +326,18 @@ def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> 
             combo_id=it.combo_id,
             options=[CartItemOptionResponse.model_validate(o) for o in it.options],
         ))
+
+    # `discounted_total` refleja el mismo motor que el cobro real: percent/fixed
+    # por línea + combos + paquete por presentación (spec 040). No se persiste
+    # (FR-014); se recalcula en cada `GET /cart`.
+    combined = promotions.combined_discount_detailed(db, _cart_promo_lines(db, cart), now)
+    discounted_total = total - combined.total
     return CartResponse(
         id=cart.id, participant_id=cart.participant_id, status=cart.status,
         display_name=participant.display_name,
         display_label=participant.display_label,
         total=total,
-        discounted_total=discounted_total if any_discount else None,
+        discounted_total=discounted_total if (any_discount or combined.total > 0) else None,
         items=items,
     )
 

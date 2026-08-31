@@ -44,7 +44,7 @@ for _k, _v in {
 from app.api.v1.promotions.service import (  # noqa: E402
     _in_time_window, _line_discount, _matching_target, _valid_now, best_line_discount,
 )
-from app.models.promotion import Promotion, PromotionTarget  # noqa: E402
+from app.models.promotion import PROMOTION_TYPES, Promotion, PromotionTarget  # noqa: E402
 
 fallos: list[str] = []
 
@@ -94,6 +94,20 @@ check("01:00 cae dentro de 22:00-02:00", _in_time_window(time(1, 0), time(22, 0)
 check("15:00 queda fuera de 22:00-02:00", not _in_time_window(time(15, 0), time(22, 0), time(2, 0)))
 check("ventana normal sigue funcionando", _in_time_window(time(16, 0), time(15, 0), time(17, 0)))
 check("sin ventana, siempre dentro", _in_time_window(time(3, 0), None, None))
+
+# FR-004 / CL-8 (spec 040, A-55): con la ventana cruzando la medianoche, las horas
+# posteriores a las 00:00 pertenecen al DÍA DE INICIO para evaluar `days_of_week`.
+# `_valid_now` (no `_in_time_window`, que es pura sobre la hora) hace esa atribución.
+# Lunes 3 de agosto de 2026; ventana 22:00-02:00 solo los lunes (day_of_week="0").
+lunes_noche = promo(days_of_week="0", start_time=time(22, 0), end_time=time(2, 0))
+check("lunes 23:00 local: vigente",
+      _valid_now(lunes_noche, datetime(2026, 8, 4, 4, 0, tzinfo=timezone.utc)))
+check("martes 01:00 local: sigue siendo el lunes de inicio, vigente",
+      _valid_now(lunes_noche, datetime(2026, 8, 4, 6, 0, tzinfo=timezone.utc)))
+check("martes 03:00 local: fuera de ventana, no vigente",
+      not _valid_now(lunes_noche, datetime(2026, 8, 4, 8, 0, tzinfo=timezone.utc)))
+check("miércoles 01:00 local: el día de inicio sería el martes, no vigente",
+      not _valid_now(lunes_noche, datetime(2026, 8, 5, 6, 0, tzinfo=timezone.utc)))
 
 
 # --- 3. qty_price ----------------------------------------------------------
@@ -226,6 +240,21 @@ ahora = datetime(2026, 8, 4, 18, 0, tzinfo=timezone.utc)
 for estado in ("draft", "paused", "finished"):
     check(f"estado '{estado}' no aplica", not _valid_now(promo(status=estado), ahora))
 check("estado 'active' sí aplica", _valid_now(promo(status="active"), ahora))
+
+
+# --- 9. La columna `type` admite todos los valores de PROMOTION_TYPES -------
+# SQLite (los characterization tests) NO valida el ancho de VARCHAR; PostgreSQL
+# sí. `qty_price_presentation` (22 chars) no cabía en el `varchar(20)` original y
+# rompía el INSERT con StringDataRightTruncation -> 500. Esta comprobación pura
+# lo caza antes del deploy (spec 040).
+print("\n9. promotions.type es lo bastante ancho para todos los tipos")
+_type_len = Promotion.__table__.c.type.type.length
+_max_val = max(len(t) for t in PROMOTION_TYPES)
+check(
+    f"varchar({_type_len}) >= {_max_val} (el más largo: "
+    f"{max(PROMOTION_TYPES, key=len)!r})",
+    _type_len >= _max_val,
+)
 
 
 print("\n" + "=" * 60)
