@@ -24,8 +24,9 @@ from types import SimpleNamespace
 from unittest import mock
 import uuid
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.schema import DefaultClause
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
@@ -52,8 +53,7 @@ __all__ = [
     "make_dining_table", "make_table_session", "make_participant",
     "make_customer_order", "make_order_item", "make_order_item_void_log",
     "make_cart", "make_cart_item",
-    "make_promotion", "make_promotion_target", "make_combo_item",
-    "make_presentation", "make_presentation_rule", "assign_presentation",
+    "make_promotion", "add_variant_to_promotion",
     "make_cash_register", "make_cash_shift", "make_payment_method",
     "make_payment_attempt",
     "make_tenant_double", "make_user_double",
@@ -72,11 +72,8 @@ from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem
 from app.models.order_item_void_log import OrderItemVoidLog
 from app.models.order_payment_attempt import OrderPaymentAttempt
-from app.models.presentation import Presentation
 from app.models.product_variant import ProductVariant
-from app.models.promotion import (
-    Promotion, PromotionTarget, PromotionComboItem, PromotionPresentationRule,
-)
+from app.models.promotion import Promotion, PromotionVariant
 from app.models.cash_register import CashRegister
 from app.models.cash_shift import CashShift
 from app.models.payment import Payment, PaymentMethod
@@ -115,12 +112,8 @@ _ORDERS_TABLE_NAMES = [
     "cart_items",
     "cart_item_options",
     "promotions",
-    "promotion_targets",
-    "promotion_combo_items",
-    # spec 040: `presentation_rules` de `Promotion` + FK `presentation_id` de la
-    # variante — contrapartida de la migración `f03274730367`.
-    "presentations",
-    "promotion_presentation_rules",
+    # spec 063: conjunto explícito de variantes elegibles.
+    "promotion_variants",
     "cash_registers",
     "cash_shifts",
     "payment_methods",
@@ -167,18 +160,32 @@ def _compile_jsonb_as_json_on_sqlite(element, compiler, **kw):  # pragma: no cov
 
 
 def _patch_sqlite_incompatible_server_defaults() -> None:
-    """`sale_items.options` tiene `server_default=text("'[]'::jsonb")` — válido en
+    """`sale_items.options` y (spec 063) `sales`/`invoices`/`customer_orders.
+    applied_promotions` tienen `server_default=text("'[]'::jsonb")` — válido en
     Postgres, pero SQLite no entiende el cast `::jsonb` dentro de un `DEFAULT` de
     columna y `create_all()` falla con `OperationalError: unrecognized token`. Se
-    elimina aquí, solo en el metadata en memoria que usa este fixture (no se toca
-    `app/models/sale.py`): todos los tests de este fixture siembran `options`
-    explícito, así que el `DEFAULT` nunca hacía falta de verdad. Idempotente."""
+    elimina aquí, solo en el metadata en memoria que usa este fixture (no se
+    tocan los modelos de producción): todos los caminos de cobro siembran esos
+    campos explícito, así que el `DEFAULT` nunca hacía falta de verdad.
+    Idempotente."""
+    # `None` donde todos los caminos de siembra fijan el valor explícito;
+    # `DEFAULT '[]'` (sin cast) donde producción NO lo fija (spec 063:
+    # `create_order` no toca `applied_promotions`, se llena en el cobro).
+    strip_default = {"sale_items": ["options"]}
+    literal_default = {
+        "sales": ["applied_promotions"],
+        "invoices": ["applied_promotions"],
+        "customer_orders": ["applied_promotions"],
+    }
     for table in Base.metadata.tables.values():
-        if table.name != "sale_items":
-            continue
-        col = table.c.get("options")
-        if col is not None:
-            col.server_default = None
+        for col_name in strip_default.get(table.name, ()):
+            col = table.c.get(col_name)
+            if col is not None:
+                col.server_default = None
+        for col_name in literal_default.get(table.name, ()):
+            col = table.c.get(col_name)
+            if col is not None:
+                col.server_default = DefaultClause(text("'[]'"))
 
 
 def new_session(*, autoflush: bool = True) -> Session:
@@ -346,7 +353,6 @@ def make_promotion(db: Session, **kw) -> Promotion:
     kw.setdefault("type", "percent")
     kw.setdefault("value", Decimal("10"))
     kw.setdefault("status", "active")
-    kw.setdefault("priority", 0)
     kw.setdefault("min_qty", 1)
     kw.setdefault("start_time", None)
     kw.setdefault("end_time", None)
@@ -360,60 +366,21 @@ def make_promotion(db: Session, **kw) -> Promotion:
     return obj
 
 
-def make_promotion_target(db: Session, promotion: Promotion, **kw) -> PromotionTarget:
-    kw.setdefault("id", _uid())
-    kw.setdefault("promotion_id", promotion.id)
-    obj = PromotionTarget(**kw)
-    db.add(obj)
-    db.flush()
-    return obj
-
-
-def make_combo_item(db: Session, promotion: Promotion, variant: ProductVariant, **kw) -> PromotionComboItem:
+def add_variant_to_promotion(
+    db: Session, promotion: Promotion, variant: ProductVariant, **kw
+) -> PromotionVariant:
+    """spec 063 (FR-001): agrega una variante al conjunto elegible de la
+    promoción (`promotion_variants`)."""
     kw.setdefault("id", _uid())
     kw.setdefault("promotion_id", promotion.id)
     kw.setdefault("product_variant_id", variant.id)
-    kw.setdefault("quantity", 1)
-    obj = PromotionComboItem(**kw)
+    obj = PromotionVariant(**kw)
     db.add(obj)
     db.flush()
     return obj
 
 
-def make_presentation(db: Session, **kw) -> Presentation:
-    """spec 040: presentación de catálogo compartido del tenant."""
-    kw.setdefault("id", _uid())
-    kw.setdefault("name", f"presentacion-{kw['id']}")
-    kw.setdefault("active", True)
-    obj = Presentation(**kw)
-    db.add(obj)
-    db.flush()
-    return obj
 
-
-def make_presentation_rule(
-    db: Session, promotion: Promotion, presentation: Presentation, *,
-    min_qty: int = 2, pack_price: Decimal | str | int = Decimal("0"), **kw,
-) -> PromotionPresentationRule:
-    kw.setdefault("id", _uid())
-    kw.setdefault("promotion_id", promotion.id)
-    kw.setdefault("presentation_id", presentation.id)
-    kw.setdefault("min_qty", min_qty)
-    kw.setdefault("pack_price", Decimal(str(pack_price)))
-    obj = PromotionPresentationRule(**kw)
-    db.add(obj)
-    db.flush()
-    return obj
-
-
-def assign_presentation(
-    db: Session, variant: ProductVariant, presentation: Presentation | None
-) -> ProductVariant:
-    """Asigna (o desasigna con `None`) la presentación de una variante existente."""
-    variant.presentation_id = presentation.id if presentation is not None else None
-    db.add(variant)
-    db.flush()
-    return variant
 
 
 def make_cash_register(db: Session, **kw) -> CashRegister:
@@ -564,12 +531,8 @@ if __name__ == "__main__":
     assert cart_item.cart_id == cart.id
 
     promo = make_promotion(db)
-    target = make_promotion_target(db, promo, category_id=category.id)
-    assert target.promotion_id == promo.id
-
-    combo = make_promotion(db, type="combo", value=Decimal("11000"))
-    combo_item = make_combo_item(db, combo, variant)
-    assert combo_item.promotion_id == combo.id
+    pv = add_variant_to_promotion(db, promo, variant)
+    assert pv.promotion_id == promo.id
 
     register = make_cash_register(db)
     shift = make_cash_shift(db, register=register)

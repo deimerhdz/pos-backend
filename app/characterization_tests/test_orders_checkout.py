@@ -125,14 +125,15 @@ class TestCheckout(unittest.TestCase):
         order_cancelada = fx.make_customer_order(db, ts, status="cancelada")
         fx.make_order_item(db, order_cancelada, variant, quantity=1)
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("50"), status="active")
-        fx.make_promotion_target(db, promo, category_id=category.id)
+        promo = fx.make_promotion(db, type="percent", value=Decimal("50"), status="active", min_qty=1)
+        fx.add_variant_to_promotion(db, promo, variant)
         db.commit()
 
         resp = checkout.compute_bill(db, table.id)
 
         order_ids = {ol.order_id for ol in resp.orders}
         self.assertEqual(order_ids, {order_abierta.id, order_pagada.id})
+        # `checkout.compute_bill` es código muerto que nunca aplicó descuentos.
         self.assertEqual(resp.total, PRECIO * 2)
 
     # --------------------------------------------------- order_sale_lines (T024)
@@ -181,50 +182,55 @@ class TestCheckout(unittest.TestCase):
     # ---------------------------------------------------- promo_lines_for (T025)
 
     def test_promo_lines_for_camino_feliz_y_sin_promocion_aplicable(self):
-        """CONGELA comportamiento actual (`checkout.promo_lines_for:231-249`):
-        con una promoción activa aplicable a las líneas dadas,
-        `promotions.evaluate` sobre el resultado de `promo_lines_for`
-        devuelve el descuento esperado; sin ninguna promoción activa,
-        devuelve cero."""
+        """CONGELA comportamiento actual (`checkout.promo_lines_for`), reescrito
+        para el modelo por conjunto de variantes de la spec 063 (A-58…A-65,
+        decisión de negocio en registro-de-anomalias.md; FR-003, FR-021).
+        `promo_lines` ya no trae `product_id`/`category_id`/`presentation_id`;
+        con una promoción `percent` sobre el conjunto que contiene la variante,
+        `evaluate_variant_sets` devuelve el descuento; sin promoción, cero."""
         s = self._seed_order_con_receta()
-        db, order, category, variant = s["db"], s["order"], s["category"], s["variant"]
+        db, order, variant = s["db"], s["order"], s["variant"]
         fx.make_order_item(db, order, variant, quantity=2)
         db.commit()
 
         lines = checkout.order_sale_lines(db, order.id)
         promo_lines = checkout.promo_lines_for(db, lines)
         self.assertEqual(len(promo_lines), 1)
-        self.assertEqual(promo_lines[0]["category_id"], category.id)
+        self.assertEqual(promo_lines[0]["product_variant_id"], variant.id)
         self.assertEqual(promo_lines[0]["quantity"], 2)
-        self.assertEqual(promo_lines[0]["line_total"], PRECIO * 2)
+        self.assertEqual(promo_lines[0]["unit_price"], PRECIO)
+        self.assertIn("description", promo_lines[0])
+        self.assertNotIn("category_id", promo_lines[0])
+        self.assertNotIn("presentation_id", promo_lines[0])
 
         now = datetime.now(timezone.utc)
-        sin_promo_discount, sin_promo_id = promotions.evaluate(db, promo_lines, now)
-        self.assertEqual(sin_promo_discount, Decimal("0"))
-        self.assertIsNone(sin_promo_id)
+        r = promotions.evaluate_variant_sets(db, promo_lines, now)
+        self.assertEqual(r.total, Decimal("0"))
+        self.assertEqual(r.applied, [])
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
-        fx.make_promotion_target(db, promo, category_id=category.id)
+        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
+        fx.add_variant_to_promotion(db, promo, variant)
         db.commit()
 
-        con_promo_discount, con_promo_id = promotions.evaluate(db, promo_lines, now)
-        self.assertEqual(con_promo_discount, Decimal("2000.00"))
-        self.assertEqual(con_promo_id, promo.id)
+        r = promotions.evaluate_variant_sets(db, promo_lines, now)
+        self.assertEqual(r.total, Decimal("2000.00"))
+        self.assertEqual([a.promotion_id for a in r.applied], [promo.id])
 
     # ------------------------------------------------------------ pay_order (T026)
 
     def test_pay_order_construye_sale_real_con_promocion_activa(self):
-        """CONGELA comportamiento actual (`checkout.pay_order:250-306`,
-        spec.md Historia 2, escenario 2): orden 'bloqueada' + turno de caja
-        abierto + promoción activa sin combos → `pay_order` construye el
-        `Sale` vía `build_sale` real (sin mock), con el descuento de la
-        promoción sumado y el turno de caja correcto."""
+        """CONGELA comportamiento actual (`checkout.pay_order`), reescrito para el
+        modelo por conjunto de variantes (spec 063, A-58…A-65; FR-021): orden
+        'bloqueada' + turno abierto + promoción `percent` activa sobre el
+        conjunto → `pay_order` construye el `Sale` real con el descuento sumado,
+        `promotion_id` poblado (una sola promoción) y `applied_promotions` con la
+        entrada agregada."""
         s = self._seed_order_con_receta()
-        db, order, category, variant = s["db"], s["order"], s["category"], s["variant"]
+        db, order, variant = s["db"], s["order"], s["variant"]
         fx.make_order_item(db, order, variant, quantity=1)
         order.status = "bloqueada"
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
-        fx.make_promotion_target(db, promo, category_id=category.id)
+        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
+        fx.add_variant_to_promotion(db, promo, variant)
         register = fx.make_cash_register(db)
         shift = fx.make_cash_shift(db, register=register)
         method = fx.make_payment_method(db)
@@ -241,33 +247,31 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(sale.discount, esperado_descuento)
         self.assertEqual(sale.total, esperado_total)
         self.assertEqual(sale.promotion_id, promo.id)
+        self.assertEqual(len(sale.applied_promotions), 1)
+        self.assertEqual(sale.applied_promotions[0]["promotion_id"], str(promo.id))
+        self.assertEqual(Decimal(sale.applied_promotions[0]["amount"]), esperado_descuento)
         db.refresh(order)
         self.assertEqual(order.status, "pagada")
+        self.assertEqual(order.discount, esperado_descuento)
+        self.assertEqual(order.applied_promotions[0]["promotion_id"], str(promo.id))
 
-    def test_pay_order_dos_combos_distintos_a29_promotion_id_none(self):
-        """CONGELA comportamiento actual — A-29 (parcial, `checkout.py:268-
-        269`, spec.md Historia 2, escenario 3): líneas cobradas que usan dos
-        combos distintos → el `Sale` resultante tiene `promotion_id=None`
-        aunque el descuento monetario de ambos se sume correctamente."""
+    def test_pay_order_dos_promociones_distintas_a29_promotion_id_none(self):
+        """CONGELA comportamiento actual — A-29 (parcial), reescrito para la
+        spec 063 (A-64: `applied_promotions` resuelve A-29). Dos promociones
+        distintas descuentan líneas del mismo cobro → `Sale.promotion_id` queda
+        `None` (como hoy) **pero** `applied_promotions` registra las dos."""
         s = self._seed_order_con_receta()
         db, order, category = s["db"], s["order"], s["category"]
 
-        v1 = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("6000"))
-        v2 = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("7000"))
-        combo1 = fx.make_promotion(db, type="combo", value=Decimal("11000"), status="active")
-        fx.make_combo_item(db, combo1, v1, quantity=1)
-        fx.make_combo_item(db, combo1, v2, quantity=1)
+        v1 = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("8000"))
+        v2 = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("6000"))
+        promo1 = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
+        fx.add_variant_to_promotion(db, promo1, v1)
+        promo2 = fx.make_promotion(db, type="percent", value=Decimal("20"), status="active", min_qty=1)
+        fx.add_variant_to_promotion(db, promo2, v2)
 
-        v3 = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("3000"))
-        v4 = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("4000"))
-        combo2 = fx.make_promotion(db, type="combo", value=Decimal("6000"), status="active")
-        fx.make_combo_item(db, combo2, v3, quantity=1)
-        fx.make_combo_item(db, combo2, v4, quantity=1)
-
-        fx.make_order_item(db, order, v1, combo_id=combo1.id)
-        fx.make_order_item(db, order, v2, combo_id=combo1.id)
-        fx.make_order_item(db, order, v3, combo_id=combo2.id)
-        fx.make_order_item(db, order, v4, combo_id=combo2.id)
+        fx.make_order_item(db, order, v1, quantity=1)
+        fx.make_order_item(db, order, v2, quantity=1)
         order.status = "bloqueada"
 
         register = fx.make_cash_register(db)
@@ -276,15 +280,17 @@ class TestCheckout(unittest.TestCase):
         db.commit()
         cashier = self._user()
 
-        # combo1 ahorra 6000+7000-11000=2000; combo2 ahorra 3000+4000-6000=1000.
-        esperado_descuento = Decimal("3000.00")
-        esperado_total = Decimal("20000") - esperado_descuento
+        # promo1: 10% de 8000 = 800; promo2: 20% de 6000 = 1200.
+        esperado_descuento = Decimal("2000.00")
+        esperado_total = Decimal("14000") - esperado_descuento
 
         data = PayIn(cash_shift_id=shift.id, payments=[self._pago(method.id, esperado_total)])
         sale = checkout.pay_order(db, order.id, data, cashier)
 
         self.assertEqual(sale.discount, esperado_descuento)
         self.assertIsNone(sale.promotion_id)
+        registradas = {e["promotion_id"] for e in sale.applied_promotions}
+        self.assertEqual(registradas, {str(promo1.id), str(promo2.id)})
 
     # ---------------------------------------- spec 056: valor del domicilio en pay_order
 
@@ -842,98 +848,10 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(sale.total, PRECIO)
 
 
-class TestCoexistenciaPromoPresentacion(unittest.TestCase):
-    """spec 040 — FR-013 / FR-023: coexistencia del descuento por presentación con
-    las promociones `qty_price` a nivel de producto. Casos NUEVOS (no CONGELA):
-    ninguna línea acumula dos descuentos, gana la de menor total, y el recálculo
-    del pool (research.md D6) evita que una línea conserve el precio de paquete
-    cuando su pareja se fue al descuento de producto.
-    """
-
-    def _pl(self, variant, *, qty, presentation_id):
-        return {
-            "product_id": variant.product_id,
-            "category_id": None,
-            "quantity": qty,
-            "line_total": Decimal(variant.price) * qty,
-            "unit_price": Decimal(variant.price),
-            "combo_id": None,
-            "product_variant_id": variant.id,
-            "line_id": None,
-            "presentation_id": presentation_id,
-            "_variant_active": True,
-        }
-
-    def _setup(self):
-        db = fx.new_session()
-        p8 = fx.make_presentation(db, name="8oz")
-        cat = fx.make_category(db)
-        px = fx.make_product(db, name="X", category=cat)
-        py = fx.make_product(db, name="Y", category=cat)
-        vx = fx.make_variant(db, product=px, name="X 8oz", price="7000")
-        vy = fx.make_variant(db, product=py, name="Y 8oz", price="7000")
-        fx.assign_presentation(db, vx, p8)
-        fx.assign_presentation(db, vy, p8)
-        return db, p8, px, py, vx, vy
-
-    def test_una_linea_recibe_una_sola_promocion_la_de_menor_total(self):
-        db, p8, px, _, vx, _ = self._setup()
-        # producto: 2 x X por $12.000 (descuenta 2000 sobre 2 unidades a 7000)
-        prod_promo = fx.make_promotion(db, type="qty_price", value=0, status="active", min_qty=2)
-        fx.make_promotion_target(db, prod_promo, product_id=px.id, value=Decimal("12000"), min_qty=2)
-        # presentación: 2 x 8oz por $13.000 (peor: descuenta 1000)
-        pres_promo = fx.make_promotion(
-            db, type="qty_price_presentation", value=0, status="active",
-        )
-        fx.make_presentation_rule(db, pres_promo, p8, min_qty=2, pack_price="13000")
-        db.commit()
-
-        now = datetime.now(timezone.utc)
-        r = promotions.combined_discount_detailed(
-            db, [self._pl(vx, qty=2, presentation_id=p8.id)], now,
-        )
-        # gana la de producto (menor total): 2000, nunca 3000 (la suma)
-        self.assertEqual(r.total, Decimal("2000.00"))
-
-    def test_recalculo_del_pool_x_al_producto_y_a_precio_normal(self):
-        """research.md D6: 3× X + 1× Y en 8oz ($7.000), regla '2×8oz $12.000' +
-        producto '3×X $15.000' → X al producto ($15.000), Y a $7.000 → total
-        $22.000, NO $21.000 (Y no conserva el precio de paquete)."""
-        db, p8, px, _, vx, vy = self._setup()
-        prod_promo = fx.make_promotion(db, type="qty_price", value=0, status="active", min_qty=3)
-        fx.make_promotion_target(db, prod_promo, product_id=px.id, value=Decimal("15000"), min_qty=3)
-        pres_promo = fx.make_promotion(
-            db, type="qty_price_presentation", value=0, status="active",
-        )
-        fx.make_presentation_rule(db, pres_promo, p8, min_qty=2, pack_price="12000")
-        db.commit()
-
-        now = datetime.now(timezone.utc)
-        lines = [
-            self._pl(vx, qty=3, presentation_id=p8.id),
-            self._pl(vy, qty=1, presentation_id=p8.id),
-        ]
-        r = promotions.combined_discount_detailed(db, lines, now)
-        bruto = Decimal("28000")  # 4 x 7000
-        self.assertEqual(bruto - r.total, Decimal("22000.00"))
-
-    def test_fr023_nunca_deja_la_linea_peor_que_sin_promocion(self):
-        db, p8, _, _, vx, vy = self._setup()
-        # regla marcada "sin descuento": 2 x 8oz por $15.000 (> 2 x 7000)
-        pres_promo = fx.make_promotion(
-            db, type="qty_price_presentation", value=0, status="active",
-        )
-        fx.make_presentation_rule(db, pres_promo, p8, min_qty=2, pack_price="15000")
-        db.commit()
-
-        now = datetime.now(timezone.utc)
-        r = promotions.combined_discount_detailed(
-            db,
-            [self._pl(vx, qty=1, presentation_id=p8.id),
-             self._pl(vy, qty=1, presentation_id=p8.id)],
-            now,
-        )
-        self.assertEqual(r.total, Decimal("0.00"))  # nunca aplica un "descuento" negativo
+# spec 063 (A-58…A-65): la clase `TestCoexistenciaPromoPresentacion` (spec 040,
+# no CONGELA) se elimina — el motor por conjunto no tiene "pool" ni
+# reconciliación entre mecanismos (FR-014 garantiza una promoción por línea). Su
+# cobertura equivalente vive en `test_promotions_service.py` (US2).
 
 
 if __name__ == "__main__":

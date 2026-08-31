@@ -208,36 +208,16 @@ class TestTablesAdvanced(unittest.TestCase):
         variant = fx.make_variant(db, product=product, price=Decimal("15000"))
         fx.make_order_item(db, order_b, variant)
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
-        fx.make_promotion_target(db, promo, category_id=category.id)
+        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
+        fx.add_variant_to_promotion(db, promo, variant)
 
         group_id = tables_advanced.merge_orders(db, [order_b.id])["merged_group_id"]
 
         bill = tables_advanced.group_bill(db, group_id)
         self.assertEqual(bill["total"], Decimal("13500"))
 
-    def test_group_bill_aplica_combo_vigente_sin_terminales_fr_002(self):
-        """CONGELA comportamiento corregido — FR-002/SC-002 (combos): además
-        de `percent`/`fixed`, `group_bill` también descuenta un combo
-        vigente vía `combo_discount_for_lines` — gap de cobertura detectado
-        en /speckit-analyze (G1: FR-002 solo tenía test de promoción
-        `percent`, ningún escenario de combo). Combo de 2 unidades de una
-        variante a $10.000 c/u ($20.000 normal) por un bundle de $18.000 →
-        descuento de $2.000."""
-        db, table_b, ts_b, order_b = self._seed_table_con_orden_activa(status="abierta")
-
-        category = fx.make_category(db)
-        product = fx.make_product(db, category=category)
-        variant = fx.make_variant(db, product=product, price=PRECIO)
-
-        combo = fx.make_promotion(db, type="combo", value=Decimal("18000"), status="active")
-        fx.make_combo_item(db, combo, variant, quantity=2)
-        fx.make_order_item(db, order_b, variant, quantity=2, combo_id=combo.id)
-
-        group_id = tables_advanced.merge_orders(db, [order_b.id])["merged_group_id"]
-
-        bill = tables_advanced.group_bill(db, group_id)
-        self.assertEqual(bill["total"], Decimal("18000"))
+    # spec 063 (FR-024, A-61): `test_group_bill_aplica_combo_vigente_sin_terminales_fr_002`
+    # se elimina — el tipo `combo` y su mecanismo de selección se retiran.
 
     def test_group_bill_excluye_items_anulados_de_orden_billable_fr_003(self):
         """CONGELA comportamiento — FR-003 (sin cambio, se conserva): un
@@ -281,8 +261,9 @@ class TestTablesAdvanced(unittest.TestCase):
         fx.make_order_item(db, order_a, variant_a)
         fx.make_order_item(db, order_b, variant_b)
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
-        fx.make_promotion_target(db, promo, category_id=category.id)
+        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
+        fx.add_variant_to_promotion(db, promo, variant_a)
+        fx.add_variant_to_promotion(db, promo, variant_b)
 
         # `merge_orders` rechaza órdenes ya terminales: las dos se fusionan
         # mientras están 'abierta' y el status terminal de A se fija después,
@@ -318,8 +299,9 @@ class TestTablesAdvanced(unittest.TestCase):
         order_b = fx.make_customer_order(db, ts, status="abierta")
         fx.make_order_item(db, order_b, variant_b)
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
-        fx.make_promotion_target(db, promo, category_id=category.id)
+        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
+        fx.add_variant_to_promotion(db, promo, variant_a)
+        fx.add_variant_to_promotion(db, promo, variant_b)
         db.commit()
 
         # Mismo patrón que el test anterior: se fusionan mientras están

@@ -3,30 +3,35 @@
     python -m app.scripts.test_promotions_rules
 
 **No toca la base de datos.** A diferencia del resto de `app/scripts/test_*`,
-que trabajan sobre un tenant real, esto ejercita funciones puras
-(`_valid_now`, `_in_time_window`, `_line_discount`, `best_line_discount`) con
-objetos `Promotion` sin sesión. Por eso puede correr en CI, que es donde debería
-estar corriendo antes de cada deploy.
+que trabajan sobre un tenant real, esto ejercita **funciones puras** del motor
+por conjunto de variantes de la spec 063 (`_valid_now`, `_in_time_window`,
+`_greedy_units`, `_distribute_group_discount`, `variant_set_condition_text`) con
+objetos sin sesión. Por eso puede correr en CI, antes de cada deploy.
 
-Cubre lo que no tenía ninguna prueba:
+spec 063-promociones-por-variante (decisión de negocio A-58…A-65,
+registro-de-anomalias.md). Reescritura completa: se fueron `priority`,
+`_matching_target` y `_line_discount` de `qty_price`/`fixed`
+(contracts/migracion.md §2.5). Cubre:
 
-  1. La vigencia se evalúa en **hora local**, no en UTC. Antes, en UTC-5, un
-     "20% los martes" arrancaba el lunes a las 19:00 locales.
-  2. Ventana horaria que **cruza medianoche** (22:00-02:00). Antes era
-     insatisfacible: la promo se veía activa y descontaba cero para siempre.
-  3. `qty_price` descuenta por **paquetes completos** y deja el remanente a
-     precio normal.
-  4. `priority` decide el conflicto; el descuento mayor solo desempata.
-  5. Las promociones **no se acumulan**: una sola gana por línea.
-  6. Ninguna línea queda en negativo.
+  1. Vigencia en **hora local**, no en UTC (A-08) + cruce de medianoche +
+     atribución de día al cruzar medianoche (**A-57 conservado**).
+  2. **Consumo codicioso descendente** de precio: el grupo toma las unidades más
+     caras (FR-008); grupos completos + remanente a precio normal (FR-007).
+  3. `package_price`: descuento del grupo = `Σ normal − value`, topado en 0
+     (FR-006, FR-009). `percent`: `round(value% × Σ normal)` a peso (FR-006).
+  4. `_distribute_group_discount` con **división no exacta**: residuo a la
+     variante de id más alto; `Σ descuentos por línea == descuento del grupo`,
+     al peso, en cualquier orden (FR-008a, SC-005).
+  5. Un grupo **nunca encarece** (FR-009).
+  6. El `type` **de entrada** admite exactamente `{percent, package_price}`.
 """
 import os
 from datetime import datetime, time, timezone
-from decimal import Decimal
-from uuid import uuid4
+from decimal import ROUND_HALF_UP, Decimal
+from types import SimpleNamespace
+from uuid import UUID
 
-# Sin .env real: `Settings` exige credenciales que este script no usa. Se
-# rellenan con valores inertes para que el import no falle en CI.
+# Sin .env real: `Settings` exige credenciales que este script no usa.
 for _k, _v in {
     "DATABASE_URL": "postgresql+psycopg://x:x@localhost/x",
     "REDIS_URL": "redis://localhost:6379/0",
@@ -42,9 +47,11 @@ for _k, _v in {
     os.environ.setdefault(_k, _v)
 
 from app.api.v1.promotions.service import (  # noqa: E402
-    _in_time_window, _line_discount, _matching_target, _valid_now, best_line_discount,
+    _distribute_group_discount, _greedy_units, _in_time_window, _valid_now,
+    variant_set_condition_text,
 )
-from app.models.promotion import PROMOTION_TYPES, Promotion, PromotionTarget  # noqa: E402
+from app.api.v1.promotions.schemas import PromotionType  # noqa: E402
+from app.models.promotion import PROMOTION_TYPES, Promotion  # noqa: E402
 
 fallos: list[str] = []
 
@@ -58,47 +65,50 @@ def check(nombre: str, ok: bool) -> None:
 def promo(**kw) -> Promotion:
     base = dict(
         name=kw.pop("name", "p"), type="percent", value=Decimal("10"),
-        status="active", priority=0, min_qty=1,
+        status="active", min_qty=1,
     )
     base.update(kw)
     p = Promotion(**base)
-    # `created_at` es server_default; sin sesión hay que ponerlo a mano porque
-    # es el tercer criterio de desempate.
     p.created_at = kw.get("created_at", datetime(2026, 1, 1))
     return p
 
 
-# --- 1. Hora local, no UTC -------------------------------------------------
-print("\n1. Vigencia en hora local del tenant")
+def unit(line_index, price, pv_id, line_id=None):
+    return (line_index, Decimal(str(price)), pv_id, line_id or pv_id)
 
-# Martes 4 de agosto de 2026, 20:00 en Bogotá = miércoles 5, 01:00 UTC.
-utc_miercoles = datetime(2026, 8, 5, 1, 0, tzinfo=timezone.utc)
-martes = promo(days_of_week="1")  # 0=lunes..6=domingo -> 1 = martes
-check("martes 20:00 local sigue siendo martes", _valid_now(martes, utc_miercoles))
 
-miercoles = promo(days_of_week="2")
-check("no se adelanta al miércoles", not _valid_now(miercoles, utc_miercoles))
+def descuento_grupo(tipo, value, block):
+    """Descuento de un grupo completo (research.md D5.d)."""
+    normal_g = sum((u[1] for u in block), Decimal(0))
+    if tipo == "package_price":
+        return max(Decimal(0), normal_g - Decimal(str(value)))
+    return (normal_g * Decimal(str(value)) / Decimal(100)).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP
+    )
 
-# Happy hour 15:00-17:00 local = 20:00-22:00 UTC.
+
+# --- 1. Hora local + cruce de medianoche + A-57 ---------------------------
+print("\n1. Vigencia en hora local del tenant (A-08) y cruce de medianoche (A-57)")
+
+utc_miercoles = datetime(2026, 8, 5, 1, 0, tzinfo=timezone.utc)  # martes 20:00 Bogotá
+check("martes 20:00 local sigue siendo martes",
+      _valid_now(promo(days_of_week="1"), utc_miercoles))
+check("no se adelanta al miércoles",
+      not _valid_now(promo(days_of_week="2"), utc_miercoles))
+
 hh = promo(start_time=time(15, 0), end_time=time(17, 0))
 check("happy hour 15-17 aplica a las 16:00 locales",
       _valid_now(hh, datetime(2026, 8, 4, 21, 0, tzinfo=timezone.utc)))
 check("happy hour 15-17 no aplica a las 10:00 locales",
       not _valid_now(hh, datetime(2026, 8, 4, 15, 0, tzinfo=timezone.utc)))
 
-
-# --- 2. Ventana que cruza medianoche ---------------------------------------
-print("\n2. Ventana horaria con cruce de medianoche")
 check("23:00 cae dentro de 22:00-02:00", _in_time_window(time(23, 0), time(22, 0), time(2, 0)))
 check("01:00 cae dentro de 22:00-02:00", _in_time_window(time(1, 0), time(22, 0), time(2, 0)))
 check("15:00 queda fuera de 22:00-02:00", not _in_time_window(time(15, 0), time(22, 0), time(2, 0)))
-check("ventana normal sigue funcionando", _in_time_window(time(16, 0), time(15, 0), time(17, 0)))
 check("sin ventana, siempre dentro", _in_time_window(time(3, 0), None, None))
 
-# FR-004 / CL-8 (spec 040, A-55): con la ventana cruzando la medianoche, las horas
-# posteriores a las 00:00 pertenecen al DÍA DE INICIO para evaluar `days_of_week`.
-# `_valid_now` (no `_in_time_window`, que es pura sobre la hora) hace esa atribución.
-# Lunes 3 de agosto de 2026; ventana 22:00-02:00 solo los lunes (day_of_week="0").
+# A-57: con la ventana cruzando la medianoche, las horas posteriores a las 00:00
+# pertenecen al DÍA DE INICIO para evaluar `days_of_week`.
 lunes_noche = promo(days_of_week="0", start_time=time(22, 0), end_time=time(2, 0))
 check("lunes 23:00 local: vigente",
       _valid_now(lunes_noche, datetime(2026, 8, 4, 4, 0, tzinfo=timezone.utc)))
@@ -110,151 +120,103 @@ check("miércoles 01:00 local: el día de inicio sería el martes, no vigente",
       not _valid_now(lunes_noche, datetime(2026, 8, 5, 6, 0, tzinfo=timezone.utc)))
 
 
-# --- 3. qty_price ----------------------------------------------------------
-print("\n3. qty_price: 2 granizados por 8000 (precio normal 5000 c/u)")
-pack = promo(type="qty_price", value=Decimal("0"), min_qty=2)
-# El precio vive en el destino: la promoción ya no tiene paquete propio.
-destino = PromotionTarget(product_id=None, category_id=None,
-                          value=Decimal("8000"), min_qty=2)
+# --- 2. Consumo codicioso descendente + grupos completos -----------------
+print("\n2. Consumo codicioso: el grupo toma las unidades más caras (FR-008)")
 
-d = _line_discount(pack, destino, Decimal("10000"), 2, Decimal("5000"))
-check("2 unidades descuentan 2000", d == Decimal("2000"))
+V1, V2, V3 = UUID(int=1), UUID(int=2), UUID(int=3)
+unidades = [unit(0, 11000, V1), unit(0, 11000, V1), unit(1, 8000, V2), unit(1, 8000, V2)]
+grupos = _greedy_units(unidades, 3)
+check("4 unidades, min_qty 3 -> 1 grupo", len(grupos) == 1)
+precios_grupo = sorted((u[1] for u in grupos[0]), reverse=True)
+check("el grupo toma 11.000 + 11.000 + 8.000 (las 3 más caras)",
+      precios_grupo == [Decimal("11000"), Decimal("11000"), Decimal("8000")])
 
-d = _line_discount(pack, destino, Decimal("15000"), 3, Decimal("5000"))
-check("3 unidades: un paquete + remanente a precio normal", d == Decimal("2000"))
+check("2 unidades, min_qty 3 -> 0 grupos (remanente a precio normal, FR-007)",
+      _greedy_units([unit(0, 8000, V1), unit(0, 8000, V1)], 3) == [])
 
-d = _line_discount(pack, destino, Decimal("20000"), 4, Decimal("5000"))
-check("4 unidades: dos paquetes", d == Decimal("4000"))
-
-d = _line_discount(pack, destino, Decimal("5000"), 1, Decimal("5000"))
-check("1 unidad no arma paquete: descuento 0", d == Decimal("0"))
-
-caro_t = PromotionTarget(product_id=None, category_id=None,
-                         value=Decimal("99000"), min_qty=2)
-caro = promo(type="qty_price", value=Decimal("0"), min_qty=2)
-check("un paquete más caro que sus partes nunca encarece",
-      _line_discount(caro, caro_t, Decimal("10000"), 2, Decimal("5000")) == Decimal("0"))
-
-# Fallo seguro: sin precio en el destino no hay descuento, nunca la línea entera.
-check("un destino sin precio no descuenta",
-      _line_discount(pack, None, Decimal("10000"), 2, Decimal("5000")) == Decimal("0"))
-sin_precio = PromotionTarget(product_id=None, category_id=None, value=None, min_qty=None)
-check("un destino a medias tampoco descuenta",
-      _line_discount(pack, sin_precio, Decimal("10000"), 2, Decimal("5000")) == Decimal("0"))
+seis = [unit(i, 8000, UUID(int=i + 1)) for i in range(6)]
+check("6 unidades, min_qty 2 -> 3 grupos de 2", len(_greedy_units(seis, 2)) == 3)
 
 
-# --- 3b. Precio de paquete por producto ------------------------------------
-print("\n3b. Precio y paquete por target: el más específico gana")
+# --- 3. Descuento por grupo: package_price y percent ---------------------
+print("\n3. Descuento del grupo (FR-006, FR-009)")
 
-CAT = uuid4()
-GRANDE = uuid4()
-PEQUENA = uuid4()
+pkg_block = [unit(0, 8000, V1), unit(1, 8000, V2)]
+check("package_price: Σ16.000 - 12.000 = 4.000",
+      descuento_grupo("package_price", 12000, pkg_block) == Decimal("4000"))
+check("package_price que iguala o supera el normal -> 0 (nunca encarece)",
+      descuento_grupo("package_price", 20000, pkg_block) == Decimal("0"))
 
-# "Toda la categoría 2 por 10.000, salvo la Grande que va 2 por 12.000".
-por_producto = promo(name="ensaladas", type="qty_price", value=Decimal("10000"), min_qty=2)
-por_producto.targets = [
-    PromotionTarget(category_id=CAT, product_id=None, value=Decimal("10000"), min_qty=2),
-    PromotionTarget(product_id=GRANDE, category_id=None, value=Decimal("12000"), min_qty=2),
-]
-
-aplica, t = _matching_target(por_producto, GRANDE, CAT)
-check("el target de producto gana al de su categoría", aplica and t.value == Decimal("12000"))
-
-aplica, t = _matching_target(por_producto, PEQUENA, CAT)
-check("un producto sin fila propia usa el precio de su categoría",
-      aplica and t.value == Decimal("10000"))
-
-aplica, t = _matching_target(por_producto, uuid4(), uuid4())
-check("fuera del alcance no aplica", not aplica)
-
-# Grande: normal 16.000 c/u; 2 unidades = 32.000, paquete a 12.000 -> 20.000.
-_, t = _matching_target(por_producto, GRANDE, CAT)
-d = _line_discount(por_producto, t, Decimal("32000"), 2, Decimal("16000"))
-check("2 Grandes descuentan 20.000 con su precio propio", d == Decimal("20000"))
-
-# Pequeña: normal 9.000 c/u; 2 unidades = 18.000, hereda el 10.000 -> 8.000.
-_, t = _matching_target(por_producto, PEQUENA, CAT)
-d = _line_discount(por_producto, t, Decimal("18000"), 2, Decimal("9000"))
-check("2 Pequeñas usan el precio de la categoría y descuentan 8.000", d == Decimal("8000"))
-
-# Paquete de tamaño distinto por producto: 3 Pequeñas por 20.000.
-tres = PromotionTarget(product_id=PEQUENA, category_id=None,
-                       value=Decimal("20000"), min_qty=3)
-por_producto.targets.append(tres)
-_, t = _matching_target(por_producto, PEQUENA, CAT)
-check("el target de producto también manda en el tamaño", t.min_qty == 3)
-d = _line_discount(por_producto, t, Decimal("36000"), 4, Decimal("9000"))
-check("4 Pequeñas: un paquete de 3 (27.000 -> 20.000) y una suelta", d == Decimal("7000"))
-d = _line_discount(por_producto, t, Decimal("18000"), 2, Decimal("9000"))
-check("2 Pequeñas ya no arman el paquete de 3", d == Decimal("0"))
+pct_block = [unit(0, 11000, V1), unit(0, 11000, V1), unit(1, 8000, V2)]
+check("percent 15% de Σ30.000 = 4.500 (redondeado a peso)",
+      descuento_grupo("percent", 15, pct_block) == Decimal("4500"))
+check("percent 10% de 23.000 = 2.300",
+      descuento_grupo("percent", 10, [unit(0, 15000, V1), unit(1, 8000, V2)]) == Decimal("2300"))
 
 
-# --- 4. Prioridad ----------------------------------------------------------
-print("\n4. La prioridad decide, el descuento solo desempata")
-baja_pero_grande = promo(name="30% global", value=Decimal("30"), priority=0)
-alta_pero_chica = promo(name="5% dirigida", value=Decimal("5"), priority=10)
+# --- 4. Reparto por importe cobrado + división no exacta (FR-008a, SC-005) -
+print("\n4. _distribute_group_discount: cuadra al peso, residuo a la variante de id más alto")
 
-monto, ganador = best_line_discount(
-    [baja_pero_grande, alta_pero_chica], None, None, 1, Decimal("10000")
-)
-check("gana la de mayor prioridad aunque descuente menos", ganador == alta_pero_chica.id)
-check("y descuenta lo suyo, no lo de la otra", monto == Decimal("500"))
+# "3 Pequeños sin licor por 16.000": 3 x 6.000, descuento del grupo 2.000.
+alta = UUID(int=99)
+block = [unit(0, 6000, UUID(int=1)), unit(1, 6000, UUID(int=2)), unit(2, 6000, alta)]
+rep = _distribute_group_discount(block, Decimal("2000"))
+check("Σ descuentos por línea == 2.000 (al peso)", sum(rep.values()) == Decimal("2000"))
+check("la variante de id más alto descuenta menos (666), las otras 667",
+      sorted(rep.values()) == [Decimal("666"), Decimal("667"), Decimal("667")]
+      and rep[2] == Decimal("666"))
 
-a = promo(name="a", value=Decimal("10"), priority=5)
-b = promo(name="b", value=Decimal("20"), priority=5)
-monto, ganador = best_line_discount([a, b], None, None, 1, Decimal("10000"))
-check("a igual prioridad gana el descuento mayor", ganador == b.id)
+# Mismo grupo, unidades pasadas en otro orden -> el reparto no cambia: la
+# variante de id más alto (`alta`, aquí en line_index 2) sigue descontando 666.
+block_rev = [unit(2, 6000, alta), unit(1, 6000, UUID(int=2)), unit(0, 6000, UUID(int=1))]
+rep_rev = _distribute_group_discount(block_rev, Decimal("2000"))
+check("otro orden de las unidades -> mismo total", sum(rep_rev.values()) == Decimal("2000"))
+check("otro orden -> la variante de id más alto sigue en 666", rep_rev[2] == Decimal("666"))
 
+# "15% llevando 3 medianos": grupo 2x11.000 + 1x8.000, descuento 4.500.
+grp = [unit(0, 11000, V1), unit(0, 11000, V1), unit(1, 8000, V2)]
+rep2 = _distribute_group_discount(grp, Decimal("4500"))
+check("reparto -3.300 / -1.200", sorted(rep2.values()) == [Decimal("1200"), Decimal("3300")])
+check("Σ == 4.500", sum(rep2.values()) == Decimal("4500"))
 
-# --- 5. No acumulación -----------------------------------------------------
-print("\n5. Una sola promoción por línea")
-p1 = promo(name="p1", value=Decimal("10"))
-p2 = promo(name="p2", value=Decimal("20"))
-monto, _ = best_line_discount([p1, p2], None, None, 1, Decimal("10000"))
-check("10% + 20% no suman 30%", monto == Decimal("2000"))
-
-
-# --- 6. Nunca negativo -----------------------------------------------------
-print("\n6. Ninguna línea queda en negativo")
-fijo = promo(type="fixed", value=Decimal("50000"))
-check("un fijo mayor que la línea se topa en el total de la línea",
-      _line_discount(fijo, None, Decimal("3000"), 1, Decimal("3000")) == Decimal("3000"))
-
-cien = promo(value=Decimal("100"))
-check("100% descuenta exactamente la línea",
-      _line_discount(cien, None, Decimal("3000"), 1, Decimal("3000")) == Decimal("3000"))
+# 2X8.000 -> 12.000: descuento 4.000, dos líneas de una unidad -> -2.000 c/u.
+rep3 = _distribute_group_discount([unit(0, 8000, V1), unit(1, 8000, V2)], Decimal("4000"))
+check("2X: -2.000 por línea", sorted(rep3.values()) == [Decimal("2000"), Decimal("2000")])
 
 
-# --- 7. min_qty ------------------------------------------------------------
-print("\n7. min_qty se mide por línea")
-tres = promo(value=Decimal("10"), min_qty=3)
-monto, _ = best_line_discount([tres], None, None, 2, Decimal("10000"))
-check("2 unidades no alcanzan min_qty=3", monto == Decimal("0"))
-monto, _ = best_line_discount([tres], None, None, 3, Decimal("15000"))
-check("3 unidades sí", monto == Decimal("1500"))
+# --- 5. Textos de condición (español de Colombia) ------------------------
+print("\n5. variant_set_condition_text")
+
+def _promo_texto(tipo, value, min_qty, n):
+    # `variant_set_condition_text` solo lee `type`/`value`/`min_qty`/`len(variants)`.
+    fake = SimpleNamespace(
+        type=tipo, value=Decimal(str(value)), min_qty=min_qty,
+        variants=[object()] * n,
+    )
+    return variant_set_condition_text(fake)
+
+check("package_price min_qty>1",
+      _promo_texto("package_price", 12000, 2, 8) == "Llevando 2 de estas 8 variantes pagas $12.000")
+check("package_price min_qty 1",
+      _promo_texto("package_price", 5000, 1, 3) == "Cada una de estas 3 variantes a $5.000")
+check("percent min_qty 1",
+      _promo_texto("percent", 10, 1, 5) == "10% en estas 5 variantes")
+check("percent min_qty>1",
+      _promo_texto("percent", 15, 3, 4) == "15% llevando 3 de estas 4 variantes")
+check("promoción finished de tipo viejo -> condition_text None",
+      _promo_texto("combo", 0, 1, 0) is None)
 
 
-# --- 8. Estados ------------------------------------------------------------
-print("\n8. Solo 'active' descuenta")
-ahora = datetime(2026, 8, 4, 18, 0, tzinfo=timezone.utc)
-for estado in ("draft", "paused", "finished"):
-    check(f"estado '{estado}' no aplica", not _valid_now(promo(status=estado), ahora))
-check("estado 'active' sí aplica", _valid_now(promo(status="active"), ahora))
-
-
-# --- 9. La columna `type` admite todos los valores de PROMOTION_TYPES -------
-# SQLite (los characterization tests) NO valida el ancho de VARCHAR; PostgreSQL
-# sí. `qty_price_presentation` (22 chars) no cabía en el `varchar(20)` original y
-# rompía el INSERT con StringDataRightTruncation -> 500. Esta comprobación pura
-# lo caza antes del deploy (spec 040).
-print("\n9. promotions.type es lo bastante ancho para todos los tipos")
+# --- 6. El enum de ENTRADA admite exactamente {percent, package_price} ---
+print("\n6. Tipos vivos")
+check("PromotionType de entrada = {percent, package_price}",
+      {t.value for t in PromotionType} == {"percent", "package_price"})
+check("PROMOTION_TYPES conserva los viejos + package_price (lee las finished)",
+      set(PROMOTION_TYPES) == {"percent", "fixed", "combo", "qty_price",
+                               "qty_price_presentation", "package_price"})
 _type_len = Promotion.__table__.c.type.type.length
-_max_val = max(len(t) for t in PROMOTION_TYPES)
-check(
-    f"varchar({_type_len}) >= {_max_val} (el más largo: "
-    f"{max(PROMOTION_TYPES, key=len)!r})",
-    _type_len >= _max_val,
-)
+check(f"varchar({_type_len}) admite el más largo ({max(PROMOTION_TYPES, key=len)!r})",
+      _type_len >= max(len(t) for t in PROMOTION_TYPES))
 
 
 print("\n" + "=" * 60)

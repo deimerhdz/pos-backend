@@ -323,29 +323,8 @@ class TestConsolidation(unittest.TestCase):
 
     # ---------------------------------------- add_item_to_table combo (T019)
 
-    def test_add_item_to_table_combo_expande_componentes_a_precio_normal(self):
-        """CONGELA comportamiento actual (spec.md Historia 1, escenario 5): un
-        `combo_id` válido se expande en sus componentes reales a precio
-        normal (sin el ahorro del combo, que se calcula al cobrar) —
-        `consolidation.py` docstring y `checkout.pay_order`."""
-        db = fx.new_session()
-        table = fx.make_dining_table(db)
-        _, _, variant_1, _ = self._seed_variant_con_receta(db, price=Decimal("6000"))
-        _, _, variant_2, _ = self._seed_variant_con_receta(db, price=Decimal("7000"))
-        combo = fx.make_promotion(db, type="combo", value=Decimal("11000"), status="active")
-        fx.make_combo_item(db, combo, variant_1, quantity=1)
-        fx.make_combo_item(db, combo, variant_2, quantity=1)
-        db.commit()
-        user = self._user()
-
-        data = OrderItemIn(combo_id=combo.id, quantity=1)
-        order = consolidation.add_item_to_table(db, table.id, data, user)
-
-        self.assertEqual(len(order.items), 2)
-        precios = {it.product_variant_id: it.unit_price for it in order.items}
-        self.assertEqual(precios[variant_1.id], Decimal("6000"))
-        self.assertEqual(precios[variant_2.id], Decimal("7000"))
-        self.assertTrue(all(it.combo_id == combo.id for it in order.items))
+    # spec 063 (FR-024, A-61): `test_add_item_to_table_combo_expande_componentes_a_precio_normal`
+    # se elimina — el mecanismo de combo se retira; `OrderItemIn` ya no acepta `combo_id`.
 
     # ------------------------------------- add_item_to_table sin receta (T020)
 
