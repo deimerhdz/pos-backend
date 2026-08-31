@@ -1,5 +1,8 @@
-"""CRUD de promociones. La aplicación automática en la venta vive en el checkout,
-que llama a `service.evaluate` / `service.evaluate_detailed`."""
+"""CRUD de promociones — spec 063 (modelo por conjunto explícito de variantes).
+
+La aplicación automática en la venta vive en el checkout, que llama a
+`service.evaluate_variant_sets`. `contracts/administracion-promociones.md` §3.
+"""
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -14,54 +17,16 @@ from app.core.audit import record_audit
 from app.core.pagination import Page, paginate
 from app.core.plan_limits import require_module_access
 from app.models.promotion import Promotion
-from app.api.v1.presentations import service as presentations_service
 from app.api.v1.promotions import service
 from app.api.v1.promotions.schemas import (
     PromotionCreate, PromotionUpdate, PromotionShapeUpdate, PromotionStatusUpdate,
-    PromotionDuplicate, PromotionResponse, PromotionWithOverlaps,
+    PromotionDuplicate, PromotionResponse,
 )
 
 router = APIRouter(
     prefix="/promotions", tags=["promotions"],
     dependencies=[Depends(require_module_access("promociones"))],
 )
-
-
-def _serialize(db: Session, promo: Promotion) -> dict:
-    """Respuesta de una promoción con sus reglas por presentación resueltas
-    (nombre + alcance por regla, FR-005). `PromotionResponse` no puede leer
-    `presentation_name` / `applicable_variant_count` del ORM directamente."""
-    data = PromotionResponse.model_validate(
-        promo, from_attributes=True
-    ).model_dump(exclude={"presentation_rules"})
-    rules = list(promo.presentation_rules)
-    counts = presentations_service.applicable_variant_counts(
-        db, [r.presentation_id for r in rules]
-    )
-    data["presentation_rules"] = [
-        {
-            "presentation_id": r.presentation_id,
-            "presentation_name": r.presentation.name if r.presentation else "",
-            "min_qty": r.min_qty,
-            "pack_price": r.pack_price,
-            "applicable_variant_count": counts.get(r.presentation_id, 0),
-        }
-        for r in rules
-    ]
-    return data
-
-
-def _with_overlaps(db: Session, promo: Promotion) -> dict:
-    """La respuesta incluye con qué promociones compite. Es una **advertencia**:
-    el RF pedía impedir el solapamiento, pero eso haría imposibles sus propios
-    casos de uso ("10% en granizados" y "20% los martes" se solapan los martes).
-    Quien decide es `priority`."""
-    data = _serialize(db, promo)
-    data["overlaps"] = [
-        {"id": o.id, "name": o.name, "priority": o.priority}
-        for o in service.find_overlaps(db, promo)
-    ]
-    return data
 
 
 @router.get("", response_model=Page[PromotionResponse], summary="Listar promociones")
@@ -73,19 +38,30 @@ def list_promotions(
         None, alias="status", description="draft | active | paused | finished"
     ),
     search: str | None = Query(None, description="Búsqueda por nombre."),
+    closed_by_refactor: bool | None = Query(
+        None,
+        description="true = solo las promociones que la migración de la spec 063 "
+                    "pasó a Finalizada (aviso de FR-025).",
+    ),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
     # A-09: el POS de staff necesita una hora de referencia sincronizada con el
-    # servidor (en vez del reloj del dispositivo) para previsualizar vigencia
-    # de promociones; este es el endpoint que ya sondea para eso.
+    # servidor (en vez del reloj del dispositivo) para previsualizar vigencia.
     response.headers["X-Server-Time"] = datetime.now(timezone.utc).isoformat()
-    result = paginate(db, service.list_query(search=search, status_filter=status_filter), page, size)
-    result["items"] = [_serialize(db, p) for p in result["items"]]
+    result = paginate(
+        db,
+        service.list_query(
+            search=search, status_filter=status_filter,
+            closed_by_refactor=closed_by_refactor,
+        ),
+        page, size,
+    )
+    result["items"] = [service.serialize_promotion(db, p) for p in result["items"]]
     return result
 
 
-@router.post("", response_model=PromotionWithOverlaps,
+@router.post("", response_model=PromotionResponse,
              status_code=status.HTTP_201_CREATED, summary="Crear promoción")
 def create_promotion(body: PromotionCreate, db: Session = Depends(get_db),
                      user: User = Depends(require_tenant_admin)):
@@ -93,36 +69,32 @@ def create_promotion(body: PromotionCreate, db: Session = Depends(get_db),
     promo = service.create(db, body)
     record_audit(db, action="create", entity="promotion", entity_id=promo.id,
                  user=user, payload={"name": promo.name, "type": promo.type,
-                                     "status": promo.status, "priority": promo.priority})
+                                     "status": promo.status})
     db.commit()
     db.refresh(promo)
-    return _with_overlaps(db, promo)
+    return service.serialize_promotion(db, promo)
 
 
-@router.patch("/{promotion_id}", response_model=PromotionWithOverlaps,
+@router.patch("/{promotion_id}", response_model=PromotionResponse,
               summary="Actualizar campos escalares")
 def update_promotion(promotion_id: UUID, body: PromotionUpdate, db: Session = Depends(get_db),
                      user: User = Depends(require_tenant_admin)):
     promo = get_or_404(db, Promotion, promotion_id, "Promoción no encontrada")
-    # El PATCH no validaba el nombre único: renombrar a uno existente reventaba
-    # con IntegrityError -> 500 en vez de un 409 legible.
     if "name" in body.model_fields_set and body.name is not None:
         ensure_unique(db, Promotion, Promotion.name, body.name,
                       "Ya existe una promoción con ese nombre", exclude_id=promo.id)
     before = {f: getattr(promo, f) for f in body.model_fields_set if hasattr(promo, f)}
     promo = service.update(db, promo, body)
-    # El PATCH tampoco registraba auditoría, así que el "historial de
-    # modificaciones" del RF no existía para el caso más frecuente.
     record_audit(db, action="update", entity="promotion", entity_id=promo.id, user=user,
                  payload={"before": {k: str(v) for k, v in before.items()},
                           "after": {k: str(getattr(promo, k)) for k in before}})
     db.commit()
     db.refresh(promo)
-    return _with_overlaps(db, promo)
+    return service.serialize_promotion(db, promo)
 
 
-@router.patch("/{promotion_id}/shape", response_model=PromotionWithOverlaps,
-              summary="Cambiar tipo, alcance o componentes (solo en borrador)")
+@router.patch("/{promotion_id}/shape", response_model=PromotionResponse,
+              summary="Cambiar tipo o conjunto de variantes (solo en borrador)")
 def update_promotion_shape(promotion_id: UUID, body: PromotionShapeUpdate,
                            db: Session = Depends(get_db),
                            user: User = Depends(require_tenant_admin)):
@@ -132,7 +104,7 @@ def update_promotion_shape(promotion_id: UUID, body: PromotionShapeUpdate,
                  user=user, payload={"type": promo.type})
     db.commit()
     db.refresh(promo)
-    return _with_overlaps(db, promo)
+    return service.serialize_promotion(db, promo)
 
 
 @router.patch("/{promotion_id}/status", response_model=PromotionResponse,
@@ -147,7 +119,7 @@ def change_promotion_status(promotion_id: UUID, body: PromotionStatusUpdate,
                  user=user, payload={"from": previous, "to": promo.status})
     db.commit()
     db.refresh(promo)
-    return _serialize(db, promo)
+    return service.serialize_promotion(db, promo)
 
 
 @router.post("/{promotion_id}/duplicate", response_model=PromotionResponse,
@@ -162,7 +134,7 @@ def duplicate_promotion(promotion_id: UUID, body: PromotionDuplicate,
                  user=user, payload={"source_id": str(promo.id), "name": copy.name})
     db.commit()
     db.refresh(copy)
-    return _serialize(db, copy)
+    return service.serialize_promotion(db, copy)
 
 
 @router.delete("/{promotion_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar promoción")
