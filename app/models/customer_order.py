@@ -1,5 +1,5 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy import (
     String, Integer, Boolean, Numeric, ForeignKey, DateTime, func, CheckConstraint, Index, text,
 )
@@ -78,6 +78,18 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
 
     status: Mapped[str] = mapped_column(String(12), nullable=False, server_default="abierta")
 
+    # spec 063 (FR-021, A-64): hoy `CustomerOrder` no tiene ningún campo de
+    # descuento. Se fija en el cobro (`pay_order`, `_close_unified`, `_close_split`)
+    # con el mismo agregado que la `Sale`. Nace `0` para todo pedido existente.
+    discount: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, server_default="0"
+    )
+    # spec 063 (FR-021, A-64): mismo contenido que `sales.applied_promotions`,
+    # fijado en el cobro. Nace `'[]'`.
+    applied_promotions: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+
     # Lock optimista para la transición abierta→bloqueada del cobro (Fase 7).
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
@@ -136,6 +148,8 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
             "delivery_fee IS NULL OR delivery_fee >= 0",
             name="ck_customer_order_delivery_fee_non_negative",
         ),
+        # spec 063 (FR-021, `063a`).
+        CheckConstraint("discount >= 0", name="ck_customer_order_discount_non_negative"),
         Index("idx_customer_orders_channel", "channel"),
         Index("idx_customer_orders_order_type", "order_type"),
         # Ya NO hay índice único de "una orden abierta por mesa": la mesa puede
