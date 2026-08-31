@@ -8,10 +8,14 @@ from app.core.db import get_db
 from app.core.dependencies import get_current_user
 from app.core.crud import get_or_404, ensure_unique
 from app.core.models import User
+from app.core.plan_limits import require_module_access
 from app.models.unit_measure import UnitMeasure
 from app.api.v1.unit_measures.schemas import UnitMeasureCreate, UnitMeasureUpdate, UnitMeasureResponse
 
-router = APIRouter(prefix="/unit-measures", tags=["unit_measures"])
+router = APIRouter(
+    prefix="/unit-measures", tags=["unit_measures"],
+    dependencies=[Depends(require_module_access("inventario"))],
+)
 
 
 @router.get(
