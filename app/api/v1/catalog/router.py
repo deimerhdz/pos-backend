@@ -9,6 +9,7 @@ from app.core.db import get_db
 from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User
+from app.models.presentation import Presentation
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.recipe_item import RecipeItem
@@ -64,6 +65,22 @@ def _bloquear_nombre_duplicado(
         status.HTTP_409_CONFLICT,
         detail={"error": mensaje, "variant_id": str(dup.id), "active": dup.active},
     )
+
+
+def _resolve_presentation_id(db: Session, presentation_id: UUID | None) -> UUID | None:
+    """spec 040: `presentation_id` debe referenciar una presentación existente y
+    ACTIVA, o ser NULL (FR-008). Cambiar la presentación de una variante NO
+    dispara la verificación de uniformidad de FR-017 (esa corre solo al guardar
+    una regla de promoción, CL-1b)."""
+    if presentation_id is None:
+        return None
+    presentation = db.get(Presentation, presentation_id)
+    if presentation is None or not presentation.active:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Presentación no encontrada o inactiva",
+        )
+    return presentation.id
 
 
 def _commit_variante(db: Session, variant: ProductVariant) -> ProductVariant:
@@ -133,6 +150,7 @@ def create_variant(
         sku=sku,
         active=True,
         display_order=_next_display_order(db, product_id),
+        presentation_id=_resolve_presentation_id(db, body.presentation_id),
     )
     db.add(variant)
     return _commit_variante(db, variant)
@@ -166,6 +184,8 @@ def update_variant(
         variant.price = body.price
     if body.active is not None:
         variant.active = body.active
+    if "presentation_id" in body.model_fields_set:
+        variant.presentation_id = _resolve_presentation_id(db, body.presentation_id)
     return _commit_variante(db, variant)
 
 

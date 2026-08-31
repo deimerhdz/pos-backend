@@ -22,7 +22,7 @@ Tres cambios estructurales respecto de la versión anterior:
    sola promoción por línea.
 """
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -36,10 +36,12 @@ from app.core.config import settings
 from app.core.crud import get_or_404
 from app.core.models import Tenant
 from app.core.timezone import resolve_timezone
+from app.models.presentation import Presentation
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.promotion import (
-    Promotion, PromotionComboItem, PromotionTarget, PROMOTION_TRANSITIONS,
+    Promotion, PromotionComboItem, PromotionPresentationRule, PromotionTarget,
+    PROMOTION_TRANSITIONS,
 )
 
 # Tipos que participan del motor automático. `combo` se selecciona
@@ -98,13 +100,29 @@ def _valid_now(promo: Promotion, now: datetime) -> bool:
         return False
     if promo.starts_at is not None and now < promo.starts_at:
         return False
+
+    # FR-004 / CL-8 (spec 040, A-55): cuando la ventana cruza la medianoche
+    # (`start_time > end_time`) y estamos en el tramo posterior a la medianoche
+    # (`now.time() <= end_time`), el día de aplicación es el día en que INICIA la
+    # ventana — la fecha de referencia para `days_of_week` y `ends_at` retrocede
+    # 24 h. `starts_at` y `start_time` no cambian. Afecta a TODOS los tipos de
+    # promoción (este chequeo es compartido).
+    ref = now
+    if (
+        promo.start_time is not None
+        and promo.end_time is not None
+        and promo.start_time > promo.end_time
+        and now.time() <= promo.end_time
+    ):
+        ref = now - timedelta(days=1)
+
     # `ends_at` llega como medianoche del día elegido en el selector "Hasta":
     # se compara por fecha para que "Hasta 04/08" cubra el 04/08 completo.
-    if promo.ends_at is not None and now.date() > promo.ends_at.date():
+    if promo.ends_at is not None and ref.date() > promo.ends_at.date():
         return False
     if promo.days_of_week:
         allowed = {d.strip() for d in promo.days_of_week.split(",") if d.strip()}
-        if str(now.weekday()) not in allowed:  # 0=lunes..6=domingo
+        if str(ref.weekday()) not in allowed:  # 0=lunes..6=domingo
             return False
     return _in_time_window(now.time(), promo.start_time, promo.end_time)
 
@@ -396,13 +414,21 @@ def expand_combo(db: Session, combo_id: UUID, quantity: int, now: datetime) -> l
     return components
 
 
+def _line_get(line, name: str, default=None):
+    """Acceso uniforme a una línea, sea un `SaleLine` (atributos) o un dict
+    enriquecido de `promo_lines_for` (claves). Deja intacto el camino `SaleLine`."""
+    if isinstance(line, dict):
+        return line.get(name, default)
+    return getattr(line, name, default)
+
+
 def combo_discount_for_lines(db: Session, lines: list, now: datetime) -> Decimal:
     """Agrupa por `combo_id` y descuenta solo los bundles completos, para que una
     anulación parcial deje el remanente a precio normal. Si el combo ya no existe
     o no está vigente, ese grupo no descuenta."""
     by_combo: dict[UUID, list] = {}
     for line in lines:
-        combo_id = getattr(line, "combo_id", None)
+        combo_id = _line_get(line, "combo_id")
         if combo_id is not None:
             by_combo.setdefault(combo_id, []).append(line)
 
@@ -421,14 +447,13 @@ def combo_discount_for_lines(db: Session, lines: list, now: datetime) -> Decimal
         qty_by_variant: dict[UUID, int] = {}
         price_by_variant: dict[UUID, Decimal] = {}
         for line in combo_lines:
-            qty_by_variant[line.product_variant_id] = (
-                qty_by_variant.get(line.product_variant_id, 0) + line.quantity
-            )
+            pv_id = _line_get(line, "product_variant_id")
+            qty_by_variant[pv_id] = qty_by_variant.get(pv_id, 0) + _line_get(line, "quantity", 0)
             # `min`, no `setdefault`: si la misma variante llega con dos precios
             # (cambio de catálogo a mitad de sesión), el cliente no paga el alto.
-            prev = price_by_variant.get(line.product_variant_id)
-            price = Decimal(line.unit_price)
-            price_by_variant[line.product_variant_id] = price if prev is None else min(prev, price)
+            prev = price_by_variant.get(pv_id)
+            price = Decimal(_line_get(line, "unit_price", 0))
+            price_by_variant[pv_id] = price if prev is None else min(prev, price)
 
         bundle_units = min(
             qty_by_variant.get(item.product_variant_id, 0) // item.quantity
@@ -446,6 +471,236 @@ def combo_discount_for_lines(db: Session, lines: list, now: datetime) -> Decimal
         total_discount += max(Decimal(0), covered_normal_total - bundle_price_total)
 
     return total_discount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+# --------------------------- Paquetes por presentación (spec 040) ---------------------------
+
+@dataclass
+class PresentationDiscountResult:
+    """Descuento por presentación con desglose por línea (FR-011, SC-005)."""
+    total: Decimal = Decimal(0)
+    by_line: dict = field(default_factory=dict)      # line_index -> descuento (Decimal)
+    promotion_ids: set = field(default_factory=set)  # promociones que descontaron alguna línea
+
+
+@dataclass
+class CombinedDiscountResult:
+    total: Decimal = Decimal(0)
+    promotion_id: UUID | None = None
+
+
+def active_presentation_promotions(db: Session, now: datetime) -> list[Promotion]:
+    """Promociones `qty_price_presentation` **activas y vigentes ahora**
+    (`_valid_now`, hora local del tenant). El tipo queda fuera de `AUTO_TYPES`,
+    así que `active_discount_promotions` no las trae — esta es su consulta
+    hermana (research.md D5)."""
+    today: date = local_now(now).date()
+    stmt = (
+        select(Promotion)
+        .options(
+            selectinload(Promotion.presentation_rules).selectinload(
+                PromotionPresentationRule.presentation
+            )
+        )
+        .where(
+            Promotion.status == "active",
+            Promotion.type == QTY_PRICE_PRESENTATION,
+            or_(Promotion.ends_at.is_(None), Promotion.ends_at >= today),
+        )
+    )
+    return [p for p in db.execute(stmt).scalars().all() if _valid_now(p, now)]
+
+
+def _presentation_reference_unit_price(eligible_lines: list) -> Decimal:
+    """FR-011 / FR-017: el precio unitario normal de una presentación es ÚNICO —
+    el **menor** `unit_price` vigente entre las variantes elegibles que aportan
+    unidades a esa presentación en el pedido. Nunca variante por variante (mismo
+    criterio `min(...)` que `combo_discount_for_lines`)."""
+    return min(Decimal(_line_get(l, "unit_price", 0)) for l in eligible_lines)
+
+
+def _unit_sort_key(line) -> tuple:
+    """Orden determinista de una unidad (FR-011, CL-9, SC-005): por el valor del
+    UUID de la variante y, si empatan, por el `id` de la fila de línea. Nunca por
+    la posición de la línea en la lista."""
+    variant_id = _line_get(line, "product_variant_id")
+    line_id = _line_get(line, "line_id")
+    return (str(variant_id) if variant_id is not None else "",
+            str(line_id) if line_id is not None else "")
+
+
+def _rule_discount_by_line(rule, eligible: list) -> dict:
+    """Desglose `{line_index: descuento}` de una sola regla sobre sus líneas
+    elegibles (research.md D5 pasos b-h). `eligible`: lista de `(line_index, línea)`.
+
+    Reparto determinista (FR-011, CL-9): las unidades se ordenan ascendente por
+    `(variante, línea)`; las `leftover` unidades más altas se cobran a `precio_ref`
+    y la unidad de paquete más alta lleva el residuo del redondeo.
+    """
+    total_units = sum(int(_line_get(l, "quantity", 0)) for _, l in eligible)
+    packs = total_units // rule.min_qty
+    if packs <= 0:  # FR-010 / FR-012: sin paquete completo, no descuenta
+        return {}
+
+    ref = _presentation_reference_unit_price([l for _, l in eligible])
+    units_in_packs = packs * rule.min_qty
+    leftover = total_units - units_in_packs
+    per_pack_unit = (Decimal(rule.pack_price) / rule.min_qty).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP
+    )
+    residual = Decimal(rule.pack_price) * packs - per_pack_unit * units_in_packs
+
+    units: list[int] = []  # line_index por unidad
+    for i, l in sorted(eligible, key=lambda t: _unit_sort_key(t[1])):
+        units.extend([i] * int(_line_get(l, "quantity", 0)))
+
+    charged_by_line: dict = {}
+    for pos, line_index in enumerate(units):
+        if pos >= total_units - leftover:
+            charge = ref
+        elif pos == total_units - leftover - 1:
+            charge = per_pack_unit + residual
+        else:
+            charge = per_pack_unit
+        charged_by_line[line_index] = charged_by_line.get(line_index, Decimal(0)) + charge
+
+    by_line: dict = {}
+    for i, l in eligible:
+        units_here = int(_line_get(l, "quantity", 0))
+        descuento = ref * units_here - charged_by_line.get(i, Decimal(0))
+        if descuento != 0:
+            by_line[i] = descuento
+    return by_line
+
+
+def presentation_package_discount_for_lines(
+    db: Session,
+    lines: list,
+    now: datetime,
+    eligible_indices: set | None = None,
+) -> PresentationDiscountResult:
+    """Descuento de paquete por presentación (research.md D5), con desglose por
+    línea. `eligible_indices` (si se pasa) restringe qué líneas pueden aportar
+    unidades — lo usa la reconciliación de `combined_discount_detailed` (D6)."""
+    result = PresentationDiscountResult()
+    promos = active_presentation_promotions(db, now)
+    if not promos:
+        return result
+
+    raw_total = Decimal(0)
+    for promo in promos:
+        for rule in promo.presentation_rules:
+            eligible = [
+                (i, l) for i, l in enumerate(lines)
+                if _line_get(l, "combo_id") is None
+                and _line_get(l, "presentation_id") == rule.presentation_id
+                and _line_get(l, "_variant_active", True)  # FR-015
+                and (eligible_indices is None or i in eligible_indices)
+            ]
+            for i, descuento in _rule_discount_by_line(rule, eligible).items():
+                result.by_line[i] = result.by_line.get(i, Decimal(0)) + descuento
+                raw_total += descuento
+                result.promotion_ids.add(promo.id)
+
+    result.total = raw_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return result
+
+
+def _line_by_line_discounts(
+    db: Session, promo_lines: list, now: datetime,
+) -> dict:
+    """`{line_index: (monto, promotion_id)}` del motor línea-por-línea
+    (`percent`/`fixed`/`qty_price` de producto/categoría) para las líneas SIN
+    combo. Misma selección que `evaluate_detailed`, indexada sobre `promo_lines`."""
+    valid = active_discount_promotions(db, now)
+    out: dict = {}
+    if not valid:
+        return out
+    for i, l in enumerate(promo_lines):
+        if _line_get(l, "combo_id") is not None:
+            continue
+        amount, promo, _ = _best_line_match(
+            valid, _line_get(l, "product_id"), _line_get(l, "category_id"),
+            int(_line_get(l, "quantity", 0)), Decimal(_line_get(l, "line_total", 0)),
+            _line_get(l, "unit_price"),
+        )
+        if amount > 0 and promo is not None:
+            out[i] = (amount, promo.id)
+    return out
+
+
+def combined_discount_detailed(
+    db: Session, promo_lines: list, now: datetime,
+) -> CombinedDiscountResult:
+    """Orquesta los tres mecanismos de descuento y los reconcilia por línea con
+    recálculo del pool hasta punto fijo (research.md D6):
+
+    1. `_line_by_line_discounts` — percent/fixed/qty_price de producto/categoría.
+    2. `combo_discount_for_lines` — bundles seleccionados (no compiten).
+    3. `presentation_package_discount_for_lines` — paquete por presentación, sobre
+       el `pool` de líneas elegibles.
+
+    Una línea sale del `pool` si el motor línea-por-línea la deja con total
+    **estrictamente menor** (empate → se queda) o si el descuento por presentación
+    la dejaría peor que sin promoción (FR-023). Ninguna línea acumula dos
+    descuentos (FR-013). Sin ninguna promoción `qty_price_presentation` activa,
+    el total coincide **exacto** con `evaluate + combo_discount_for_lines`
+    (aditividad-segura)."""
+    line_by_line = _line_by_line_discounts(db, promo_lines, now)
+    combo_discount = combo_discount_for_lines(db, promo_lines, now)
+    combo_ids = {
+        _line_get(l, "combo_id") for l in promo_lines
+        if _line_get(l, "combo_id") is not None
+    }
+
+    pool = {
+        i for i, l in enumerate(promo_lines)
+        if _line_get(l, "combo_id") is None
+        and _line_get(l, "presentation_id") is not None
+    }
+    pres = presentation_package_discount_for_lines(db, promo_lines, now, pool)
+    while pool:
+        salen = set()
+        for i in list(pool):
+            pres_amount = pres.by_line.get(i, Decimal(0))
+            if pres_amount <= 0:
+                # FR-023: si no la beneficia (o la empeora), sale del pool.
+                if pres_amount < 0:
+                    salen.add(i)
+                continue
+            lbl = line_by_line.get(i)
+            if lbl is not None and lbl[0] > pres_amount:
+                # El motor línea-por-línea deja MENOR total para esa línea.
+                salen.add(i)
+        if not salen:
+            break
+        pool -= salen
+        pres = presentation_package_discount_for_lines(db, promo_lines, now, pool)
+
+    # Totales: presentación sobre las líneas que quedaron en el pool con
+    # descuento positivo; línea-por-línea sobre el resto.
+    raw_total = Decimal(0)
+    used_ids: set = set()
+    for i, l in enumerate(promo_lines):
+        if _line_get(l, "combo_id") is not None:
+            continue
+        pres_amount = pres.by_line.get(i, Decimal(0)) if i in pool else Decimal(0)
+        if pres_amount > 0:
+            raw_total += pres_amount
+            used_ids |= pres.promotion_ids
+        elif i in line_by_line:
+            raw_total += line_by_line[i][0]
+            used_ids.add(line_by_line[i][1])
+
+    total = (raw_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+             + combo_discount)
+
+    if len(combo_ids) == 1:
+        promotion_id = next(iter(combo_ids))
+    else:
+        promotion_id = next(iter(used_ids)) if len(used_ids) == 1 and not combo_ids else None
+
+    return CombinedDiscountResult(total=total, promotion_id=promotion_id)
 
 
 # --------------------------- Solapamiento (advertencia, no bloqueo) ---------------------------
@@ -525,7 +780,13 @@ def list_query(search: str | None = None, status_filter: str | None = None) -> S
     descendente y luego nombre: el admin ve primero la que gana."""
     stmt = (
         select(Promotion)
-        .options(selectinload(Promotion.targets), selectinload(Promotion.combo_items))
+        .options(
+            selectinload(Promotion.targets),
+            selectinload(Promotion.combo_items),
+            selectinload(Promotion.presentation_rules).selectinload(
+                PromotionPresentationRule.presentation
+            ),
+        )
         .order_by(Promotion.priority.desc(), Promotion.name)
     )
     if status_filter:
@@ -554,6 +815,174 @@ def _apply_combo_items(db: Session, promo: Promotion, items) -> None:
         ))
 
 
+# --------------------------- Reglas por presentación (spec 040) ---------------------------
+
+QTY_PRICE_PRESENTATION = "qty_price_presentation"
+
+
+def _validate_presentation_ids(db: Session, rules) -> None:
+    """Cada `presentation_id` de una regla debe existir y estar activa (422)."""
+    ids = {r.presentation_id for r in rules}
+    if not ids:
+        return
+    rows = db.execute(
+        select(Presentation.id).where(Presentation.id.in_(ids), Presentation.active.is_(True))
+    ).scalars().all()
+    faltan = ids - set(rows)
+    if faltan:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Presentación no encontrada o inactiva",
+        )
+
+
+def _apply_presentation_rules(db: Session, promo: Promotion, rules) -> None:
+    """Refuerzo en servicio de "no dos reglas para la misma presentación"
+    (FR-006 1ª parte), además del validador Pydantic y el `UniqueConstraint`."""
+    seen: set = set()
+    for r in rules:
+        if r.presentation_id in seen:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "No puede haber dos reglas para la misma presentación",
+            )
+        seen.add(r.presentation_id)
+    promo.presentation_rules.clear()
+    db.flush()
+    for r in rules:
+        db.add(PromotionPresentationRule(
+            promotion_id=promo.id, presentation_id=r.presentation_id,
+            min_qty=r.min_qty, pack_price=Decimal(r.pack_price),
+        ))
+    db.flush()
+
+
+def presentation_overlap_conflicts(
+    db: Session, promo: Promotion, presentation_ids: set,
+) -> list[dict]:
+    """FR-006 2ª parte / CL-4: reglas de **otras** promociones
+    `qty_price_presentation` **activas** que cubren alguna de esas presentaciones.
+    A diferencia de `find_overlaps` (advertencia), esto **bloquea**."""
+    if not presentation_ids:
+        return []
+    rows = db.execute(
+        select(Promotion.id, Promotion.name, PromotionPresentationRule.presentation_id)
+        .join(PromotionPresentationRule,
+              PromotionPresentationRule.promotion_id == Promotion.id)
+        .where(
+            Promotion.id != promo.id,
+            Promotion.type == QTY_PRICE_PRESENTATION,
+            Promotion.status == "active",
+            PromotionPresentationRule.presentation_id.in_(presentation_ids),
+        )
+    ).all()
+    return [
+        {"promotion_id": str(pid), "promotion_name": name, "presentation_id": str(presid)}
+        for pid, name, presid in rows
+    ]
+
+
+def _guard_presentation_overlap(db: Session, promo: Promotion, presentation_ids: set) -> None:
+    conflicts = presentation_overlap_conflicts(db, promo, presentation_ids)
+    if conflicts:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "error": (
+                    "Otra promoción de precio por presentación activa ya cubre esa "
+                    "presentación"
+                ),
+                "conflicts": conflicts,
+            },
+        )
+
+
+def _active_variants_for_presentation(db: Session, presentation_id) -> list:
+    """`[(variant, product)]` de las variantes **activas** que referencian la
+    presentación — el alcance real de una regla sobre ella (FR-007)."""
+    rows = db.execute(
+        select(ProductVariant, Product)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(
+            ProductVariant.presentation_id == presentation_id,
+            ProductVariant.active.is_(True),
+        )
+    ).all()
+    return [(v, p) for v, p in rows]
+
+
+def _check_presentation_rule_prices(db: Session, rules, data) -> None:
+    """FR-017 (uniformidad de precio) y FR-022 (la regla no representa un
+    descuento real): verificaciones con confirmación explícita, **solo** al
+    guardar la regla (nunca retroactivo, FR-018).
+
+    Para cada regla se reúnen las variantes **activas** que la referencian y sus
+    precios vigentes. `reference_unit_price` = el menor (FR-011) — el que se
+    cobrará. Sin el flag correspondiente, cualquiera de las dos condiciones
+    devuelve **422** con el detalle estructurado.
+    """
+    confirm_no_uniforme = getattr(data, "confirm_precio_no_uniforme", False)
+    confirm_sin_descuento = getattr(data, "confirm_sin_descuento", False)
+
+    for rule in rules:
+        variantes = _active_variants_for_presentation(db, rule.presentation_id)
+        if not variantes:
+            continue
+        precios = [Decimal(v.price) for v, _ in variantes]
+        reference = min(precios).quantize(Decimal("0.01"))
+
+        if not confirm_no_uniforme and len(set(precios)) > 1:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error": "Los productos de la presentación no tienen el mismo precio",
+                    "presentation_id": str(rule.presentation_id),
+                    "reference_unit_price": str(reference),
+                    "variants": [
+                        {
+                            "variant_id": str(v.id),
+                            "description": f"{p.name} - {v.name}" if p else v.name,
+                            "price": str(v.price),
+                        }
+                        for v, p in variantes
+                    ],
+                },
+            )
+
+        pack_unit_price = (Decimal(rule.pack_price) / rule.min_qty).quantize(Decimal("0.01"))
+        if not confirm_sin_descuento and pack_unit_price >= reference:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error": "El precio de paquete no representa un descuento",
+                    "presentation_id": str(rule.presentation_id),
+                    "pack_unit_price": str(pack_unit_price),
+                    "reference_unit_price": str(reference),
+                },
+            )
+
+
+def _validate_shape_presentation_rules(db: Session, promo: Promotion, data) -> None:
+    """Validación de forma de las reglas por presentación tras aplicar el cambio
+    de forma (mismo patrón que las de `combo` / `qty_price`, contra el tipo ya
+    aplicado)."""
+    if promo.type == QTY_PRICE_PRESENTATION and not promo.presentation_rules:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Una promoción de precio por presentación necesita al menos una regla",
+        )
+    if promo.type != QTY_PRICE_PRESENTATION and promo.presentation_rules:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Las reglas por presentación solo aplican a promociones de ese tipo",
+        )
+    if promo.type == QTY_PRICE_PRESENTATION:
+        _check_presentation_rule_prices(db, list(promo.presentation_rules), data)
+        _guard_presentation_overlap(
+            db, promo, {r.presentation_id for r in promo.presentation_rules}
+        )
+
+
 def create(db: Session, data) -> Promotion:
     promo = Promotion(
         name=data.name, description=data.description, type=data.type.value,
@@ -566,6 +995,12 @@ def create(db: Session, data) -> Promotion:
     db.flush()
     _apply_targets(db, promo, data.targets)
     _apply_combo_items(db, promo, data.combo_items)
+    rules = data.presentation_rules or []
+    if rules:
+        _validate_presentation_ids(db, rules)
+        _apply_presentation_rules(db, promo, rules)
+        _check_presentation_rule_prices(db, rules, data)
+        _guard_presentation_overlap(db, promo, {r.presentation_id for r in rules})
     db.flush()
     return promo
 
@@ -618,6 +1053,13 @@ def update_shape(db: Session, promo: Promotion, data) -> Promotion:
         _apply_targets(db, promo, data.targets)
     if data.combo_items is not None:
         _apply_combo_items(db, promo, data.combo_items)
+    if data.presentation_rules is not None:
+        _validate_presentation_ids(db, data.presentation_rules)
+        _apply_presentation_rules(db, promo, data.presentation_rules)
+    elif promo.type != QTY_PRICE_PRESENTATION and promo.presentation_rules:
+        # Cambió de tipo saliendo de `qty_price_presentation`: las reglas huérfanas
+        # no tienen sentido.
+        promo.presentation_rules.clear()
     db.flush()
     db.refresh(promo)
 
@@ -631,6 +1073,7 @@ def update_shape(db: Session, promo: Promotion, data) -> Promotion:
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "combo_items solo aplica a promociones type=combo",
         )
+    _validate_shape_presentation_rules(db, promo, data)
     # Aquí, y no en el schema, porque `PromotionShapeUpdate` puede cambiar el
     # tipo y los targets a la vez: el tipo que manda es el ya aplicado.
     if promo.type != "qty_price" and any(
@@ -667,6 +1110,17 @@ def change_status(db: Session, promo: Promotion, new_status: str) -> Promotion:
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "No se puede activar un combo sin al menos 2 componentes",
         )
+    if new_status == "active" and promo.type == QTY_PRICE_PRESENTATION:
+        # FR-006 (CL-4): una promoción puede crearse en `draft` sin conflicto y
+        # activarse cuando otra ya ocupó esa presentación — se revalida aquí.
+        if not promo.presentation_rules:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "No se puede activar una promoción de precio por presentación sin reglas",
+            )
+        _guard_presentation_overlap(
+            db, promo, {r.presentation_id for r in promo.presentation_rules}
+        )
     promo.status = new_status
     db.flush()
     return promo
@@ -693,6 +1147,13 @@ def duplicate(db: Session, promo: Promotion, new_name: str) -> Promotion:
     for c in promo.combo_items:
         db.add(PromotionComboItem(
             promotion_id=copy.id, product_variant_id=c.product_variant_id, quantity=c.quantity,
+        ))
+    # spec 040: la copia nace `draft`; el solape de FR-006 se revalida al
+    # activarla, no al duplicar.
+    for r in promo.presentation_rules:
+        db.add(PromotionPresentationRule(
+            promotion_id=copy.id, presentation_id=r.presentation_id,
+            min_qty=r.min_qty, pack_price=r.pack_price,
         ))
     db.flush()
     db.refresh(copy)

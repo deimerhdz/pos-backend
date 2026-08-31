@@ -14,6 +14,7 @@ from app.core.audit import record_audit
 from app.core.pagination import Page, paginate
 from app.core.plan_limits import require_module_access
 from app.models.promotion import Promotion
+from app.api.v1.presentations import service as presentations_service
 from app.api.v1.promotions import service
 from app.api.v1.promotions.schemas import (
     PromotionCreate, PromotionUpdate, PromotionShapeUpdate, PromotionStatusUpdate,
@@ -26,12 +27,36 @@ router = APIRouter(
 )
 
 
+def _serialize(db: Session, promo: Promotion) -> dict:
+    """Respuesta de una promoción con sus reglas por presentación resueltas
+    (nombre + alcance por regla, FR-005). `PromotionResponse` no puede leer
+    `presentation_name` / `applicable_variant_count` del ORM directamente."""
+    data = PromotionResponse.model_validate(
+        promo, from_attributes=True
+    ).model_dump(exclude={"presentation_rules"})
+    rules = list(promo.presentation_rules)
+    counts = presentations_service.applicable_variant_counts(
+        db, [r.presentation_id for r in rules]
+    )
+    data["presentation_rules"] = [
+        {
+            "presentation_id": r.presentation_id,
+            "presentation_name": r.presentation.name if r.presentation else "",
+            "min_qty": r.min_qty,
+            "pack_price": r.pack_price,
+            "applicable_variant_count": counts.get(r.presentation_id, 0),
+        }
+        for r in rules
+    ]
+    return data
+
+
 def _with_overlaps(db: Session, promo: Promotion) -> dict:
     """La respuesta incluye con qué promociones compite. Es una **advertencia**:
     el RF pedía impedir el solapamiento, pero eso haría imposibles sus propios
     casos de uso ("10% en granizados" y "20% los martes" se solapan los martes).
     Quien decide es `priority`."""
-    data = PromotionResponse.model_validate(promo).model_dump()
+    data = _serialize(db, promo)
     data["overlaps"] = [
         {"id": o.id, "name": o.name, "priority": o.priority}
         for o in service.find_overlaps(db, promo)
@@ -55,7 +80,9 @@ def list_promotions(
     # servidor (en vez del reloj del dispositivo) para previsualizar vigencia
     # de promociones; este es el endpoint que ya sondea para eso.
     response.headers["X-Server-Time"] = datetime.now(timezone.utc).isoformat()
-    return paginate(db, service.list_query(search=search, status_filter=status_filter), page, size)
+    result = paginate(db, service.list_query(search=search, status_filter=status_filter), page, size)
+    result["items"] = [_serialize(db, p) for p in result["items"]]
+    return result
 
 
 @router.post("", response_model=PromotionWithOverlaps,
@@ -120,7 +147,7 @@ def change_promotion_status(promotion_id: UUID, body: PromotionStatusUpdate,
                  user=user, payload={"from": previous, "to": promo.status})
     db.commit()
     db.refresh(promo)
-    return promo
+    return _serialize(db, promo)
 
 
 @router.post("/{promotion_id}/duplicate", response_model=PromotionResponse,
@@ -135,7 +162,7 @@ def duplicate_promotion(promotion_id: UUID, body: PromotionDuplicate,
                  user=user, payload={"source_id": str(promo.id), "name": copy.name})
     db.commit()
     db.refresh(copy)
-    return copy
+    return _serialize(db, copy)
 
 
 @router.delete("/{promotion_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar promoción")

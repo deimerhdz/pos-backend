@@ -35,7 +35,7 @@ class SaleLine:
     de un sitio distinto."""
 
     __slots__ = ("product_variant_id", "description", "options", "quantity",
-                 "unit_price", "line_total", "combo_id")
+                 "unit_price", "line_total", "combo_id", "line_id")
 
     def __init__(
         self,
@@ -46,6 +46,7 @@ class SaleLine:
         quantity: int,
         unit_price: Decimal,
         combo_id: UUID | None = None,
+        line_id: UUID | None = None,
     ) -> None:
         self.product_variant_id = product_variant_id
         self.description = description
@@ -55,6 +56,10 @@ class SaleLine:
         self.line_total = self.unit_price * Decimal(quantity)
         # Combo (selección explícita) al que pertenece esta línea, si aplica.
         self.combo_id = combo_id
+        # `id` de la fila de origen (`order_items` / `cart_items`), cuando existe:
+        # desempate determinista del reparto por presentación (spec 040, FR-011).
+        # `None` en la venta de mostrador (aún no hay fila persistida).
+        self.line_id = line_id
 
 
 def ensure_open_shift(db: Session, cash_shift_id: UUID) -> CashShift:
