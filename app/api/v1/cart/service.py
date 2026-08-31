@@ -35,7 +35,6 @@ from app.models.order_item import OrderItem, OrderItemOption
 from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.option import Option
 from app.models.payment import PaymentMethod
-from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.api.v1.catalog.line_pricing import (
     check_availability,
@@ -221,96 +220,57 @@ def _cart_consumption(
     return total
 
 
-def _discount_catalog(db: Session, variant_ids: set[UUID]) -> dict[UUID, tuple[UUID, UUID]]:
-    """`product_id`/`category_id` por variante, para evaluar promociones por
-    línea (`_line_discount`) sin una consulta por línea."""
-    if not variant_ids:
-        return {}
+def _cart_promo_lines(db: Session, cart: Cart) -> list[dict]:
+    """`promo_lines` para `evaluate_variant_sets` (spec 063,
+    contracts/motor-y-persistencia.md §6). Un dict por ítem del carrito, en el
+    mismo orden que `cart.items` — el índice es la clave de `by_line`."""
     rows = db.execute(
-        select(ProductVariant.id, ProductVariant.product_id, Product.category_id)
-        .join(Product, Product.id == ProductVariant.product_id)
-        .where(ProductVariant.id.in_(variant_ids))
+        select(ProductVariant.id, ProductVariant.active)
+        .where(ProductVariant.id.in_({it.product_variant_id for it in cart.items}))
     ).all()
-    return {row.id: (row.product_id, row.category_id) for row in rows}
+    active = {r.id: bool(r.active) for r in rows}
+    return [
+        {
+            "product_variant_id": it.product_variant_id,
+            "unit_price": Decimal(it.unit_price),
+            "quantity": it.quantity,
+            "line_id": it.id,
+            "combo_id": it.combo_id,
+            "_variant_active": active.get(it.product_variant_id, False),
+            "description": "",
+        }
+        for it in cart.items
+    ]
 
 
-def _line_discount(
-    promos: list,
-    catalog: dict[UUID, tuple[UUID, UUID]],
-    product_variant_id: UUID,
-    combo_id: UUID | None,
-    quantity: int,
-    unit_price: Decimal,
-) -> tuple[Decimal | None, Decimal | None]:
-    """Precio unitario/subtotal de línea ya con el mejor descuento percent/fixed
-    vigente aplicado, o `(None, None)` si ninguna promoción aplica a la línea
-    (o es un combo — su ahorro se calcula aparte, al cobrar). Mismo motor que
-    `GET /cart` (`promotions.best_line_discount`), compartido con `submit_cart`
-    para que el snapshot de descuento del pedido coincida exactamente con lo
-    que el carrito mostraba (research.md Decisión 4)."""
-    line_total = unit_price * quantity
-    if not promos or combo_id is not None:
+def _cart_line_discount(result, index: int, line_total: Decimal, quantity: int):
+    """`(discounted_unit_price, discounted_line_total)` del ítem `index` a partir
+    del `by_line` de **una sola** llamada a `evaluate_variant_sets`, o
+    `(None, None)` si esa línea no recibió descuento."""
+    d = result.by_line.get(index, Decimal(0))
+    if d <= 0:
         return None, None
-    product_id, category_id = catalog.get(product_variant_id, (None, None))
-    discount, _ = promotions.best_line_discount(
-        promos, product_id, category_id, quantity, line_total, unit_price=unit_price,
-    )
-    if discount <= 0:
-        return None, None
-    discounted_line_total = (line_total - discount).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
-    )
+    discounted_line_total = (line_total - d).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     discounted_unit_price = (discounted_line_total / quantity).quantize(
         Decimal("0.01"), rounding=ROUND_HALF_UP
     )
     return discounted_unit_price, discounted_line_total
 
 
-def _cart_promo_lines(db: Session, cart: Cart) -> list[dict]:
-    """`promo_lines` con la forma de `checkout.promo_lines_for`, para pasar las
-    líneas del carrito por `combined_discount_detailed` (spec 040): incluye
-    `presentation_id` y `_variant_active` de la variante."""
-    rows = db.execute(
-        select(
-            ProductVariant.id, ProductVariant.product_id, ProductVariant.presentation_id,
-            ProductVariant.active, Product.category_id,
-        )
-        .join(Product, Product.id == ProductVariant.product_id)
-        .where(ProductVariant.id.in_({it.product_variant_id for it in cart.items}))
-    ).all()
-    meta = {r.id: r for r in rows}
-    lines: list[dict] = []
-    for it in cart.items:
-        m = meta.get(it.product_variant_id)
-        lines.append({
-            "product_id": m.product_id if m else None,
-            "category_id": m.category_id if m else None,
-            "quantity": it.quantity,
-            "line_total": Decimal(it.unit_price) * it.quantity,
-            "unit_price": Decimal(it.unit_price),
-            "combo_id": it.combo_id,
-            "product_variant_id": it.product_variant_id,
-            "line_id": it.id,
-            "presentation_id": m.presentation_id if m else None,
-            "_variant_active": bool(m.active) if m else False,
-        })
-    return lines
-
-
 def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> CartResponse:
     now = datetime.now(timezone.utc)
-    promos = promotions.active_discount_promotions(db, now)
-    catalog = _discount_catalog(db, {it.product_variant_id for it in cart.items})
+    # spec 063: motor por conjunto de variantes, evaluado UNA sola vez sobre las
+    # líneas del carrito. No se persiste (FR-020); se recalcula en cada `GET /cart`.
+    result = promotions.evaluate_variant_sets(db, _cart_promo_lines(db, cart), now)
 
     items: list[CartItemResponse] = []
     total = Decimal("0")
     any_discount = False
-    for it in cart.items:
+    for idx, it in enumerate(cart.items):
         line_total = Decimal(it.unit_price) * it.quantity
         total += line_total
-        discounted_unit_price, discounted_line_total = _line_discount(
-            promos, catalog, it.product_variant_id, it.combo_id, it.quantity,
-            Decimal(it.unit_price),
+        discounted_unit_price, discounted_line_total = _cart_line_discount(
+            result, idx, line_total, it.quantity,
         )
         if discounted_line_total is not None:
             any_discount = True
@@ -327,17 +287,13 @@ def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> 
             options=[CartItemOptionResponse.model_validate(o) for o in it.options],
         ))
 
-    # `discounted_total` refleja el mismo motor que el cobro real: percent/fixed
-    # por línea + combos + paquete por presentación (spec 040). No se persiste
-    # (FR-014); se recalcula en cada `GET /cart`.
-    combined = promotions.combined_discount_detailed(db, _cart_promo_lines(db, cart), now)
-    discounted_total = total - combined.total
+    discounted_total = total - result.total
     return CartResponse(
         id=cart.id, participant_id=cart.participant_id, status=cart.status,
         display_name=participant.display_name,
         display_label=participant.display_label,
         total=total,
-        discounted_total=discounted_total if (any_discount or combined.total > 0) else None,
+        discounted_total=discounted_total if (any_discount or result.total > 0) else None,
         items=items,
     )
 
@@ -354,9 +310,6 @@ def get_cart(db: Session, participant_id: UUID) -> CartResponse:
 
 def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartResponse:
     cart = _get_or_create_open_cart(db, participant_id)
-
-    if data.combo_id is not None:
-        return _add_combo(db, participant_id, cart, data)
 
     variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
     if not variant.active:
@@ -386,42 +339,6 @@ def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartRespons
     except Exception:
         db.rollback()
         logger.exception("Error agregando ítem al carrito")
-        raise
-
-    return get_cart(db, participant_id)
-
-
-def _add_combo(db: Session, participant_id: UUID, cart: Cart, data: CartItemIn) -> CartResponse:
-    """Selección explícita de un combo: se expande en una `CartItem` normal por
-    cada componente (precio normal, sin opciones); el ahorro se calcula recién
-    al cobrar (`combo_discount_for_lines`), igual que con el resto de promociones."""
-    components = promotions.expand_combo(
-        db, data.combo_id, data.quantity, datetime.now(timezone.utc)
-    )
-
-    required = _cart_consumption(db, cart)
-    for component in components:
-        for iid, need in required_consumption(
-            db, component.product_variant_id, component.quantity, []
-        ).items():
-            required[iid] += need
-    check_availability(db, required, extra_context="carrito")
-
-    try:
-        for component in components:
-            item = CartItem(
-                cart_id=cart.id,
-                product_variant_id=component.product_variant_id,
-                quantity=component.quantity,
-                unit_price=component.unit_price,
-                notes=data.notes,
-                combo_id=data.combo_id,
-            )
-            db.add(item)
-        db.commit()
-    except Exception:
-        db.rollback()
-        logger.exception("Error agregando combo al carrito")
         raise
 
     return get_cart(db, participant_id)
@@ -663,18 +580,17 @@ def submit_cart(
         db.add(order)
         db.flush()
 
-        # spec 038, FR-002/FR-013 (research.md Decisión 4): mismo motor que ya
-        # usa `serialize_cart`/`GET /cart`, evaluado una sola vez antes del
-        # bucle — el snapshot de descuento del pedido recién confirmado debe
-        # coincidir exactamente con lo que el carrito mostraba justo antes.
+        # spec 038, FR-002/FR-013 (research.md D7): mismo motor que
+        # `serialize_cart`/`GET /cart`, evaluado una sola vez — el snapshot de
+        # descuento del pedido recién confirmado debe coincidir exactamente con
+        # lo que el carrito mostraba justo antes.
         now = datetime.now(timezone.utc)
-        promos = promotions.active_discount_promotions(db, now)
-        catalog = _discount_catalog(db, {ci.product_variant_id for ci in cart.items})
+        result = promotions.evaluate_variant_sets(db, _cart_promo_lines(db, cart), now)
 
-        for ci in cart.items:
-            discounted_unit_price, discounted_line_total = _line_discount(
-                promos, catalog, ci.product_variant_id, ci.combo_id, ci.quantity,
-                Decimal(ci.unit_price),
+        for idx, ci in enumerate(cart.items):
+            line_total = Decimal(ci.unit_price) * ci.quantity
+            discounted_unit_price, discounted_line_total = _cart_line_discount(
+                result, idx, line_total, ci.quantity,
             )
             item = OrderItem(
                 order_id=order.id,

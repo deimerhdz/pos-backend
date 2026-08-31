@@ -239,42 +239,39 @@ def order_sale_lines(
 
 
 def promo_lines_for(db: Session, lines: list[SaleLine]) -> list[dict]:
-    """`promo_lines` para el motor de promociones: un dict por línea con todo lo
-    que necesitan `combined_discount_detailed` y sus tres mecanismos —
-    `product_id`/`category_id`/`quantity`/`line_total` (percent/fixed/qty_price),
-    `combo_id` (`combo_discount_for_lines`, que ignora el resto de campos) y
-    `presentation_id`/`product_variant_id`/`unit_price`/`line_id`/`_variant_active`
-    (paquete por presentación, spec 040 FR-011/FR-015).
+    """`promo_lines` para `evaluate_variant_sets` (spec 063,
+    contracts/motor-y-persistencia.md §1): un dict por línea con
+    `product_variant_id` (pertenencia al conjunto), `unit_price`, `quantity`,
+    `line_id` (desempate determinista), `_variant_active` (FR-011), `combo_id`
+    (filtro defensivo — histórico) y `description` (para `applied_promotions`).
 
-    El motor línea-por-línea salta las líneas con `combo_id` internamente, así que
-    un combo y un percent/fixed nunca se acumulan sobre la misma línea."""
+    Ya NO se traen `product_id` / `category_id` / `presentation_id` (targets y
+    presentación eliminados, FR-003 / FR-027)."""
     promo_lines: list[dict] = []
     for line in lines:
         variant = db.get(ProductVariant, line.product_variant_id)
-        product = db.get(Product, variant.product_id) if variant else None
         promo_lines.append({
-            "product_id": variant.product_id if variant else None,
-            "category_id": product.category_id if product else None,
-            "quantity": line.quantity,
-            "line_total": line.line_total,
-            "unit_price": line.unit_price,
-            "combo_id": line.combo_id,
             "product_variant_id": line.product_variant_id,
+            "unit_price": line.unit_price,
+            "quantity": line.quantity,
             "line_id": getattr(line, "line_id", None),
-            "presentation_id": variant.presentation_id if variant else None,
+            "combo_id": line.combo_id,
             "_variant_active": bool(variant.active) if variant else False,
+            "description": line.description,
         })
     return promo_lines
 
 
-def auto_discount(db: Session, lines: list[SaleLine], now: datetime) -> tuple[Decimal, UUID | None]:
-    """`(descuento_automático_total, promotion_id)` — percent/fixed/qty_price
-    línea-por-línea + ahorro de combos + paquete por presentación (spec 040),
-    todo reconciliado por línea (una sola promoción por línea, la de menor
-    total). Reemplaza el par `evaluate` + `combo_discount_for_lines` de antes
-    (contracts/cobro-y-preview.md §2)."""
-    r = promotions.combined_discount_detailed(db, promo_lines_for(db, lines), now)
-    return r.total, r.promotion_id
+def auto_discount(
+    db: Session, lines: list[SaleLine], now: datetime,
+) -> tuple[Decimal, UUID | None, list[dict]]:
+    """`(descuento_automático_total, promotion_id, applied)` — motor por conjunto
+    de variantes (spec 063). `promotion_id = applied[0].promotion_id` si una sola
+    promoción explica el descuento, si no `None` (`applied_promotions` lo cubre —
+    A-29 resuelto). `applied` es el snapshot serializable para
+    `Sale/Invoice/CustomerOrder.applied_promotions` (FR-021)."""
+    r = promotions.evaluate_variant_sets(db, promo_lines_for(db, lines), now)
+    return r.total, r.single_promotion_id, promotions.applied_to_dicts(r.applied)
 
 
 def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
@@ -290,10 +287,8 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
         now = datetime.now(timezone.utc)
         lines = order_sale_lines(db, order.id)
 
-        # Descuento automático (RF-012): percent/fixed sobre las líneas sin
-        # combo, más el ahorro de los combos presentes. Antes esta orden no
-        # aplicaba ninguna promoción; ahora usa el mismo motor que mostrador.
-        promo_discount, final_promotion_id = auto_discount(db, lines, now)
+        # Descuento automático (RF-012): motor por conjunto de variantes (spec 063).
+        promo_discount, final_promotion_id, applied = auto_discount(db, lines, now)
 
         sale = build_sale(
             db,
@@ -310,8 +305,12 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
             participant_id=order.participant_id,
             customer_order_id=order.id,
             promotion_id=final_promotion_id,
+            applied_promotions=applied,
         )
         order.status = "pagada"
+        # FR-021: el descuento agregado + la lista de promociones también en la orden.
+        order.discount = Decimal(data.discount) + promo_discount
+        order.applied_promotions = applied
         # NO se descuenta inventario aquí: ya se hizo al confirmar el pedido.
 
         db.commit()
@@ -480,9 +479,9 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
         now = datetime.now(timezone.utc)
         lines = order_sale_lines(db, order.id)
 
-        # Descuento automático (RF-012), igual que `pay_order`: percent/fixed
-        # sobre las líneas sin combo, más el ahorro de los combos presentes.
-        promo_discount, final_promotion_id = auto_discount(db, lines, now)
+        # Descuento automático (RF-012), igual que `pay_order`: motor por
+        # conjunto de variantes (spec 063).
+        promo_discount, final_promotion_id, applied = auto_discount(db, lines, now)
 
         sale = build_sale(
             db,
@@ -499,7 +498,10 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
             participant_id=order.participant_id,
             customer_order_id=order.id,
             promotion_id=final_promotion_id,
+            applied_promotions=applied,
         )
+        order.discount = Decimal(data.discount) + promo_discount
+        order.applied_promotions = applied
 
         # Envía a cocina en la misma transacción: si falta stock, el
         # `rollback` de abajo revierte también la venta recién construida —
@@ -892,7 +894,7 @@ def approve_payment_attempt(
 
         now = utc_now()
         lines = order_sale_lines(db, order.id)
-        promo_discount, final_promotion_id = auto_discount(db, lines, now)
+        promo_discount, final_promotion_id, applied = auto_discount(db, lines, now)
         # Spec 056, research.md Decisión 5: el domicilio debe quedar incluido
         # en el ÚNICO pago que se autogenera aquí — de lo contrario queda
         # corto exactamente en ese valor y el propio chequeo `paid < total`
@@ -917,7 +919,10 @@ def approve_payment_attempt(
             participant_id=order.participant_id,
             customer_order_id=order.id,
             promotion_id=final_promotion_id,
+            applied_promotions=applied,
         )
+        order.discount = promo_discount
+        order.applied_promotions = applied
 
         # spec 035, A-52 (registro-de-anomalias.md): la Sale ya se construyó
         # arriba en esta misma transacción — igual que en checkout_and_send,
@@ -1018,7 +1023,7 @@ def confirm_cash_payment_attempt(
 
         now = utc_now()
         lines = order_sale_lines(db, order.id)
-        promo_discount, final_promotion_id = auto_discount(db, lines, now)
+        promo_discount, final_promotion_id, applied = auto_discount(db, lines, now)
 
         build_sale(
             db,
@@ -1034,7 +1039,10 @@ def confirm_cash_payment_attempt(
             participant_id=order.participant_id,
             customer_order_id=order.id,
             promotion_id=final_promotion_id,
+            applied_promotions=applied,
         )
+        order.discount = promo_discount
+        order.applied_promotions = applied
 
         # spec 035, A-52 (registro-de-anomalias.md): igual que en
         # approve_payment_attempt/checkout_and_send — la Sale ya existe en

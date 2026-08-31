@@ -182,9 +182,9 @@ def compute_bill(db: Session, table_session_id: UUID) -> SessionBillResponse:
         for order in orders:
             lines.extend(checkout.order_sale_lines(db, order.id, participant_id=pid))
         raw_subtotal = sum((line.line_total for line in lines), Decimal("0"))
-        # spec 040: la unidad de agrupación del paquete por presentación es el
-        # subconjunto de líneas evaluadas juntas — aquí, por comensal (research.md D16).
-        promo_discount, _ = checkout.auto_discount(db, lines, now)
+        # spec 063: el motor por conjunto agrupa el subconjunto de líneas
+        # evaluadas juntas — aquí, por comensal (research.md D7).
+        promo_discount, _, _ = checkout.auto_discount(db, lines, now)
         subtotal = raw_subtotal - promo_discount
         total += subtotal
         split.append(SessionBillLine(
@@ -663,9 +663,9 @@ def _close_unified(
         lines.extend(checkout.order_sale_lines(db, order.id))
 
     now = utc_now()
-    promo_discount, final_promotion_id = checkout.auto_discount(db, lines, now)
+    promo_discount, final_promotion_id, applied = checkout.auto_discount(db, lines, now)
 
-    return build_sale(
+    sale = build_sale(
         db,
         lines=lines,
         shift=shift,
@@ -679,8 +679,15 @@ def _close_unified(
         # Una venta unificada cubre a varios comensales: no cuelga de ninguno.
         customer_order_id=orders[0].id if len(orders) == 1 else None,
         promotion_id=final_promotion_id,
+        applied_promotions=applied,
         invoice_prefix=invoice_prefix,
     )
+    # FR-021: el agregado + la lista también en cada CustomerOrder de la sesión.
+    for order in orders:
+        order.discount = Decimal(data.discount) + promo_discount if len(orders) == 1 else Decimal("0")
+        order.applied_promotions = applied
+    db.flush()
+    return sale
 
 
 def _close_split(
@@ -755,11 +762,14 @@ def _close_split(
                 db, order.id, participant_id=bloque.participant_id
             ))
 
-        # Cada comensal evalúa promociones/combos/paquetes por presentación sobre
-        # sus propias líneas: nada se mezcla entre comensales (research.md D16).
-        # (El importe del descuento automático en el split lo maneja el caller vía
-        # `bloque.discount`, igual que antes — aquí solo se deriva `promotion_id`.)
-        _, final_promotion_id = checkout.auto_discount(db, lines, now)
+        # Cada comensal evalúa promociones sobre sus propias líneas: nada se
+        # mezcla entre comensales (research.md D7). El importe del descuento
+        # automático en el split lo maneja el caller vía `bloque.discount`, igual
+        # que antes — aquí se derivan `promotion_id` y la lista `applied` para el
+        # snapshot de la Sale/Invoice (FR-021). El `CustomerOrder` no se toca en
+        # split: una orden puede abarcar a varios comensales, su descuento por
+        # orden no está definido — la Sale y la Invoice son las autoritativas.
+        _, final_promotion_id, applied = checkout.auto_discount(db, lines, now)
 
         sales.append(build_sale(
             db,
@@ -773,6 +783,7 @@ def _close_split(
             table_session_id=ts.id,
             participant_id=bloque.participant_id,
             promotion_id=final_promotion_id,
+            applied_promotions=applied,
             invoice_prefix=invoice_prefix,
         ))
     return sales

@@ -151,7 +151,7 @@ def group_bill(db: Session, group_id: UUID) -> dict:
         else:
             lines = checkout.order_sale_lines(db, o.id)
             raw = sum((l.line_total for l in lines), start=Decimal("0"))
-            promo_discount, _ = checkout.auto_discount(db, lines, now)
+            promo_discount, _, _ = checkout.auto_discount(db, lines, now)
             sub = raw - promo_discount
             total += sub
         per_order.append({

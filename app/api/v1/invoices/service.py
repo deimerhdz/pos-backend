@@ -68,6 +68,9 @@ def issue_for_sale(db: Session, sale: Sale, *, user: User, prefix: str = "") -> 
         tax=sale.tax,
         tip=sale.tip,
         total=sale.total,
+        # spec 063 (FR-021): snapshot inmutable copiado de la venta, igual que
+        # `discount=sale.discount`.
+        applied_promotions=list(sale.applied_promotions or []),
         status="issued",
         user_id=user.id,
         user_name=user.name,
