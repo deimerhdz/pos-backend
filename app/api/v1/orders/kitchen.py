@@ -124,12 +124,6 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
     repl_variant = None
     repl_options: list[Option] = []
     if data.replacement is not None:
-        if data.replacement.combo_id is not None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "No se puede reemplazar un ítem anulado por un combo; "
-                "anula todos sus componentes y agrégalo de nuevo",
-            )
         repl_variant = get_or_404(
             db, ProductVariant, data.replacement.product_variant_id, "Variant not found"
         )

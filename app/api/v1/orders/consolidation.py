@@ -26,7 +26,6 @@ from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
 from app.api.v1.orders.consumption import deduct_order_items
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
-from app.api.v1.promotions import service as promotions
 
 logger = logging.getLogger(__name__)
 
@@ -185,22 +184,14 @@ def add_item_to_table(db: Session, table_id: UUID, data, user: User) -> Customer
     mesero, Fase 5). Aplica la regla de routing (orden abierta o crea orden-hija)
     y el mismo descuento de inventario por ítem que la consolidación.
 
-    Un `combo_id` se expande en sus componentes reales a precio normal (igual
-    que `cart/service.py::_add_combo`); el ahorro del combo no se calcula aquí,
-    se realiza al cobrar (`pay_order`/`close_session`)."""
+    spec 063 (FR-024): el mecanismo de combo se retira; `combo_id` ya no llega."""
     table = get_or_404(db, DiningTable, table_id, "Table not found")
 
-    if data.combo_id is not None:
-        components = promotions.expand_combo(
-            db, data.combo_id, data.quantity, datetime.now(timezone.utc)
-        )
-        lines = [(c.product_variant_id, c.quantity, [], c.unit_price, data.combo_id) for c in components]
-    else:
-        variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
-        if not variant.active:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
-        options = load_valid_options(db, data.option_ids, variant=variant)
-        lines = [(variant.id, data.quantity, options, compute_line_price(variant, options), None)]
+    variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
+    if not variant.active:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
+    options = load_valid_options(db, data.option_ids, variant=variant)
+    lines = [(variant.id, data.quantity, options, compute_line_price(variant, options), None)]
 
     try:
         order = get_or_create_open_order(db, table.id, user.id)

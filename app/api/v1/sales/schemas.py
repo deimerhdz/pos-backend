@@ -2,7 +2,7 @@ from enum import Enum
 from uuid import UUID
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.timezone import UtcDatetime
 
@@ -78,18 +78,10 @@ class PaymentMethodCheckoutOption(BaseModel):
 
 # ---------- Checkout ----------
 class SaleItemIn(BaseModel):
-    product_variant_id: UUID | None = None
-    combo_id: UUID | None = None
+    # spec 063 (FR-024): el mecanismo de combo se retira; `combo_id` ya no se acepta.
+    product_variant_id: UUID
     quantity: int = Field(1, ge=1)
     option_ids: list[UUID] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _one_of(self):
-        if (self.product_variant_id is None) == (self.combo_id is None):
-            raise ValueError("Cada ítem requiere product_variant_id o combo_id (no ambos)")
-        if self.combo_id is not None and self.option_ids:
-            raise ValueError("Los combos no admiten option_ids en esta versión")
-        return self
 
 
 class PaymentIn(BaseModel):
