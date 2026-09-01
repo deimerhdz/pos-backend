@@ -26,13 +26,21 @@ from app.api.v1.menu.router import _build_menu, _build_menu_promotions
 
 
 class TestBuildMenuA08(unittest.TestCase):
+    """CONGELA comportamiento corregido — A-08, re-congelado para el modelo por
+    conjunto de variantes de la spec 063 (A-58…A-65). La corrección de zona
+    horaria (A-08) **se conserva**: `_build_menu` sigue devolviendo
+    `list[MenuCategoryResponse]` y `now` viaja aware."""
+
     def _seed(self, db):
         category = fx.make_category(db)
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=Decimal("10000"))
-        fx.make_promotion(
-            db, type="percent", value=Decimal("20"), status="active",
-            start_time=time(20, 0), end_time=time(21, 0),
+        promo = fx.make_promotion(
+            db, status="active", start_time=time(20, 0), end_time=time(21, 0),
+        )
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("20"), min_qty=1,
+            variants=[variant],
         )
         db.commit()
         return variant
@@ -68,21 +76,25 @@ class TestBuildMenuA08(unittest.TestCase):
 
 
 class TestMenuPromotionsAnnouncementUS5(unittest.TestCase):
-    """spec 040 — US5 / FR-021 / SC-006: el menú QR anuncia las promociones de
-    precio por presentación **vigentes en ese instante**. Casos NUEVOS — no se
-    toca `_build_menu` ni los `test_a08_*` de arriba (research.md D12)."""
+    """spec 063 — US4 / FR-022 / SC-007: el menú QR anuncia las promociones por
+    **conjunto de variantes** vigentes en ese instante. Reescrita de la clase de
+    la spec 040 (A-58…A-65): el anuncio describe el conjunto, ya no una
+    presentación. `_build_menu` no cambia de firma."""
 
     def _seed(self, db, *, days_of_week=None, start_time=None, end_time=None):
-        p8 = fx.make_presentation(db, name="8oz")
         prod = fx.make_product(db)
-        v = fx.make_variant(db, product=prod, name="8oz", price=Decimal("7000"))
-        fx.assign_presentation(db, v, p8)
+        variants = [
+            fx.make_variant(db, product=prod, name=f"sabor-{i}", price=Decimal("7000"))
+            for i in range(8)
+        ]
         promo = fx.make_promotion(
-            db, name="2 x 8oz por 12.000", type="qty_price_presentation",
-            status="active", value=Decimal("0"),
+            db, name="2 de 8 sabores por 12.000", status="active",
             days_of_week=days_of_week, start_time=start_time, end_time=end_time,
         )
-        fx.make_presentation_rule(db, promo, p8, min_qty=2, pack_price="12000")
+        fx.add_rule_to_promotion(
+            db, promo, type="package_price", value=Decimal("12000"), min_qty=2,
+            variants=variants,
+        )
         db.commit()
         return promo
 
@@ -92,10 +104,9 @@ class TestMenuPromotionsAnnouncementUS5(unittest.TestCase):
         anuncios = _build_menu_promotions(db, datetime(2026, 8, 5, 18, 0, tzinfo=timezone.utc))
         self.assertEqual(len(anuncios), 1)
         regla = anuncios[0].rules[0]
-        self.assertEqual(
-            regla.text,
-            "Llevando 2 de cualquier sabor en presentación 8oz por $12.000",
-        )
+        self.assertEqual(regla.text, "Llevando 2 de estas 8 variantes pagas $12.000")
+        self.assertEqual(regla.variant_count, 8)
+        self.assertEqual(regla.min_qty, 2)
 
     def test_fuera_de_ventana_de_dia_no_se_anuncia(self):
         db = fx.new_session()

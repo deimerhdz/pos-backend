@@ -86,6 +86,7 @@ def build_sale(
     participant_id: UUID | None = None,
     customer_order_id: UUID | None = None,
     promotion_id: UUID | None = None,
+    applied_promotions: list[dict] | None = None,
     invoice_prefix: str = "",
 ) -> Sale:
     """Arma `Sale` + `SaleItem` + `Payment`, deja la venta en `paid` y **emite su
@@ -117,6 +118,8 @@ def build_sale(
         tip=tip,
         delivery_fee=delivery_fee,
         promotion_id=promotion_id,
+        # spec 063 (FR-021): snapshot de las promociones que descontaron.
+        applied_promotions=applied_promotions or [],
         status="issued",
     )
     db.add(sale)

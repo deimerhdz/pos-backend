@@ -262,40 +262,46 @@ class TestTableSessionsService(unittest.TestCase):
     # -------------------------------------------------------- compute_bill (T021)
 
     def test_compute_bill_a01_camino_base(self):
-        """CONGELA comportamiento actual — A-01 (camino A, correcto,
-        `service.py:139-181`): con pedidos en distintos estados repartidos entre
-        dos comensales y una promoción + un combo activos, el `total` y el
-        desglose por comensal excluyen los pedidos `cancelada`/`pagada`, y
-        aplican el descuento de promoción/combo por comensal."""
+        """CONGELA comportamiento actual — A-01 (camino A, correcto), reescrito
+        para el modelo por conjunto de variantes de la spec 063 (A-58…A-65): con
+        pedidos en distintos estados repartidos entre dos comensales y dos
+        promociones activas (una `percent`, una `package_price`), el `total` y el
+        desglose por comensal excluyen los pedidos `cancelada`/`pagada` y aplican
+        el descuento por comensal."""
         db, table, ts = self._seed_bare_session()
         ana = fx.make_participant(db, table_session=ts, display_name="Ana", display_label="Ana")
         beto = fx.make_participant(db, table_session=ts, display_name="Beto", display_label="Beto")
 
-        # Ana: una línea con descuento percent del 10% (promoción automática).
+        # Ana: una línea con descuento percent del 10%.
         cat_a = fx.make_category(db)
         prod_a = fx.make_product(db, category=cat_a)
         variant_a = fx.make_variant(db, product=prod_a, price=Decimal("10000"))
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
-        fx.make_promotion_target(db, promo, category_id=cat_a.id)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1, variants=[variant_a],
+        )
 
-        # Beto: un combo completo de dos variantes distintas.
+        # Beto: un paquete de 2 variantes distintas del conjunto a $11.000
+        # (mismo ahorro que el combo viejo: 6000+7000-11000 = 2000).
         cat_b = fx.make_category(db)
         prod_b = fx.make_product(db, category=cat_b)
         variant_1 = fx.make_variant(db, product=prod_b, price=Decimal("6000"))
         variant_2 = fx.make_variant(db, product=prod_b, price=Decimal("7000"))
-        combo = fx.make_promotion(db, type="combo", value=Decimal("11000"), status="active")
-        fx.make_combo_item(db, combo, variant_1, quantity=1)
-        fx.make_combo_item(db, combo, variant_2, quantity=1)
+        paquete = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, paquete, type="package_price", value=Decimal("11000"), min_qty=2,
+            variants=[variant_1, variant_2],
+        )
 
         order_abierta = fx.make_customer_order(db, ts, status="abierta")
         fx.make_order_item(db, order_abierta, variant_a, participant_id=ana.id, estado_cocina="listo")
         fx.make_order_item(
             db, order_abierta, variant_1, participant_id=beto.id,
-            combo_id=combo.id, estado_cocina="en_preparacion",
+            estado_cocina="en_preparacion",
         )
         fx.make_order_item(
             db, order_abierta, variant_2, participant_id=beto.id,
-            combo_id=combo.id, estado_cocina="listo",
+            estado_cocina="listo",
         )
 
         order_cancelada = fx.make_customer_order(db, ts, status="cancelada")
@@ -326,8 +332,10 @@ class TestTableSessionsService(unittest.TestCase):
         cat = fx.make_category(db)
         prod = fx.make_product(db, category=cat)
         variant = fx.make_variant(db, product=prod, price=Decimal("10000"))
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active")
-        fx.make_promotion_target(db, promo, category_id=cat.id)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1, variants=[variant],
+        )
 
         order = fx.make_customer_order(db, ts, status="abierta")
         fx.make_order_item(db, order, variant, participant_id=ana.id, estado_cocina="listo", quantity=2)
@@ -455,11 +463,12 @@ class TestTableSessionsService(unittest.TestCase):
 
     # --------------------------------------------------------------- A-29 (T024)
 
-    def test_close_session_unified_a29_promotion_id_no_registra_combos_multiples(self):
-        """CONGELA comportamiento actual — A-29 (parcial, `service.py:555-559`
-        dentro de `_close_unified`): con dos combos distintos en la misma venta,
-        `promotion_id` no registra ninguno, aunque el descuento monetario de
-        ambos sí se suma correctamente al total."""
+    def test_close_session_unified_a29_applied_promotions_registra_las_dos(self):
+        """CONGELA comportamiento actual — A-29, reescrito para la spec 063
+        (A-64: `applied_promotions` resuelve A-29). Con dos promociones distintas
+        descontando líneas de la misma venta unificada, `promotion_id` queda
+        `None` (como hoy) **pero** `applied_promotions` de la `Sale` y de cada
+        `CustomerOrder` registra las dos, y la suma cuadra con `discount`."""
         db, table, ts = self._seed_bare_session()
         ana = fx.make_participant(db, table_session=ts)
 
@@ -467,19 +476,23 @@ class TestTableSessionsService(unittest.TestCase):
         prod = fx.make_product(db, category=cat)
         v1a = fx.make_variant(db, product=prod, price=Decimal("6000"))
         v1b = fx.make_variant(db, product=prod, price=Decimal("7000"))
-        combo1 = fx.make_promotion(db, type="combo", value=Decimal("11000"), status="active")
-        fx.make_combo_item(db, combo1, v1a, quantity=1)
-        fx.make_combo_item(db, combo1, v1b, quantity=1)
+        paquete1 = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, paquete1, type="package_price", value=Decimal("11000"), min_qty=2,
+            variants=[v1a, v1b],
+        )
 
         v2a = fx.make_variant(db, product=prod, price=Decimal("4000"))
         v2b = fx.make_variant(db, product=prod, price=Decimal("5000"))
-        combo2 = fx.make_promotion(db, type="combo", value=Decimal("8000"), status="active")
-        fx.make_combo_item(db, combo2, v2a, quantity=1)
-        fx.make_combo_item(db, combo2, v2b, quantity=1)
+        paquete2 = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, paquete2, type="package_price", value=Decimal("8000"), min_qty=2,
+            variants=[v2a, v2b],
+        )
 
         order = fx.make_customer_order(db, ts, status="abierta")
-        for variant, combo in ((v1a, combo1), (v1b, combo1), (v2a, combo2), (v2b, combo2)):
-            fx.make_order_item(db, order, variant, participant_id=ana.id, combo_id=combo.id)
+        for variant in (v1a, v1b, v2a, v2b):
+            fx.make_order_item(db, order, variant, participant_id=ana.id)
 
         register = fx.make_cash_register(db)
         shift = fx.make_cash_shift(db, register=register)
@@ -498,9 +511,18 @@ class TestTableSessionsService(unittest.TestCase):
         ventas = self._ventas(db, ts.id)
         self.assertEqual(len(ventas), 1)
         venta = ventas[0]
-        # Ambos combos descuentan: (6000+7000-11000) + (4000+5000-8000) = 3000
+        # Ambos paquetes descuentan: (6000+7000-11000) + (4000+5000-8000) = 3000
         self.assertEqual(venta.discount, Decimal("3000.00"))
         self.assertIsNone(venta.promotion_id)
+        registradas = {e["promotion_id"] for e in venta.applied_promotions}
+        self.assertEqual(registradas, {str(paquete1.id), str(paquete2.id)})
+        suma = sum(Decimal(e["amount"]) for e in venta.applied_promotions)
+        self.assertEqual(suma, Decimal("3000.00"))
+        db.refresh(order)
+        self.assertEqual(
+            {e["promotion_id"] for e in order.applied_promotions},
+            {str(paquete1.id), str(paquete2.id)},
+        )
 
     # ---------------------------------------------------- RN-MESA-13 / A-38 (T025)
 

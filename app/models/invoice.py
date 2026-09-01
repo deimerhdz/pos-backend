@@ -1,7 +1,7 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy import (
-    String, Integer, Numeric, ForeignKey, DateTime, func, CheckConstraint, UniqueConstraint,
+    String, Integer, Numeric, ForeignKey, DateTime, func, CheckConstraint, UniqueConstraint, text,
 )
 from sqlalchemy.orm import mapped_column, Mapped
 from typing import Optional
@@ -36,6 +36,13 @@ class Invoice(UUIDPrimaryKeyMixin, Base):
     tax: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
     tip: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
     total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
+
+    # spec 063 (FR-021, A-64): `issue_for_sale` la copia de `sale.applied_promotions`
+    # dentro de la transacción del cobro, igual que hoy copia `discount=sale.discount`.
+    # Snapshot inmutable. Nace `'[]'` para toda factura existente.
+    applied_promotions: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
 
     status: Mapped[str] = mapped_column(String(10), nullable=False, server_default="issued")
 

@@ -13,10 +13,6 @@ class VariantCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, examples=["1 bola", "2 bolas"])
     price: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
     sku: str | None = Field(None, max_length=100)
-    # spec 040: presentación de catálogo compartido a la que apunta la variante.
-    # NULL (por defecto) = no participa de ninguna regla de promoción por
-    # presentación (FR-008). Debe existir y estar activa, o ser NULL.
-    presentation_id: UUID | None = None
 
 
 class VariantUpdate(BaseModel):
@@ -26,9 +22,6 @@ class VariantUpdate(BaseModel):
     price: Decimal | None = Field(None, ge=0, max_digits=12, decimal_places=2)
     sku: str | None = Field(None, max_length=100)
     active: bool | None = None
-    # spec 040: enviar `null` desasigna la presentación (usar `model_fields_set`
-    # para distinguir "no enviado" de "enviado null").
-    presentation_id: UUID | None = None
 
 
 class VariantResponse(BaseModel):
@@ -38,7 +31,6 @@ class VariantResponse(BaseModel):
     sku: str | None = None
     price: Decimal
     active: bool
-    presentation_id: UUID | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

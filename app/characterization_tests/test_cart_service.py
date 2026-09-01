@@ -156,8 +156,7 @@ class TestCartService(unittest.TestCase):
         db, table, ts, participant = self._seed_session()
         variant, product, category = self._seed_variant(db)
         cart_fixtures.make_promotion(
-            db, type="percent", value=Decimal("20"), status="active",
-            start_time=time(20, 0), end_time=time(21, 0),
+            db, status="active", start_time=time(20, 0), end_time=time(21, 0),
         )
 
         instant = datetime(2026, 1, 15, 20, 0, tzinfo=timezone.utc)
@@ -172,13 +171,16 @@ class TestCartService(unittest.TestCase):
     def test_serialize_cart_dentro_de_ventana_en_hora_local_si_descuenta(self):
         """CA3 (sin regresión): a la 01:00 UTC del día siguiente (20:00
         Bogotá, dentro de la ventana 20:00-21:00 local) el carrito SÍ debe
-        aplicar el descuento — mismo resultado que ya producía el caso
-        correcto antes de esta corrección."""
+        aplicar el descuento — reescrito para el conjunto de variantes de la
+        spec 063 (A-58…A-65); la corrección de zona horaria (A-08) se conserva."""
         db, table, ts, participant = self._seed_session()
         variant, product, category = self._seed_variant(db)
-        cart_fixtures.make_promotion(
-            db, type="percent", value=Decimal("20"), status="active",
-            start_time=time(20, 0), end_time=time(21, 0),
+        promo = cart_fixtures.make_promotion(
+            db, status="active", start_time=time(20, 0), end_time=time(21, 0),
+        )
+        cart_fixtures.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("20"), min_qty=1,
+            variants=[variant],
         )
 
         instant = datetime(2026, 1, 16, 1, 0, tzinfo=timezone.utc)
@@ -261,26 +263,8 @@ class TestCartService(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.status_code, 422)
 
-    def test_add_item_combo(self):
-        """CONGELA comportamiento actual: seleccionar un combo (`combo_id`)
-        delega en `promotions.expand_combo` y expande una `CartItem` por
-        componente, a precio normal (sin opciones), con `combo_id` marcado en
-        cada línea."""
-        db, table, ts, participant = self._seed_session()
-        variant1, product, category = self._seed_variant(db, price=Decimal("6000"))
-        variant2 = cart_fixtures.make_variant(db, product=product, price=Decimal("7000"))
-        combo = cart_fixtures.make_promotion(db, type="combo", value=Decimal("11000"), status="active")
-        cart_fixtures.make_combo_item(db, combo, variant1, quantity=1)
-        cart_fixtures.make_combo_item(db, combo, variant2, quantity=1)
-
-        resp = service.add_item(db, participant.id, CartItemIn(combo_id=combo.id, quantity=1))
-
-        combo_items = [it for it in resp.items if it.combo_id == combo.id]
-        self.assertEqual(len(combo_items), 2)
-        self.assertEqual(
-            sorted(it.unit_price for it in combo_items),
-            [Decimal("6000"), Decimal("7000")],
-        )
+    # spec 063 (FR-024, A-61): `test_add_item_combo` se elimina — el mecanismo de
+    # selección explícita de combos se retira; `CartItemIn` ya no acepta `combo_id`.
 
     # ----------------------------------------------------------------- update_item (T015)
 
@@ -343,14 +327,18 @@ class TestCartService(unittest.TestCase):
         self.assertIsNone(resp.discounted_total)
 
     def test_serialize_cart_discounted_total_con_promocion_activa(self):
-        """CONGELA comportamiento actual: con una promoción `percent` activa
-        cuyo alcance incluye la categoría de la línea, `discounted_total`
+        """CONGELA comportamiento actual, reescrito para el conjunto de
+        variantes de la spec 063 (A-58…A-65): con una promoción `percent`
+        activa cuyo conjunto incluye la variante de la línea, `discounted_total`
         queda por debajo de `total` y la línea trae su
         `discounted_unit_price`/`discounted_line_total`."""
         db, table, ts, participant = self._seed_session()
         variant, product, category = self._seed_variant(db, price=Decimal("10000"))
-        promo = cart_fixtures.make_promotion(db, type="percent", value=Decimal("10"), status="active")
-        cart_fixtures.make_promotion_target(db, promo, category_id=category.id)
+        promo = cart_fixtures.make_promotion(db, status="active")
+        cart_fixtures.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1,
+            variants=[variant],
+        )
 
         resp = service.add_item(
             db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1)
@@ -360,30 +348,32 @@ class TestCartService(unittest.TestCase):
         self.assertEqual(resp.discounted_total, Decimal("9000.00"))
         self.assertEqual(resp.items[0].discounted_line_total, Decimal("9000.00"))
 
-    def test_serialize_cart_combo_no_recibe_descuento_adicional(self):
-        """CONGELA comportamiento actual: las líneas de combo (`combo_id`
-        distinto de `None`) no reciben además un descuento percent/fixed,
-        aunque una promoción automática activa alcance su categoría — el
-        ahorro del combo ya se calcula aparte, al cobrar
-        (`combo_discount_for_lines`)."""
+    def test_us4_ca3_package_price_min_qty_3_solo_descuenta_al_completar_el_grupo(self):
+        """spec 063, US4-CA3 (contracts/migracion.md §3): con una promoción
+        `package_price` de `min_qty` 3 activa sobre la variante, el carrito con 1
+        o 2 unidades muestra `discounted_total = None` (precio normal); al llegar
+        a 3, `discounted_total` refleja el precio de paquete."""
         db, table, ts, participant = self._seed_session()
-        variant1, product, category = self._seed_variant(db, price=Decimal("6000"))
-        variant2 = cart_fixtures.make_variant(db, product=product, price=Decimal("7000"))
-        combo = cart_fixtures.make_promotion(db, type="combo", value=Decimal("11000"), status="active")
-        cart_fixtures.make_combo_item(db, combo, variant1, quantity=1)
-        cart_fixtures.make_combo_item(db, combo, variant2, quantity=1)
-        percent_promo = cart_fixtures.make_promotion(
-            db, type="percent", value=Decimal("50"), status="active"
+        variant, _, _ = self._seed_variant(db, price=Decimal("6000"))
+        promo = cart_fixtures.make_promotion(db, status="active")
+        cart_fixtures.add_rule_to_promotion(
+            db, promo, type="package_price", value=Decimal("16000"), min_qty=3,
+            variants=[variant],
         )
-        cart_fixtures.make_promotion_target(db, percent_promo, category_id=category.id)
 
-        resp = service.add_item(db, participant.id, CartItemIn(combo_id=combo.id, quantity=1))
+        resp = service.add_item(
+            db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=2)
+        )
+        self.assertIsNone(resp.discounted_total)  # no alcanza el grupo -> sin descuento
 
-        combo_items = [it for it in resp.items if it.combo_id == combo.id]
-        self.assertEqual(len(combo_items), 2)
-        for it in combo_items:
-            self.assertIsNone(it.discounted_unit_price)
-            self.assertIsNone(it.discounted_line_total)
+        resp = service.update_item(
+            db, participant.id, resp.items[0].id, CartItemUpdate(quantity=3)
+        )
+        self.assertIsNotNone(resp.discounted_total)
+        self.assertEqual(resp.discounted_total, Decimal("16000.00"))  # 18000 - 2000
+
+    # spec 063 (FR-024, A-61): `test_serialize_cart_combo_no_recibe_descuento_adicional`
+    # se elimina — el mecanismo de combo se retira.
 
     # --------------------------------------------------------------- list_my_orders (T018)
 
@@ -549,8 +539,11 @@ class TestCartService(unittest.TestCase):
         db, table, ts, participant = self._seed_session()
         variant1, product, category = self._seed_variant(db, price=Decimal("10000"))
         variant2, _, _ = self._seed_variant(db, price=Decimal("5000"))
-        promo = cart_fixtures.make_promotion(db, type="percent", value=Decimal("10"), status="active")
-        cart_fixtures.make_promotion_target(db, promo, category_id=category.id)
+        promo = cart_fixtures.make_promotion(db, status="active")
+        cart_fixtures.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1,
+            variants=[variant1],
+        )
         efectivo = self._seed_efectivo(db)
 
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant1.id, quantity=1))
@@ -585,7 +578,7 @@ class TestCartService(unittest.TestCase):
         item_ids = {it.id for it in cart.items}
 
         with mock.patch(
-            "app.api.v1.cart.service.promotions.active_discount_promotions",
+            "app.api.v1.cart.service.promotions.evaluate_variant_sets",
             side_effect=RuntimeError("boom"),
         ):
             with self.assertRaises(RuntimeError):

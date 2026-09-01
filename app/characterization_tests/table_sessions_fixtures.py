@@ -26,10 +26,11 @@ from types import SimpleNamespace
 from unittest import mock
 import uuid
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
+from sqlalchemy.schema import DefaultClause
 
 from app.characterization_tests.fixtures import (
     make_category,
@@ -52,7 +53,7 @@ __all__ = [
     "new_session",
     "make_dining_table", "make_table_session", "make_participant", "make_cart",
     "make_customer_order", "make_order_item",
-    "make_promotion", "make_promotion_target", "make_combo_item",
+    "make_promotion", "add_rule_to_promotion",
     "make_cash_register", "make_cash_shift", "make_payment_method",
     "make_tenant_double", "make_user_double",
     "spy_load", "spy_bill_changed",
@@ -68,7 +69,7 @@ from app.models.cart import Cart
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
 from app.models.product_variant import ProductVariant
-from app.models.promotion import Promotion, PromotionTarget, PromotionComboItem
+from app.models.promotion import Promotion, PromotionRule, PromotionVariant
 from app.models.cash_register import CashRegister
 from app.models.cash_shift import CashShift
 from app.models.payment import Payment, PaymentMethod
@@ -106,12 +107,10 @@ _TABLE_SESSIONS_TABLE_NAMES = [
     "order_item_options",
     "carts",
     "promotions",
-    "promotion_targets",
-    "promotion_combo_items",
-    # spec 040: `presentation_rules` de `Promotion` + FK `presentation_id` de la
-    # variante — contrapartida de la migración `f03274730367`.
-    "presentations",
-    "promotion_presentation_rules",
+    # spec 063 (revisión 2026-09-01): una promoción agrupa una o más reglas.
+    "promotion_rules",
+    # spec 063: conjunto explícito de variantes elegibles (de una regla).
+    "promotion_variants",
     "cash_registers",
     "cash_shifts",
     "payment_methods",
@@ -148,17 +147,29 @@ def _patch_sqlite_incompatible_server_defaults() -> None:
     en memoria que usa este fixture (no se reemplaza por un literal: `Column.
     server_default` se compara con `bool()` en otros puntos de SQLAlchemy, y un
     `TextClause` sin envolver en `DefaultClause` no lo soporta). No es una
-    migración de modelo: no toca `app/models/sale.py` ni cambia el DDL real de
-    Postgres — todos los tests de este fixture siembran `options` explícito
+    migración de modelo: no toca los modelos de producción ni cambia el DDL real
+    de Postgres — todos los tests siembran esos campos explícito
     (`build_sale`/`order_sale_lines` de producción también lo hacen siempre), así
     que el `DEFAULT` nunca hacía falta de verdad. Idempotente: `None` sobre
-    `None` no tiene efecto adicional en una segunda llamada."""
+    `None` no tiene efecto adicional en una segunda llamada.
+
+    spec 063: mismo tratamiento para `sales`/`invoices`/`customer_orders.
+    applied_promotions` (`server_default=text("'[]'::jsonb")`)."""
+    strip_default = {"sale_items": ["options"]}
+    literal_default = {
+        "sales": ["applied_promotions"],
+        "invoices": ["applied_promotions"],
+        "customer_orders": ["applied_promotions"],
+    }
     for table in Base.metadata.tables.values():
-        if table.name != "sale_items":
-            continue
-        col = table.c.get("options")
-        if col is not None:
-            col.server_default = None
+        for col_name in strip_default.get(table.name, ()):
+            col = table.c.get(col_name)
+            if col is not None:
+                col.server_default = None
+        for col_name in literal_default.get(table.name, ()):
+            col = table.c.get(col_name)
+            if col is not None:
+                col.server_default = DefaultClause(text("'[]'"))
 
 
 def new_session() -> Session:
@@ -283,15 +294,14 @@ def make_order_item(
 
 
 def make_promotion(db: Session, **kw) -> Promotion:
-    """`kw.setdefault` fuerza `start_time=None, end_time=None` (research.md §5):
-    sin ventana horaria, siempre válida sin importar el reloj real."""
+    """spec 063 (revisión 2026-09-01): la promoción solo lleva vigencia y
+    estado — `type`/`value`/`min_qty` viven en cada `PromotionRule`
+    (`add_rule_to_promotion`). `kw.setdefault` fuerza `start_time=None,
+    end_time=None` (research.md §5): sin ventana horaria, siempre válida sin
+    importar el reloj real."""
     kw.setdefault("id", _uid())
     kw.setdefault("name", f"promo-{kw['id']}")
-    kw.setdefault("type", "percent")
-    kw.setdefault("value", Decimal("10"))
     kw.setdefault("status", "active")
-    kw.setdefault("priority", 0)
-    kw.setdefault("min_qty", 1)
     kw.setdefault("start_time", None)
     kw.setdefault("end_time", None)
     # `promotions.service._best_line_match` ordena por `created_at.timestamp()`:
@@ -304,26 +314,33 @@ def make_promotion(db: Session, **kw) -> Promotion:
     return obj
 
 
-def make_promotion_target(db: Session, promotion: Promotion, **kw) -> PromotionTarget:
+def add_rule_to_promotion(
+    db: Session,
+    promotion: Promotion,
+    *,
+    type: str = "percent",
+    value: Decimal = Decimal("10"),
+    min_qty: int = 1,
+    variants: list[ProductVariant] = (),
+    **kw,
+) -> PromotionRule:
+    """spec 063 (revisión 2026-09-01, FR-001/FR-001a): agrega una regla
+    (tipo, valor, cantidad mínima + su propio conjunto de variantes) a una
+    promoción (contracts/migracion.md §2.1)."""
     kw.setdefault("id", _uid())
-    kw.setdefault("promotion_id", promotion.id)
-    obj = PromotionTarget(**kw)
-    db.add(obj)
+    rule = PromotionRule(
+        promotion_id=promotion.id, type=type, value=value, min_qty=min_qty, **kw
+    )
+    db.add(rule)
     db.flush()
-    return obj
-
-
-def make_combo_item(
-    db: Session, promotion: Promotion, variant: ProductVariant, **kw
-) -> PromotionComboItem:
-    kw.setdefault("id", _uid())
-    kw.setdefault("promotion_id", promotion.id)
-    kw.setdefault("product_variant_id", variant.id)
-    kw.setdefault("quantity", 1)
-    obj = PromotionComboItem(**kw)
-    db.add(obj)
+    for variant in variants:
+        db.add(PromotionVariant(
+            id=_uid(),
+            promotion_rule_id=rule.id,
+            product_variant_id=variant.id,
+        ))
     db.flush()
-    return obj
+    return rule
 
 
 def make_cash_register(db: Session, **kw) -> CashRegister:
