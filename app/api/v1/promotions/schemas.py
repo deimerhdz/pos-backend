@@ -101,11 +101,29 @@ def _no_repeats(variant_ids: list[UUID] | None) -> list[UUID] | None:
     return variant_ids
 
 
-class PromotionCreate(_VigenciaMixin, _PromotionRules):
-    name: str = Field(..., min_length=1, max_length=255)
-    description: str | None = Field(None, max_length=2000)
+class PromotionRuleIn(_PromotionRules):
+    """spec 063 (revisión 2026-09-01, FR-001/FR-001a): una regla dentro de
+    `PromotionCreate.rules` / `PromotionShapeUpdate.rules` — la combinación
+    (tipo, valor, cantidad mínima) más su propio conjunto de variantes. Antes
+    de esta revisión, estos campos vivían sueltos en `PromotionCreate` /
+    `PromotionShapeUpdate` (una promoción = una combinación)."""
     type: PromotionType
     value: Decimal = Field(..., ge=0, max_digits=12, decimal_places=2)
+    min_qty: int = Field(1, ge=1)
+    # FR-001a: conjunto explícito de variantes elegibles de ESTA regla. >= 1,
+    # sin repetidos dentro de la misma regla (la disjunción entre reglas de
+    # una misma promoción se valida en el servicio, `_guard_variant_overlap`).
+    variant_ids: list[UUID] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _variant_ids_unique(self):
+        _no_repeats(self.variant_ids)
+        return self
+
+
+class PromotionCreate(_VigenciaMixin):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str | None = Field(None, max_length=2000)
     # Nace en borrador: activar es una acción explícita, no un default.
     status: PromotionStatus = PromotionStatus.DRAFT
     # FR-012: `starts_at` es obligatoria.
@@ -114,9 +132,9 @@ class PromotionCreate(_VigenciaMixin, _PromotionRules):
     days_of_week: str | None = Field(None, max_length=20, examples=["0,1,2,3,4"])
     start_time: time | None = None
     end_time: time | None = None
-    min_qty: int = Field(1, ge=1)
-    # FR-001: conjunto explícito de variantes elegibles. >= 1, sin repetidos.
-    variant_ids: list[UUID] = Field(..., min_length=1)
+    # FR-001: una promoción agrupa una o más reglas, capturadas en la misma
+    # sesión del formulario (creación por lote, Clarifications 2026-09-01).
+    rules: list[PromotionRuleIn] = Field(..., min_length=1)
 
     @model_validator(mode="after")
     def _status_on_create(self):
@@ -124,41 +142,33 @@ class PromotionCreate(_VigenciaMixin, _PromotionRules):
             raise ValueError("Una promoción no puede crearse finalizada")
         return self
 
-    @model_validator(mode="after")
-    def _variant_ids_unique(self):
-        _no_repeats(self.variant_ids)
-        return self
-
 
 class PromotionUpdate(_VigenciaMixin):
-    """Campos escalares (`PATCH /promotions/{id}`).
+    """Campos escalares de la **promoción** (`PATCH /promotions/{id}`).
 
-    `value` / `min_qty` se aceptan en el schema pero el **servicio los rechaza
-    (422)** si `status != "draft"` (FR-018). `type` / `variant_ids` van solo por
-    `PATCH /{id}/shape` y solo en `draft`. `starts_at` no editable tras crear.
+    spec 063 (revisión 2026-09-01, FR-018): `type`/`value`/`min_qty`/
+    `variant_ids` ya no existen aquí — viven en cada `PromotionRule` y solo se
+    editan por `PATCH /{id}/shape`, y solo en `draft` (el bloque completo de
+    reglas queda de solo lectura fuera de `draft`, no campo por campo).
+    `starts_at` no editable tras crear.
     """
 
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = Field(None, max_length=2000)
-    value: Decimal | None = Field(None, ge=0, max_digits=12, decimal_places=2)
     ends_at: datetime | None = None
     days_of_week: str | None = Field(None, max_length=20)
     start_time: time | None = None
     end_time: time | None = None
-    min_qty: int | None = Field(None, ge=1)
 
 
 class PromotionShapeUpdate(BaseModel):
-    """Cambio de forma (`PATCH /promotions/{id}/shape`): solo válido en `draft`.
-    El servicio revalida `_percent_range` / `package_price` / FR-016 / FR-014
-    contra el tipo ya aplicado."""
-    type: PromotionType | None = None
-    variant_ids: list[UUID] | None = Field(None, min_length=1)
-
-    @model_validator(mode="after")
-    def _variant_ids_unique(self):
-        _no_repeats(self.variant_ids)
-        return self
+    """Cambio de forma (`PATCH /promotions/{id}/shape`): solo válido en
+    `draft`. spec 063 (revisión 2026-09-01, FR-001a/FR-018): `rules`
+    **reemplaza la lista completa** de reglas de la promoción — no hay
+    endpoint para editar una sola regla suelta. El servicio revalida FR-001a
+    (variante repetida entre reglas del payload) / FR-016 / FR-014 contra la
+    lista nueva completa."""
+    rules: list[PromotionRuleIn] = Field(..., min_length=1)
 
 
 class PromotionStatusUpdate(BaseModel):
@@ -177,33 +187,45 @@ class PromotionVariantResponse(BaseModel):
     unit_price: Decimal
 
 
+class PromotionRuleResponse(BaseModel):
+    """spec 063 (revisión 2026-09-01): una regla en `PromotionResponse.rules`,
+    con su resumen legible (FR-005)."""
+    id: UUID
+    # `str` libre, no el enum: las reglas que la migración `063c` generó a
+    # partir de una promoción `finished` de `063a` conservan su `type`
+    # histórico (FR-025), y `promotion_rules.type` no lleva `CHECK` de
+    # valores (data-model.md, corrección del hallazgo F1).
+    type: str
+    value: Decimal
+    min_qty: int
+    # spec 063: condición en lenguaje llano (FR-005). `None` para una regla de
+    # tipo viejo.
+    condition_text: str | None = None
+    variants: list[PromotionVariantResponse] = Field(default_factory=list)
+    model_config = ConfigDict(from_attributes=True)
+
+
 class PromotionResponse(BaseModel):
     id: UUID
     name: str
     description: str | None = None
-    # `str` libre, no el enum: las promociones que `063a` dejó `finished`
-    # conservan su `type` histórico (FR-025).
-    type: str
-    value: Decimal
     status: str
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     days_of_week: str | None = None
     start_time: time | None = None
     end_time: time | None = None
-    min_qty: int
     # spec 063: marca de "finalizada por la migración" (FR-025).
     closed_by_refactor_at: datetime | None = None
-    # spec 063: condición en lenguaje llano (FR-005). `None` para una promoción
-    # `finished` de tipo viejo.
-    condition_text: str | None = None
-    # spec 063: reemplaza targets / combo_items / presentation_rules.
-    variants: list[PromotionVariantResponse] = Field(default_factory=list)
+    # spec 063 (revisión 2026-09-01, FR-001): reemplaza type/value/min_qty/
+    # condition_text/variants sueltos — cada regla lleva los suyos.
+    rules: list[PromotionRuleResponse] = Field(default_factory=list)
     model_config = ConfigDict(from_attributes=True)
 
 
 class OverlapConflict(BaseModel):
-    """Cuerpo del 409 de FR-014 (solape real bloqueado)."""
+    """Cuerpo del 409 de FR-014 (solape real bloqueado, entre reglas de
+    promociones distintas)."""
     error: str
     conflicts: list["OverlapConflictEntry"] = Field(default_factory=list)
 
@@ -211,6 +233,18 @@ class OverlapConflict(BaseModel):
 class OverlapConflictEntry(BaseModel):
     promotion_id: UUID
     promotion_name: str
+    # spec 063 (revisión 2026-09-01): qué regla de esa promoción entra en
+    # conflicto.
+    rule_id: UUID
+    variant_ids: list[UUID] = Field(default_factory=list)
+
+
+class RuleVariantConflict(BaseModel):
+    """Cuerpo del 409 de FR-001a (variante repetida entre dos reglas de la
+    **misma** promoción, dentro del mismo payload)."""
+    error: str
+    rule_index_a: int
+    rule_index_b: int
     variant_ids: list[UUID] = Field(default_factory=list)
 
 

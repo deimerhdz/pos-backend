@@ -125,8 +125,11 @@ class TestCheckout(unittest.TestCase):
         order_cancelada = fx.make_customer_order(db, ts, status="cancelada")
         fx.make_order_item(db, order_cancelada, variant, quantity=1)
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("50"), status="active", min_qty=1)
-        fx.add_variant_to_promotion(db, promo, variant)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=1,
+            variants=[variant],
+        )
         db.commit()
 
         resp = checkout.compute_bill(db, table.id)
@@ -208,8 +211,11 @@ class TestCheckout(unittest.TestCase):
         self.assertEqual(r.total, Decimal("0"))
         self.assertEqual(r.applied, [])
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
-        fx.add_variant_to_promotion(db, promo, variant)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1,
+            variants=[variant],
+        )
         db.commit()
 
         r = promotions.evaluate_variant_sets(db, promo_lines, now)
@@ -229,8 +235,11 @@ class TestCheckout(unittest.TestCase):
         db, order, variant = s["db"], s["order"], s["variant"]
         fx.make_order_item(db, order, variant, quantity=1)
         order.status = "bloqueada"
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
-        fx.add_variant_to_promotion(db, promo, variant)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1,
+            variants=[variant],
+        )
         register = fx.make_cash_register(db)
         shift = fx.make_cash_shift(db, register=register)
         method = fx.make_payment_method(db)
@@ -265,10 +274,14 @@ class TestCheckout(unittest.TestCase):
 
         v1 = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("8000"))
         v2 = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("6000"))
-        promo1 = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
-        fx.add_variant_to_promotion(db, promo1, v1)
-        promo2 = fx.make_promotion(db, type="percent", value=Decimal("20"), status="active", min_qty=1)
-        fx.add_variant_to_promotion(db, promo2, v2)
+        promo1 = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo1, type="percent", value=Decimal("10"), min_qty=1, variants=[v1],
+        )
+        promo2 = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo2, type="percent", value=Decimal("20"), min_qty=1, variants=[v2],
+        )
 
         fx.make_order_item(db, order, v1, quantity=1)
         fx.make_order_item(db, order, v2, quantity=1)

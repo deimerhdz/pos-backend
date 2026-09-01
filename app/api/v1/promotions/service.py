@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, contains_eager, selectinload
 from sqlalchemy.sql import Select
 
 from app.core.config import settings
@@ -34,7 +34,9 @@ from app.core.models import Tenant
 from app.core.timezone import resolve_timezone
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
-from app.models.promotion import PROMOTION_TRANSITIONS, Promotion, PromotionVariant
+from app.models.promotion import (
+    PROMOTION_TRANSITIONS, Promotion, PromotionRule, PromotionVariant,
+)
 
 # Tipos **vivos** que el motor evalúa. Las promociones que la migración `063a`
 # dejó `finished` con un `type` viejo quedan fuera por `status != "active"`.
@@ -120,8 +122,9 @@ def _money(value: Decimal) -> str:
 @dataclass
 class AppliedPromotion:
     promotion_id: UUID
+    rule_id: UUID         # spec 063 (2026-09-01): qué regla generó este monto
     name: str            # snapshot: sobrevive al borrado de la promoción
-    amount: Decimal      # descuento agregado de ESTA promoción en ESTE cobro (>= 0)
+    amount: Decimal      # descuento agregado de ESTA regla en ESTE cobro (>= 0)
 
 
 @dataclass
@@ -135,21 +138,29 @@ class SetDiscountResult:
         return self.applied[0].promotion_id if len(self.applied) == 1 else None
 
 
-def active_variant_set_promotions(db: Session, now: datetime) -> list[Promotion]:
-    """Promociones `percent` / `package_price` **activas y vigentes ahora**
-    (`_valid_now`, hora local del tenant). Hermana de la vieja
-    `active_discount_promotions`; usa el índice `ix_promotions_status_ends_at`."""
+def active_variant_set_rules(db: Session, now: datetime) -> list[PromotionRule]:
+    """spec 063 (revisión 2026-09-01): reglas `percent` / `package_price` de
+    promociones **activas y vigentes ahora** (`_valid_now`, hora local del
+    tenant, evaluado sobre la `Promotion` dueña). Reemplaza a
+    `active_variant_set_promotions` (motor-y-persistencia.md §2); usa el
+    índice `ix_promotions_status_ends_at`."""
     today: date = local_now(now).date()
     stmt = (
-        select(Promotion)
-        .options(selectinload(Promotion.variants))
+        select(PromotionRule)
+        .join(PromotionRule.promotion)
+        .options(
+            selectinload(PromotionRule.variants),
+            contains_eager(PromotionRule.promotion),
+        )
         .where(
             Promotion.status == "active",
-            Promotion.type.in_(LIVE_TYPES),
+            PromotionRule.type.in_(LIVE_TYPES),
             or_(Promotion.ends_at.is_(None), Promotion.ends_at >= today),
         )
     )
-    return [p for p in db.execute(stmt).scalars().all() if _valid_now(p, now)]
+    return [
+        r for r in db.execute(stmt).scalars().all() if _valid_now(r.promotion, now)
+    ]
 
 
 def _unit_sort_key(unit) -> tuple:
@@ -209,17 +220,20 @@ def _distribute_group_discount(group_units: list, discount: Decimal) -> dict:
 
 
 def evaluate_variant_sets(db: Session, promo_lines: list, now: datetime) -> SetDiscountResult:
-    """Algoritmo normativo de contracts/motor-y-persistencia.md §2."""
+    """Algoritmo normativo de contracts/motor-y-persistencia.md §3. spec 063
+    (revisión 2026-09-01): agrupa por **regla** (antes: por promoción) — la
+    vigencia se resuelve una vez por promoción (`active_variant_set_rules`) y
+    se aplica a todas sus reglas; el cálculo por bloque no cambia de fórmula."""
     result = SetDiscountResult()
-    promos = active_variant_set_promotions(db, now)
-    if not promos:
+    rules = active_variant_set_rules(db, now)
+    if not rules:
         return result
 
     by_line: dict = {}
-    applied_amount: dict = {}   # promo_id -> [name, Decimal]
+    applied_amount: dict = {}   # rule_id -> [promotion_id, name, Decimal]
 
-    for p in promos:
-        conjunto = {v.product_variant_id for v in p.variants}
+    for r in rules:
+        conjunto = {v.product_variant_id for v in r.variants}
         if not conjunto:
             continue
 
@@ -237,23 +251,23 @@ def evaluate_variant_sets(db: Session, promo_lines: list, now: datetime) -> SetD
             for _ in range(int(_line_get(line, "quantity", 0))):
                 units.append((idx, unit_price, pv_id, line_id))
 
-        promo_amount = Decimal(0)
-        for block in _greedy_units(units, p.min_qty):
+        rule_amount = Decimal(0)
+        for block in _greedy_units(units, r.min_qty):
             normal_g = sum((u[1] for u in block), Decimal(0))
-            if p.type == "package_price":
-                descuento_g = max(Decimal(0), normal_g - Decimal(p.value))
+            if r.type == "package_price":
+                descuento_g = max(Decimal(0), normal_g - Decimal(r.value))
             else:  # percent
                 descuento_g = (
-                    normal_g * Decimal(p.value) / Decimal(100)
+                    normal_g * Decimal(r.value) / Decimal(100)
                 ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
             if descuento_g <= 0:
                 continue
             for line_index, d in _distribute_group_discount(block, descuento_g).items():
                 by_line[line_index] = by_line.get(line_index, Decimal(0)) + d
-                promo_amount += d
+                rule_amount += d
 
-        if promo_amount > 0:
-            applied_amount[p.id] = [p.name, promo_amount]
+        if rule_amount > 0:
+            applied_amount[r.id] = [r.promotion_id, r.promotion.name, rule_amount]
 
     result.by_line = by_line
     result.total = sum(by_line.values(), Decimal(0)).quantize(
@@ -261,55 +275,61 @@ def evaluate_variant_sets(db: Session, promo_lines: list, now: datetime) -> SetD
     )
     result.applied = [
         AppliedPromotion(
-            promotion_id=pid, name=nm,
+            promotion_id=pid, rule_id=rid, name=nm,
             amount=amt.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
         )
-        for pid, (nm, amt) in sorted(applied_amount.items(), key=lambda kv: str(kv[0]))
+        for rid, (pid, nm, amt) in sorted(
+            applied_amount.items(), key=lambda kv: (str(kv[1][0]), str(kv[0]))
+        )
     ]
     return result
 
 
 def applied_to_dicts(applied: list) -> list[dict]:
     """`SetDiscountResult.applied` -> lista serializable para `applied_promotions`
-    (JSONB): `[{promotion_id, name, amount}]` (contract §5)."""
+    (JSONB): `[{promotion_id, rule_id, name, amount}]` (contract §6)."""
     return [
-        {"promotion_id": str(a.promotion_id), "name": a.name, "amount": str(a.amount)}
+        {
+            "promotion_id": str(a.promotion_id), "rule_id": str(a.rule_id),
+            "name": a.name, "amount": str(a.amount),
+        }
         for a in applied
     ]
 
 
-def menu_unit_discount(promos: list, variant_id, unit_price) -> Decimal | None:
+def menu_unit_discount(rules: list, variant_id, unit_price) -> Decimal | None:
     """Descuento por variante para el menú público (contracts/superficies-consumo.md
     §1): solo `percent` con `min_qty == 1` baja el precio unitario; `package_price`
     y `percent` con `min_qty > 1` -> `None` (depende de cuántas unidades combinadas
     haya, que en el menú sin carrito no existen — igual que hoy `qty_price`)."""
-    for p in promos:
-        if p.type != "percent" or p.min_qty != 1:
+    for r in rules:
+        if r.type != "percent" or r.min_qty != 1:
             continue
-        if variant_id in {v.product_variant_id for v in p.variants}:
-            return Decimal(unit_price) * Decimal(p.value) / Decimal(100)
+        if variant_id in {v.product_variant_id for v in r.variants}:
+            return Decimal(unit_price) * Decimal(r.value) / Decimal(100)
     return None
 
 
-def variant_set_condition_text(promo: Promotion) -> str | None:
-    """Condición en lenguaje llano, español de Colombia (contract §4). `None`
-    para una promoción `finished` de tipo viejo."""
-    if promo.type not in LIVE_TYPES:
+def variant_set_condition_text(rule: PromotionRule) -> str | None:
+    """Condición en lenguaje llano, español de Colombia (contract §5). `None`
+    para una regla de tipo viejo (histórica, migrada de una promoción
+    `finished`)."""
+    if rule.type not in LIVE_TYPES:
         return None
-    n = len(promo.variants)
-    value = Decimal(promo.value)
-    if promo.type == "package_price":
-        if promo.min_qty > 1:
-            return f"Llevando {promo.min_qty} de estas {n} variantes pagas {_money(value)}"
+    n = len(rule.variants)
+    value = Decimal(rule.value)
+    if rule.type == "package_price":
+        if rule.min_qty > 1:
+            return f"Llevando {rule.min_qty} de estas {n} variantes pagas {_money(value)}"
         return f"Cada una de estas {n} variantes a {_money(value)}"
     # `10.00` -> `10`, `12.50` -> `12.5` (`{value:g}` no despoja los ceros de un
     # Decimal; `.rstrip("0")` a secas convertiría `10` en `1`).
     pct = f"{value:f}"
     if "." in pct:
         pct = pct.rstrip("0").rstrip(".")
-    if promo.min_qty == 1:
+    if rule.min_qty == 1:
         return f"{pct}% en estas {n} variantes"
-    return f"{pct}% llevando {promo.min_qty} de estas {n} variantes"
+    return f"{pct}% llevando {rule.min_qty} de estas {n} variantes"
 
 
 # --------------------------- Solape real (bloqueo, FR-014) ---------------------------
@@ -335,17 +355,59 @@ def _times_overlap(a: Promotion, b: Promotion) -> bool:
         _in_time_window(b.start_time, a.start_time, a.end_time)
 
 
-def _guard_variant_overlap(db: Session, promo: Promotion, variant_ids) -> None:
-    """FR-014 / FR-014a (contracts/administracion-promociones.md §2): rechaza con
-    **409** si el conjunto comparte >= 1 variante con otra promoción en
+def _guard_no_shared_variants_within_payload(rules_in) -> None:
+    """FR-001a (chequeo 1, intra-promoción): ninguna variante puede repetirse
+    entre dos reglas del **mismo payload** (`PromotionCreate.rules` /
+    `PromotionShapeUpdate.rules`, todavía sin persistir). No hace falta
+    comparar vigencia: las reglas de una promoción comparten la misma por
+    definición (FR-001), así que compartir variante es *siempre* un
+    conflicto simultáneo.
+
+    Se valida **antes** de tocar la base de datos, a propósito: la
+    `UNIQUE(promotion_id, product_variant_id)` que `promotion_variants`
+    todavía conserva (columna histórica hasta la migración destructiva
+    `063d`) no distingue entre reglas de una misma promoción — insertar dos
+    reglas con una variante compartida violaría ese `UNIQUE` con un error de
+    integridad de base de datos en vez de este 409 legible."""
+    for i in range(len(rules_in)):
+        set_i = set(rules_in[i].variant_ids)
+        for j in range(i + 1, len(rules_in)):
+            shared = set_i & set(rules_in[j].variant_ids)
+            if shared:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail={
+                        "error": (
+                            "La misma variante está en más de una regla de "
+                            "esta promoción"
+                        ),
+                        "rule_index_a": i,
+                        "rule_index_b": j,
+                        "variant_ids": sorted(str(v) for v in shared),
+                    },
+                )
+
+
+def _guard_variant_overlap(db: Session, promo: Promotion) -> None:
+    """FR-014/FR-014a (inter-promoción, sin cambio de criterio respecto del
+    modelo plano; contracts/administracion-promociones.md §2, "Chequeo 2").
+    Opera sobre `promo.rules` ya persistidas (post-flush) — cada regla ya
+    tiene sus `variants` y su `id`, necesarios para nombrar el conflicto.
+
+    El conjunto de esta promoción (unión de conjuntos de todas sus reglas)
+    comparte >= 1 variante con una regla de **otra** promoción en
     `draft`/`active`/`paused` **y** sus rangos de fecha ∧ días ∧ horas se
-    intersectan simultáneamente. Dimensión no definida = cubre todo su dominio."""
-    vset = set(variant_ids)
+    intersectan simultáneamente. Dimensión no definida = cubre todo su
+    dominio. El chequeo 1 (FR-001a, intra-promoción) corre antes, sobre el
+    payload sin persistir — ver `_guard_no_shared_variants_within_payload`.
+    """
+    rules = list(promo.rules)
+    vset = {v.product_variant_id for r in rules for v in r.variants}
     if not vset:
         return
     candidates = db.execute(
         select(Promotion)
-        .options(selectinload(Promotion.variants))
+        .options(selectinload(Promotion.rules).selectinload(PromotionRule.variants))
         .where(
             Promotion.id != promo.id,
             Promotion.status.in_(("draft", "active", "paused")),
@@ -354,18 +416,20 @@ def _guard_variant_overlap(db: Session, promo: Promotion, variant_ids) -> None:
 
     conflicts: list[dict] = []
     for c in candidates:
-        shared = vset & {v.product_variant_id for v in c.variants}
-        if not shared:
-            continue
         if not (_ranges_overlap(promo, c)
                 and _csv_overlap(promo.days_of_week, c.days_of_week)
                 and _times_overlap(promo, c)):
             continue
-        conflicts.append({
-            "promotion_id": str(c.id),
-            "promotion_name": c.name,
-            "variant_ids": sorted(str(v) for v in shared),
-        })
+        for cr in c.rules:
+            shared = vset & {v.product_variant_id for v in cr.variants}
+            if not shared:
+                continue
+            conflicts.append({
+                "promotion_id": str(c.id),
+                "promotion_name": c.name,
+                "rule_id": str(cr.id),
+                "variant_ids": sorted(str(v) for v in shared),
+            })
 
     if conflicts:
         raise HTTPException(
@@ -380,13 +444,13 @@ def _guard_variant_overlap(db: Session, promo: Promotion, variant_ids) -> None:
         )
 
 
-def _guard_package_is_discount(db: Session, promo: Promotion) -> None:
+def _guard_package_is_discount(db: Session, rule: PromotionRule) -> None:
     """FR-016 / SC-002 (research.md D16): `type == "package_price"` y
-    `value >= min_qty × (menor price entre las variantes del conjunto, activas o
-    no)` -> **409**."""
-    if promo.type != "package_price":
+    `value >= min_qty × (menor price entre las variantes del conjunto de
+    ESTA regla, activas o no)` -> **409**."""
+    if rule.type != "package_price":
         return
-    variant_ids = [v.product_variant_id for v in promo.variants]
+    variant_ids = [v.product_variant_id for v in rule.variants]
     if not variant_ids:
         return
     rows = db.execute(
@@ -396,15 +460,16 @@ def _guard_package_is_discount(db: Session, promo: Promotion) -> None:
     if not rows:
         return
     cheapest_id, cheapest_price = min(rows, key=lambda r: Decimal(r[1]))
-    if Decimal(promo.value) >= promo.min_qty * Decimal(cheapest_price):
+    if Decimal(rule.value) >= rule.min_qty * Decimal(cheapest_price):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={
                 "error": (
                     "Con este precio de paquete la promoción no representa un descuento"
                 ),
-                "value": str(promo.value),
-                "min_qty": promo.min_qty,
+                "rule_id": str(rule.id),
+                "value": str(rule.value),
+                "min_qty": rule.min_qty,
                 "cheapest_unit_price": str(cheapest_price),
                 "variant_id": str(cheapest_id),
             },
@@ -423,7 +488,9 @@ def list_query(
     stmt = (
         select(Promotion)
         .options(
-            selectinload(Promotion.variants).selectinload(PromotionVariant.product_variant)
+            selectinload(Promotion.rules)
+            .selectinload(PromotionRule.variants)
+            .selectinload(PromotionVariant.product_variant)
         )
         .order_by(Promotion.name)
     )
@@ -438,23 +505,11 @@ def list_query(
     return stmt
 
 
-def _apply_variant_set(db: Session, promo: Promotion, variant_ids) -> None:
-    """FR-001: valida (no vacía, sin repetidos, cada uuid existe y es del tenant)
-    y puebla `promotion_variants`."""
-    if not variant_ids:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Una promoción necesita al menos una variante",
-        )
-    seen: set = set()
-    for vid in variant_ids:
-        if vid in seen:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "El conjunto de variantes no puede repetir una variante",
-            )
-        seen.add(vid)
-
+def _apply_variant_set(db: Session, rule: PromotionRule, variant_ids) -> None:
+    """FR-001a: valida (cada uuid existe y es del tenant — la ausencia de
+    repetidos y la no-vacuidad ya las valida `PromotionRuleIn` en Pydantic) y
+    puebla el conjunto de **esta regla** (`promotion_variants`)."""
+    seen = set(variant_ids)
     existentes = set(db.execute(
         select(ProductVariant.id).where(ProductVariant.id.in_(seen))
     ).scalars().all())
@@ -465,59 +520,59 @@ def _apply_variant_set(db: Session, promo: Promotion, variant_ids) -> None:
             "Variante no encontrada en el catálogo del tenant",
         )
 
-    promo.variants.clear()
-    db.flush()
     for vid in variant_ids:
-        db.add(PromotionVariant(promotion_id=promo.id, product_variant_id=vid))
+        db.add(PromotionVariant(
+            promotion_rule_id=rule.id,
+            product_variant_id=vid,
+        ))
     db.flush()
 
 
-def _revalidate_type_rules(promo: Promotion) -> None:
-    if promo.type == "percent" and Decimal(promo.value) > 100:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Un descuento porcentual no puede superar 100",
+def _add_rules(db: Session, promo: Promotion, rules_in: list) -> None:
+    """spec 063 (revisión 2026-09-01): crea una `PromotionRule` por cada
+    elemento de `rules_in` (creación por lote, FR-001) con su conjunto de
+    variantes. Usada por `create` y por `update_shape` (que primero borra las
+    reglas existentes)."""
+    for rule_in in rules_in:
+        rule = PromotionRule(
+            promotion_id=promo.id, type=rule_in.type.value,
+            value=rule_in.value, min_qty=rule_in.min_qty,
         )
-    if promo.type == "package_price" and Decimal(promo.value) <= 0:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "El precio de paquete debe ser mayor que 0",
-        )
+        db.add(rule)
+        db.flush()
+        _apply_variant_set(db, rule, rule_in.variant_ids)
 
 
 def create(db: Session, data) -> Promotion:
+    _guard_no_shared_variants_within_payload(data.rules)
     promo = Promotion(
-        name=data.name, description=data.description, type=data.type.value,
-        value=data.value, status=data.status.value,
+        name=data.name, description=data.description,
+        status=data.status.value,
         starts_at=data.starts_at, ends_at=data.ends_at,
         days_of_week=data.days_of_week,
-        start_time=data.start_time, end_time=data.end_time, min_qty=data.min_qty,
+        start_time=data.start_time, end_time=data.end_time,
     )
     db.add(promo)
     db.flush()
-    _apply_variant_set(db, promo, data.variant_ids)
+    _add_rules(db, promo, data.rules)
     db.refresh(promo)
-    _guard_package_is_discount(db, promo)
-    _guard_variant_overlap(db, promo, data.variant_ids)
+    for rule in promo.rules:
+        _guard_package_is_discount(db, rule)
+    _guard_variant_overlap(db, promo)
     db.flush()
     return promo
 
 
 def update(db: Session, promo: Promotion, data) -> Promotion:
-    """Campos escalares. `value` / `min_qty` bloqueados fuera de `draft`
-    (FR-018), evaluado contra `promo.status` real."""
+    """Campos escalares de la **promoción** (FR-018): `type`/`value`/
+    `min_qty`/conjunto ya no están en `PromotionUpdate` — viven en cada
+    regla y solo se editan por `update_shape`, y solo en `draft`."""
     provided = data.model_fields_set
-    if ("value" in provided or "min_qty" in provided) and promo.status != "draft":
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Duplica la promoción para cambiar el valor o la cantidad",
-        )
-    for field_name in ("name", "description", "value", "ends_at",
-                       "days_of_week", "start_time", "end_time", "min_qty"):
+    for field_name in ("name", "description", "ends_at",
+                       "days_of_week", "start_time", "end_time"):
         if field_name in provided:
             setattr(promo, field_name, getattr(data, field_name))
 
-    _revalidate_type_rules(promo)
     if (promo.start_time is None) != (promo.end_time is None):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -528,23 +583,25 @@ def update(db: Session, promo: Promotion, data) -> Promotion:
 
 
 def update_shape(db: Session, promo: Promotion, data) -> Promotion:
-    """Cambia `type` / `variant_ids`. Solo en `draft` (FR-018)."""
+    """spec 063 (revisión 2026-09-01, FR-001a/FR-018): reemplaza la lista
+    **completa** de reglas de la promoción. Solo en `draft`."""
     if promo.status != "draft":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "Solo una promoción en borrador puede cambiar de tipo o de conjunto. "
+            "Solo una promoción en borrador puede cambiar sus reglas. "
             "Duplícala, edita la copia y finaliza la original.",
         )
-    if data.type is not None:
-        promo.type = data.type.value
-    if data.variant_ids is not None:
-        _apply_variant_set(db, promo, data.variant_ids)
+    _guard_no_shared_variants_within_payload(data.rules)
+    for rule in list(promo.rules):
+        db.delete(rule)
+    db.flush()
+    _add_rules(db, promo, data.rules)
     db.flush()
     db.refresh(promo)
 
-    _revalidate_type_rules(promo)
-    _guard_package_is_discount(db, promo)
-    _guard_variant_overlap(db, promo, [v.product_variant_id for v in promo.variants])
+    for rule in promo.rules:
+        _guard_package_is_discount(db, rule)
+    _guard_variant_overlap(db, promo)
     return promo
 
 
@@ -558,35 +615,50 @@ def change_status(db: Session, promo: Promotion, new_status: str) -> Promotion:
         )
     if new_status == "active":
         # Una promo creada en `draft` sin conflicto puede chocar al activar.
-        if not promo.variants:
+        if not promo.rules:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "Una promoción necesita al menos una variante",
+                "Una promoción necesita al menos una regla",
             )
-        _guard_package_is_discount(db, promo)
-        _guard_variant_overlap(db, promo, [v.product_variant_id for v in promo.variants])
+        for rule in promo.rules:
+            if not rule.variants:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "Cada regla necesita al menos una variante",
+                )
+            _guard_package_is_discount(db, rule)
+        _guard_variant_overlap(db, promo)
     promo.status = new_status
     db.flush()
     return promo
 
 
 def duplicate(db: Session, promo: Promotion, new_name: str) -> Promotion:
-    """Copia en `draft` con el mismo tipo/valor/`min_qty`/conjunto/vigencia,
-    nombre distinto (FR-017). El solape de FR-014 se revalida al **activar** la
-    copia, no al duplicar."""
+    """Copia en `draft` con **todas** las reglas de la promoción (tipo/valor/
+    `min_qty`/conjunto de cada una) y la misma vigencia, nombre distinto
+    (FR-017). El solape de FR-014 se revalida al **activar** la copia, no al
+    duplicar."""
     copy = Promotion(
-        name=new_name, description=promo.description, type=promo.type,
-        value=promo.value, status="draft",
+        name=new_name, description=promo.description,
+        status="draft",
         starts_at=promo.starts_at, ends_at=promo.ends_at,
         days_of_week=promo.days_of_week,
-        start_time=promo.start_time, end_time=promo.end_time, min_qty=promo.min_qty,
+        start_time=promo.start_time, end_time=promo.end_time,
     )
     db.add(copy)
     db.flush()
-    for v in promo.variants:
-        db.add(PromotionVariant(
-            promotion_id=copy.id, product_variant_id=v.product_variant_id,
-        ))
+    for rule in promo.rules:
+        new_rule = PromotionRule(
+            promotion_id=copy.id, type=rule.type,
+            value=rule.value, min_qty=rule.min_qty,
+        )
+        db.add(new_rule)
+        db.flush()
+        for v in rule.variants:
+            db.add(PromotionVariant(
+                promotion_rule_id=new_rule.id,
+                product_variant_id=v.product_variant_id,
+            ))
     db.flush()
     db.refresh(copy)
     return copy
@@ -594,42 +666,50 @@ def duplicate(db: Session, promo: Promotion, new_name: str) -> Promotion:
 
 # --------------------------- Serialización ---------------------------
 
-def serialize_promotion(db: Session, promo: Promotion) -> dict:
-    """`PromotionResponse` con `variants` (descripción + precio normal vigente,
-    FR-005) y `condition_text` resueltos."""
-    variant_ids = [v.product_variant_id for v in promo.variants]
-    rows = db.execute(
-        select(ProductVariant, Product)
-        .join(Product, Product.id == ProductVariant.product_id)
-        .where(ProductVariant.id.in_(variant_ids))
-    ).all() if variant_ids else []
-    by_id = {v.id: (v, p) for v, p in rows}
-
+def _serialize_rule(rule: PromotionRule, by_id: dict) -> dict:
     variants = []
-    for vid in variant_ids:
-        v, p = by_id.get(vid, (None, None))
+    for pv in rule.variants:
+        v, p = by_id.get(pv.product_variant_id, (None, None))
         if v is None:
             continue
         variants.append({
-            "product_variant_id": vid,
+            "product_variant_id": pv.product_variant_id,
             "description": f"{p.name} - {v.name}" if p else v.name,
             "unit_price": Decimal(v.price),
         })
+    return {
+        "id": rule.id,
+        "type": rule.type,
+        "value": rule.value,
+        "min_qty": rule.min_qty,
+        "condition_text": variant_set_condition_text(rule),
+        "variants": variants,
+    }
+
+
+def serialize_promotion(db: Session, promo: Promotion) -> dict:
+    """`PromotionResponse` con `rules` (cada una con su `variants` —
+    descripción + precio normal vigente, FR-005— y su `condition_text`)."""
+    all_variant_ids = {
+        v.product_variant_id for r in promo.rules for v in r.variants
+    }
+    rows = db.execute(
+        select(ProductVariant, Product)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(ProductVariant.id.in_(all_variant_ids))
+    ).all() if all_variant_ids else []
+    by_id = {v.id: (v, p) for v, p in rows}
 
     return {
         "id": promo.id,
         "name": promo.name,
         "description": promo.description,
-        "type": promo.type,
-        "value": promo.value,
         "status": promo.status,
         "starts_at": promo.starts_at,
         "ends_at": promo.ends_at,
         "days_of_week": promo.days_of_week,
         "start_time": promo.start_time,
         "end_time": promo.end_time,
-        "min_qty": promo.min_qty,
         "closed_by_refactor_at": promo.closed_by_refactor_at,
-        "condition_text": variant_set_condition_text(promo),
-        "variants": variants,
+        "rules": [_serialize_rule(r, by_id) for r in promo.rules],
     }

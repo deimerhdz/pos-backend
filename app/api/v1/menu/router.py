@@ -24,7 +24,7 @@ from app.models.option_group import OptionGroup
 from app.models.variant_option_group import VariantOptionGroup
 from app.models.dining_table import DiningTable
 from app.api.v1.promotions.service import (
-    active_variant_set_promotions, menu_unit_discount, variant_set_condition_text,
+    active_variant_set_rules, menu_unit_discount, variant_set_condition_text,
 )
 from app.api.v1.menu.schemas import (
     MenuCategoryResponse, MenuProductResponse, MenuVariantResponse,
@@ -82,8 +82,10 @@ def _option_availability(db: Session) -> dict[UUID, bool]:
 def _build_menu(db: Session) -> list[MenuCategoryResponse]:
     avail = _option_availability(db)
     now = datetime.now(timezone.utc)
-    # spec 063: promociones por conjunto de variantes vigentes en este instante.
-    promos = active_variant_set_promotions(db, now)
+    # spec 063 (revisión 2026-09-01): reglas de promoción por conjunto de
+    # variantes vigentes en este instante (la vigencia es de la promoción,
+    # compartida por todas sus reglas).
+    rules = active_variant_set_rules(db, now)
 
     categories = db.execute(
         select(Category).where(Category.active.is_(True)).order_by(Category.name)
@@ -155,8 +157,8 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
                 # contracts/superficies-consumo.md §1).
                 discounted_price = None
                 discount_kind = None
-                if promos:
-                    disc = menu_unit_discount(promos, v.id, v.price)
+                if rules:
+                    disc = menu_unit_discount(rules, v.id, v.price)
                     if disc is not None and disc > 0:
                         discounted_price = (v.price - disc).quantize(
                             Decimal("0.01"), rounding=ROUND_HALF_UP
@@ -190,23 +192,34 @@ def _build_menu_promotions(db: Session, now: datetime) -> list[MenuPromotionAnno
     """Anuncios de promociones por conjunto de variantes **vigentes en este
     instante** (spec 063, FR-022 / SC-007): `status == "active"` **y**
     `_valid_now` verdadero (ventana de día/hora en la zona del tenant).
-    `_build_menu` no se toca. `now` viene aware, no arrastra A-08."""
-    anuncios: list[MenuPromotionAnnouncement] = []
-    # `active_variant_set_promotions` ya exige `status == "active"` + `_valid_now`
-    # (vigencia en ese instante, FR-022 / SC-007).
-    for promo in active_variant_set_promotions(db, now):
-        text = variant_set_condition_text(promo)
+    `_build_menu` no se toca. `now` viene aware, no arrastra A-08.
+
+    spec 063 (revisión 2026-09-01): una promoción anuncia **una `rules[]` por
+    cada `PromotionRule` vigente** que tenga (antes: siempre 1, una promoción
+    = una combinación). El DTO `MenuPromotionAnnouncement.rules[]` ya tenía
+    esta forma (research.md D-R3) — solo cambia la cardinalidad."""
+    # `active_variant_set_rules` ya exige `status == "active"` + `_valid_now`
+    # (vigencia en ese instante, FR-022 / SC-007), evaluado sobre la
+    # promoción dueña de cada regla.
+    by_promotion: dict = {}   # promotion_id -> MenuPromotionAnnouncement
+    for rule in active_variant_set_rules(db, now):
+        text = variant_set_condition_text(rule)
         if text is None:
             continue
-        anuncios.append(MenuPromotionAnnouncement(
-            promotion_id=promo.id, promotion_name=promo.name,
-            rules=[MenuPromotionRule(
-                text=text,
-                variant_count=len(promo.variants),
-                min_qty=promo.min_qty,
-                value=promo.value,
-            )],
+        promo = rule.promotion
+        anuncio = by_promotion.get(promo.id)
+        if anuncio is None:
+            anuncio = MenuPromotionAnnouncement(
+                promotion_id=promo.id, promotion_name=promo.name, rules=[],
+            )
+            by_promotion[promo.id] = anuncio
+        anuncio.rules.append(MenuPromotionRule(
+            text=text,
+            variant_count=len(rule.variants),
+            min_qty=rule.min_qty,
+            value=rule.value,
         ))
+    anuncios = list(by_promotion.values())
     return anuncios
 
 

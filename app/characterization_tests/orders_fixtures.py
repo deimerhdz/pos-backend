@@ -53,7 +53,7 @@ __all__ = [
     "make_dining_table", "make_table_session", "make_participant",
     "make_customer_order", "make_order_item", "make_order_item_void_log",
     "make_cart", "make_cart_item",
-    "make_promotion", "add_variant_to_promotion",
+    "make_promotion", "add_rule_to_promotion",
     "make_cash_register", "make_cash_shift", "make_payment_method",
     "make_payment_attempt",
     "make_tenant_double", "make_user_double",
@@ -73,7 +73,7 @@ from app.models.order_item import OrderItem
 from app.models.order_item_void_log import OrderItemVoidLog
 from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.product_variant import ProductVariant
-from app.models.promotion import Promotion, PromotionVariant
+from app.models.promotion import Promotion, PromotionRule, PromotionVariant
 from app.models.cash_register import CashRegister
 from app.models.cash_shift import CashShift
 from app.models.payment import Payment, PaymentMethod
@@ -112,7 +112,9 @@ _ORDERS_TABLE_NAMES = [
     "cart_items",
     "cart_item_options",
     "promotions",
-    # spec 063: conjunto explícito de variantes elegibles.
+    # spec 063 (revisión 2026-09-01): una promoción agrupa una o más reglas.
+    "promotion_rules",
+    # spec 063: conjunto explícito de variantes elegibles (de una regla).
     "promotion_variants",
     "cash_registers",
     "cash_shifts",
@@ -345,15 +347,15 @@ def make_cart_item(db: Session, cart: Cart, variant: ProductVariant, **kw) -> Ca
 
 
 def make_promotion(db: Session, **kw) -> Promotion:
-    """`kw.setdefault` fuerza `start_time=None, end_time=None`: sin ventana
-    horaria, siempre válida sin importar el reloj real (mismo criterio que
-    `table_sessions_fixtures.make_promotion`, research.md §5 de la spec 016)."""
+    """spec 063 (revisión 2026-09-01): la promoción solo lleva vigencia y
+    estado — `type`/`value`/`min_qty` viven en cada `PromotionRule`
+    (`add_rule_to_promotion`). `kw.setdefault` fuerza `start_time=None,
+    end_time=None`: sin ventana horaria, siempre válida sin importar el
+    reloj real (mismo criterio que `table_sessions_fixtures.make_promotion`,
+    research.md §5 de la spec 016)."""
     kw.setdefault("id", _uid())
     kw.setdefault("name", f"promo-{kw['id']}")
-    kw.setdefault("type", "percent")
-    kw.setdefault("value", Decimal("10"))
     kw.setdefault("status", "active")
-    kw.setdefault("min_qty", 1)
     kw.setdefault("start_time", None)
     kw.setdefault("end_time", None)
     # `promotions.service._best_line_match` ordena por `created_at.timestamp()`:
@@ -366,18 +368,33 @@ def make_promotion(db: Session, **kw) -> Promotion:
     return obj
 
 
-def add_variant_to_promotion(
-    db: Session, promotion: Promotion, variant: ProductVariant, **kw
-) -> PromotionVariant:
-    """spec 063 (FR-001): agrega una variante al conjunto elegible de la
-    promoción (`promotion_variants`)."""
+def add_rule_to_promotion(
+    db: Session,
+    promotion: Promotion,
+    *,
+    type: str = "percent",
+    value: Decimal = Decimal("10"),
+    min_qty: int = 1,
+    variants: list[ProductVariant] = (),
+    **kw,
+) -> PromotionRule:
+    """spec 063 (revisión 2026-09-01, FR-001/FR-001a): agrega una regla
+    (tipo, valor, cantidad mínima + su propio conjunto de variantes) a una
+    promoción (contracts/migracion.md §2.1)."""
     kw.setdefault("id", _uid())
-    kw.setdefault("promotion_id", promotion.id)
-    kw.setdefault("product_variant_id", variant.id)
-    obj = PromotionVariant(**kw)
-    db.add(obj)
+    rule = PromotionRule(
+        promotion_id=promotion.id, type=type, value=value, min_qty=min_qty, **kw
+    )
+    db.add(rule)
     db.flush()
-    return obj
+    for variant in variants:
+        db.add(PromotionVariant(
+            id=_uid(),
+            promotion_rule_id=rule.id,
+            product_variant_id=variant.id,
+        ))
+    db.flush()
+    return rule
 
 
 
@@ -531,8 +548,8 @@ if __name__ == "__main__":
     assert cart_item.cart_id == cart.id
 
     promo = make_promotion(db)
-    pv = add_variant_to_promotion(db, promo, variant)
-    assert pv.promotion_id == promo.id
+    rule = add_rule_to_promotion(db, promo, variants=[variant])
+    assert rule.promotion_id == promo.id
 
     register = make_cash_register(db)
     shift = make_cash_shift(db, register=register)

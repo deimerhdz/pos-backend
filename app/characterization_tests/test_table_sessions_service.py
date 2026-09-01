@@ -276,8 +276,10 @@ class TestTableSessionsService(unittest.TestCase):
         cat_a = fx.make_category(db)
         prod_a = fx.make_product(db, category=cat_a)
         variant_a = fx.make_variant(db, product=prod_a, price=Decimal("10000"))
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
-        fx.add_variant_to_promotion(db, promo, variant_a)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1, variants=[variant_a],
+        )
 
         # Beto: un paquete de 2 variantes distintas del conjunto a $11.000
         # (mismo ahorro que el combo viejo: 6000+7000-11000 = 2000).
@@ -285,11 +287,11 @@ class TestTableSessionsService(unittest.TestCase):
         prod_b = fx.make_product(db, category=cat_b)
         variant_1 = fx.make_variant(db, product=prod_b, price=Decimal("6000"))
         variant_2 = fx.make_variant(db, product=prod_b, price=Decimal("7000"))
-        paquete = fx.make_promotion(
-            db, type="package_price", value=Decimal("11000"), status="active", min_qty=2,
+        paquete = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, paquete, type="package_price", value=Decimal("11000"), min_qty=2,
+            variants=[variant_1, variant_2],
         )
-        fx.add_variant_to_promotion(db, paquete, variant_1)
-        fx.add_variant_to_promotion(db, paquete, variant_2)
 
         order_abierta = fx.make_customer_order(db, ts, status="abierta")
         fx.make_order_item(db, order_abierta, variant_a, participant_id=ana.id, estado_cocina="listo")
@@ -330,8 +332,10 @@ class TestTableSessionsService(unittest.TestCase):
         cat = fx.make_category(db)
         prod = fx.make_product(db, category=cat)
         variant = fx.make_variant(db, product=prod, price=Decimal("10000"))
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
-        fx.add_variant_to_promotion(db, promo, variant)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1, variants=[variant],
+        )
 
         order = fx.make_customer_order(db, ts, status="abierta")
         fx.make_order_item(db, order, variant, participant_id=ana.id, estado_cocina="listo", quantity=2)
@@ -472,19 +476,19 @@ class TestTableSessionsService(unittest.TestCase):
         prod = fx.make_product(db, category=cat)
         v1a = fx.make_variant(db, product=prod, price=Decimal("6000"))
         v1b = fx.make_variant(db, product=prod, price=Decimal("7000"))
-        paquete1 = fx.make_promotion(
-            db, type="package_price", value=Decimal("11000"), status="active", min_qty=2,
+        paquete1 = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, paquete1, type="package_price", value=Decimal("11000"), min_qty=2,
+            variants=[v1a, v1b],
         )
-        fx.add_variant_to_promotion(db, paquete1, v1a)
-        fx.add_variant_to_promotion(db, paquete1, v1b)
 
         v2a = fx.make_variant(db, product=prod, price=Decimal("4000"))
         v2b = fx.make_variant(db, product=prod, price=Decimal("5000"))
-        paquete2 = fx.make_promotion(
-            db, type="package_price", value=Decimal("8000"), status="active", min_qty=2,
+        paquete2 = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, paquete2, type="package_price", value=Decimal("8000"), min_qty=2,
+            variants=[v2a, v2b],
         )
-        fx.add_variant_to_promotion(db, paquete2, v2a)
-        fx.add_variant_to_promotion(db, paquete2, v2b)
 
         order = fx.make_customer_order(db, ts, status="abierta")
         for variant in (v1a, v1b, v2a, v2b):

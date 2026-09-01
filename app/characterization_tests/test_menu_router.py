@@ -36,10 +36,12 @@ class TestBuildMenuA08(unittest.TestCase):
         product = fx.make_product(db, category=category)
         variant = fx.make_variant(db, product=product, price=Decimal("10000"))
         promo = fx.make_promotion(
-            db, type="percent", value=Decimal("20"), status="active", min_qty=1,
-            start_time=time(20, 0), end_time=time(21, 0),
+            db, status="active", start_time=time(20, 0), end_time=time(21, 0),
         )
-        fx.add_variant_to_promotion(db, promo, variant)
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("20"), min_qty=1,
+            variants=[variant],
+        )
         db.commit()
         return variant
 
@@ -86,12 +88,13 @@ class TestMenuPromotionsAnnouncementUS5(unittest.TestCase):
             for i in range(8)
         ]
         promo = fx.make_promotion(
-            db, name="2 de 8 sabores por 12.000", type="package_price",
-            status="active", value=Decimal("12000"), min_qty=2,
+            db, name="2 de 8 sabores por 12.000", status="active",
             days_of_week=days_of_week, start_time=start_time, end_time=end_time,
         )
-        for v in variants:
-            fx.add_variant_to_promotion(db, promo, v)
+        fx.add_rule_to_promotion(
+            db, promo, type="package_price", value=Decimal("12000"), min_qty=2,
+            variants=variants,
+        )
         db.commit()
         return promo
 

@@ -43,13 +43,20 @@ class TestEvaluateVariantSets(unittest.TestCase):
         )
 
     def _promo(self, type_, value, min_qty, variants, **kw):
+        """spec 063 (revisión 2026-09-01): la promoción solo lleva vigencia y
+        estado; tipo/valor/cantidad mínima/conjunto viven en su única regla
+        (`add_rule_to_promotion`, contracts/migracion.md §2.1). Devuelve la
+        `Promotion` (no la regla) porque `AppliedPromotion.promotion_id` es
+        el id de la promoción, no el de la regla."""
         p = fx.make_promotion(
-            self.db, type=type_, value=Decimal(str(value)), status="active",
-            min_qty=min_qty, start_time=kw.get("start_time"), end_time=kw.get("end_time"),
+            self.db, status="active",
+            start_time=kw.get("start_time"), end_time=kw.get("end_time"),
             days_of_week=kw.get("days_of_week"),
         )
-        for v in variants:
-            fx.add_variant_to_promotion(self.db, p, v)
+        fx.add_rule_to_promotion(
+            self.db, p, type=type_, value=Decimal(str(value)), min_qty=min_qty,
+            variants=variants,
+        )
         self.db.commit()
         return p
 
@@ -211,6 +218,40 @@ class TestEvaluateVariantSets(unittest.TestCase):
         self.assertEqual(montos[p2.id], Decimal("1200.00"))
         self.assertEqual([ap.promotion_id for ap in r.applied],
                          sorted([p1.id, p2.id], key=str))
+
+    # ---- T027 (spec 063, revisión 2026-09-01): dos reglas de la MISMA
+    # promoción, ambas con descuento en el mismo cobro -> dos entradas en
+    # `applied` con igual `promotion_id` y distinto `rule_id` ----
+    def test_14_dos_reglas_de_la_misma_promocion_descuentan_en_el_mismo_cobro(self):
+        pequenos_a = self._variant(8000, "pequeño-a")
+        pequenos_b = self._variant(8000, "pequeño-b")
+        medianos_a = self._variant(11000, "mediano-a")
+        medianos_b = self._variant(11000, "mediano-b")
+        promo = fx.make_promotion(self.db, name="2X entre semana", status="active")
+        regla_pequenos = fx.add_rule_to_promotion(
+            self.db, promo, type="package_price", value=Decimal("12000"), min_qty=2,
+            variants=[pequenos_a, pequenos_b],
+        )
+        regla_medianos = fx.add_rule_to_promotion(
+            self.db, promo, type="package_price", value=Decimal("17000"), min_qty=2,
+            variants=[medianos_a, medianos_b],
+        )
+        self.db.commit()
+
+        r = promotions.evaluate_variant_sets(self.db, [
+            _line(pequenos_a, 1), _line(pequenos_b, 1),
+            _line(medianos_a, 1), _line(medianos_b, 1),
+        ], NOW)
+
+        # $16.000 -> $12.000 (regla Pequeños) + $22.000 -> $17.000 (regla Medianos)
+        self.assertEqual(r.total, Decimal("9000.00"))
+        self.assertEqual(len(r.applied), 2)
+        self.assertTrue(all(ap.promotion_id == promo.id for ap in r.applied))
+        rule_ids = {ap.rule_id for ap in r.applied}
+        self.assertEqual(rule_ids, {regla_pequenos.id, regla_medianos.id})
+        montos = {ap.rule_id: ap.amount for ap in r.applied}
+        self.assertEqual(montos[regla_pequenos.id], Decimal("4000.00"))
+        self.assertEqual(montos[regla_medianos.id], Decimal("5000.00"))
 
 
 if __name__ == "__main__":

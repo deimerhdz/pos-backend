@@ -68,8 +68,11 @@ def create_promotion(body: PromotionCreate, db: Session = Depends(get_db),
     ensure_unique(db, Promotion, Promotion.name, body.name, "Ya existe una promoción con ese nombre")
     promo = service.create(db, body)
     record_audit(db, action="create", entity="promotion", entity_id=promo.id,
-                 user=user, payload={"name": promo.name, "type": promo.type,
-                                     "status": promo.status})
+                 user=user, payload={
+                     "name": promo.name, "status": promo.status,
+                     "rule_count": len(promo.rules),
+                     "rule_types": [r.type for r in promo.rules],
+                 })
     db.commit()
     db.refresh(promo)
     return service.serialize_promotion(db, promo)
@@ -101,7 +104,10 @@ def update_promotion_shape(promotion_id: UUID, body: PromotionShapeUpdate,
     promo = get_or_404(db, Promotion, promotion_id, "Promoción no encontrada")
     promo = service.update_shape(db, promo, body)
     record_audit(db, action="update_shape", entity="promotion", entity_id=promo.id,
-                 user=user, payload={"type": promo.type})
+                 user=user, payload={
+                     "rule_count": len(promo.rules),
+                     "rule_types": [r.type for r in promo.rules],
+                 })
     db.commit()
     db.refresh(promo)
     return service.serialize_promotion(db, promo)

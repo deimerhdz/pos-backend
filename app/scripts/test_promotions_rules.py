@@ -9,7 +9,12 @@ por conjunto de variantes de la spec 063 (`_valid_now`, `_in_time_window`,
 objetos sin sesión. Por eso puede correr en CI, antes de cada deploy.
 
 spec 063-promociones-por-variante (decisión de negocio A-58…A-65,
-registro-de-anomalias.md). Reescritura completa: se fueron `priority`,
+registro-de-anomalias.md), reescrito para la partición `Promoción`/`Regla`
+(revisión 2026-09-01, contracts/migracion.md §2.1): `_valid_now` sigue
+operando sobre una `Promotion` (vigencia + estado, sin cambio de cuerpo);
+`_greedy_units`/`_distribute_group_discount`/`variant_set_condition_text`
+operan sobre el conjunto y la combinación (tipo/valor/cantidad mínima) de
+una **regla**, no de la promoción directa. Se fueron `priority`,
 `_matching_target` y `_line_discount` de `qty_price`/`fixed`
 (contracts/migracion.md §2.5). Cubre:
 
@@ -51,7 +56,7 @@ from app.api.v1.promotions.service import (  # noqa: E402
     variant_set_condition_text,
 )
 from app.api.v1.promotions.schemas import PromotionType  # noqa: E402
-from app.models.promotion import PROMOTION_TYPES, Promotion  # noqa: E402
+from app.models.promotion import PROMOTION_TYPES, Promotion, PromotionRule  # noqa: E402
 
 fallos: list[str] = []
 
@@ -63,10 +68,10 @@ def check(nombre: str, ok: bool) -> None:
 
 
 def promo(**kw) -> Promotion:
-    base = dict(
-        name=kw.pop("name", "p"), type="percent", value=Decimal("10"),
-        status="active", min_qty=1,
-    )
+    """spec 063 (revisión 2026-09-01): `_valid_now` solo lee vigencia/estado
+    de la promoción — ya no necesita `type`/`value`/`min_qty` (viven en cada
+    `PromotionRule`, sin relación con la vigencia)."""
+    base = dict(name=kw.pop("name", "p"), status="active")
     base.update(kw)
     p = Promotion(**base)
     p.created_at = kw.get("created_at", datetime(2026, 1, 1))
@@ -187,8 +192,9 @@ check("2X: -2.000 por línea", sorted(rep3.values()) == [Decimal("2000"), Decima
 # --- 5. Textos de condición (español de Colombia) ------------------------
 print("\n5. variant_set_condition_text")
 
-def _promo_texto(tipo, value, min_qty, n):
-    # `variant_set_condition_text` solo lee `type`/`value`/`min_qty`/`len(variants)`.
+def _regla_texto(tipo, value, min_qty, n):
+    # spec 063 (revisión 2026-09-01): `variant_set_condition_text` recibe una
+    # REGLA, no una promoción — solo lee `type`/`value`/`min_qty`/`len(variants)`.
     fake = SimpleNamespace(
         type=tipo, value=Decimal(str(value)), min_qty=min_qty,
         variants=[object()] * n,
@@ -196,15 +202,15 @@ def _promo_texto(tipo, value, min_qty, n):
     return variant_set_condition_text(fake)
 
 check("package_price min_qty>1",
-      _promo_texto("package_price", 12000, 2, 8) == "Llevando 2 de estas 8 variantes pagas $12.000")
+      _regla_texto("package_price", 12000, 2, 8) == "Llevando 2 de estas 8 variantes pagas $12.000")
 check("package_price min_qty 1",
-      _promo_texto("package_price", 5000, 1, 3) == "Cada una de estas 3 variantes a $5.000")
+      _regla_texto("package_price", 5000, 1, 3) == "Cada una de estas 3 variantes a $5.000")
 check("percent min_qty 1",
-      _promo_texto("percent", 10, 1, 5) == "10% en estas 5 variantes")
+      _regla_texto("percent", 10, 1, 5) == "10% en estas 5 variantes")
 check("percent min_qty>1",
-      _promo_texto("percent", 15, 3, 4) == "15% llevando 3 de estas 4 variantes")
+      _regla_texto("percent", 15, 3, 4) == "15% llevando 3 de estas 4 variantes")
 check("promoción finished de tipo viejo -> condition_text None",
-      _promo_texto("combo", 0, 1, 0) is None)
+      _regla_texto("combo", 0, 1, 0) is None)
 
 
 # --- 6. El enum de ENTRADA admite exactamente {percent, package_price} ---
@@ -214,7 +220,9 @@ check("PromotionType de entrada = {percent, package_price}",
 check("PROMOTION_TYPES conserva los viejos + package_price (lee las finished)",
       set(PROMOTION_TYPES) == {"percent", "fixed", "combo", "qty_price",
                                "qty_price_presentation", "package_price"})
-_type_len = Promotion.__table__.c.type.type.length
+# spec 063 (revisión 2026-09-01): `type` vive en `PromotionRule`, no en
+# `Promotion` (retirada por la migración destructiva `063d`).
+_type_len = PromotionRule.__table__.c.type.type.length
 check(f"varchar({_type_len}) admite el más largo ({max(PROMOTION_TYPES, key=len)!r})",
       _type_len >= max(len(t) for t in PROMOTION_TYPES))
 

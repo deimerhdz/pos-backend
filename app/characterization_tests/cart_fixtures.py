@@ -48,7 +48,7 @@ __all__ = [
     "new_session",
     "make_dining_table", "make_table_session", "make_participant",
     "make_cart", "make_cart_item", "make_customer_order",
-    "make_promotion", "add_variant_to_promotion",
+    "make_promotion", "add_rule_to_promotion",
     "make_payment_method", "make_payment_attempt",
     "frozen_now",
     "build_session_context", "patched_qr_context", "patched_session_context",
@@ -66,7 +66,7 @@ from app.models.cart import Cart
 from app.models.cart_item import CartItem
 from app.models.customer_order import CustomerOrder
 from app.models.product_variant import ProductVariant
-from app.models.promotion import Promotion, PromotionVariant
+from app.models.promotion import Promotion, PromotionRule, PromotionVariant
 from app.models.payment import PaymentMethod
 from app.models.order_payment_attempt import OrderPaymentAttempt
 
@@ -97,7 +97,9 @@ _CART_TABLE_NAMES = [
     "order_items",
     "order_item_options",
     "promotions",
-    # spec 063: conjunto explícito de variantes elegibles.
+    # spec 063 (revisión 2026-09-01): una promoción agrupa una o más reglas.
+    "promotion_rules",
+    # spec 063: conjunto explícito de variantes elegibles (de una regla).
     "promotion_variants",
     "order_cancel_logs",
     "audit_logs",
@@ -315,12 +317,12 @@ def make_customer_order(
 
 
 def make_promotion(db: Session, **kw) -> Promotion:
+    """spec 063 (revisión 2026-09-01): la promoción solo lleva vigencia y
+    estado — `type`/`value`/`min_qty` viven en cada `PromotionRule`
+    (`add_rule_to_promotion`)."""
     kw.setdefault("id", _uid())
     kw.setdefault("name", f"promo-{kw['id']}")
-    kw.setdefault("type", "percent")
-    kw.setdefault("value", Decimal("10"))
     kw.setdefault("status", "active")
-    kw.setdefault("min_qty", 1)
     kw.setdefault("created_at", datetime.now())
     obj = Promotion(**kw)
     db.add(obj)
@@ -328,18 +330,33 @@ def make_promotion(db: Session, **kw) -> Promotion:
     return obj
 
 
-def add_variant_to_promotion(
-    db: Session, promotion: Promotion, variant: ProductVariant, **kw
-) -> PromotionVariant:
-    """spec 063 (FR-001): agrega una variante al conjunto elegible de la
-    promoción (`promotion_variants`)."""
+def add_rule_to_promotion(
+    db: Session,
+    promotion: Promotion,
+    *,
+    type: str = "percent",
+    value: Decimal = Decimal("10"),
+    min_qty: int = 1,
+    variants: list[ProductVariant] = (),
+    **kw,
+) -> PromotionRule:
+    """spec 063 (revisión 2026-09-01, FR-001/FR-001a): agrega una **regla**
+    (tipo, valor, cantidad mínima + su propio conjunto de variantes) a una
+    promoción (contracts/migracion.md §2.1)."""
     kw.setdefault("id", _uid())
-    kw.setdefault("promotion_id", promotion.id)
-    kw.setdefault("product_variant_id", variant.id)
-    obj = PromotionVariant(**kw)
-    db.add(obj)
+    rule = PromotionRule(
+        promotion_id=promotion.id, type=type, value=value, min_qty=min_qty, **kw
+    )
+    db.add(rule)
     db.flush()
-    return obj
+    for variant in variants:
+        db.add(PromotionVariant(
+            id=_uid(),
+            promotion_rule_id=rule.id,
+            product_variant_id=variant.id,
+        ))
+    db.flush()
+    return rule
 
 
 def make_payment_method(db: Session, **kw) -> PaymentMethod:

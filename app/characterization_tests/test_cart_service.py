@@ -156,8 +156,7 @@ class TestCartService(unittest.TestCase):
         db, table, ts, participant = self._seed_session()
         variant, product, category = self._seed_variant(db)
         cart_fixtures.make_promotion(
-            db, type="percent", value=Decimal("20"), status="active",
-            start_time=time(20, 0), end_time=time(21, 0),
+            db, status="active", start_time=time(20, 0), end_time=time(21, 0),
         )
 
         instant = datetime(2026, 1, 15, 20, 0, tzinfo=timezone.utc)
@@ -177,10 +176,12 @@ class TestCartService(unittest.TestCase):
         db, table, ts, participant = self._seed_session()
         variant, product, category = self._seed_variant(db)
         promo = cart_fixtures.make_promotion(
-            db, type="percent", value=Decimal("20"), status="active", min_qty=1,
-            start_time=time(20, 0), end_time=time(21, 0),
+            db, status="active", start_time=time(20, 0), end_time=time(21, 0),
         )
-        cart_fixtures.add_variant_to_promotion(db, promo, variant)
+        cart_fixtures.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("20"), min_qty=1,
+            variants=[variant],
+        )
 
         instant = datetime(2026, 1, 16, 1, 0, tzinfo=timezone.utc)
         with cart_fixtures.frozen_now(instant):
@@ -333,10 +334,11 @@ class TestCartService(unittest.TestCase):
         `discounted_unit_price`/`discounted_line_total`."""
         db, table, ts, participant = self._seed_session()
         variant, product, category = self._seed_variant(db, price=Decimal("10000"))
-        promo = cart_fixtures.make_promotion(
-            db, type="percent", value=Decimal("10"), status="active", min_qty=1,
+        promo = cart_fixtures.make_promotion(db, status="active")
+        cart_fixtures.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1,
+            variants=[variant],
         )
-        cart_fixtures.add_variant_to_promotion(db, promo, variant)
 
         resp = service.add_item(
             db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1)
@@ -353,10 +355,11 @@ class TestCartService(unittest.TestCase):
         a 3, `discounted_total` refleja el precio de paquete."""
         db, table, ts, participant = self._seed_session()
         variant, _, _ = self._seed_variant(db, price=Decimal("6000"))
-        promo = cart_fixtures.make_promotion(
-            db, type="package_price", value=Decimal("16000"), status="active", min_qty=3,
+        promo = cart_fixtures.make_promotion(db, status="active")
+        cart_fixtures.add_rule_to_promotion(
+            db, promo, type="package_price", value=Decimal("16000"), min_qty=3,
+            variants=[variant],
         )
-        cart_fixtures.add_variant_to_promotion(db, promo, variant)
 
         resp = service.add_item(
             db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=2)
@@ -536,10 +539,11 @@ class TestCartService(unittest.TestCase):
         db, table, ts, participant = self._seed_session()
         variant1, product, category = self._seed_variant(db, price=Decimal("10000"))
         variant2, _, _ = self._seed_variant(db, price=Decimal("5000"))
-        promo = cart_fixtures.make_promotion(
-            db, type="percent", value=Decimal("10"), status="active", min_qty=1,
+        promo = cart_fixtures.make_promotion(db, status="active")
+        cart_fixtures.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1,
+            variants=[variant1],
         )
-        cart_fixtures.add_variant_to_promotion(db, promo, variant1)
         efectivo = self._seed_efectivo(db)
 
         service.add_item(db, participant.id, CartItemIn(product_variant_id=variant1.id, quantity=1))

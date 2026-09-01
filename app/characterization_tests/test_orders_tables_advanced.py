@@ -208,8 +208,10 @@ class TestTablesAdvanced(unittest.TestCase):
         variant = fx.make_variant(db, product=product, price=Decimal("15000"))
         fx.make_order_item(db, order_b, variant)
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
-        fx.add_variant_to_promotion(db, promo, variant)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1, variants=[variant],
+        )
 
         group_id = tables_advanced.merge_orders(db, [order_b.id])["merged_group_id"]
 
@@ -261,9 +263,11 @@ class TestTablesAdvanced(unittest.TestCase):
         fx.make_order_item(db, order_a, variant_a)
         fx.make_order_item(db, order_b, variant_b)
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
-        fx.add_variant_to_promotion(db, promo, variant_a)
-        fx.add_variant_to_promotion(db, promo, variant_b)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1,
+            variants=[variant_a, variant_b],
+        )
 
         # `merge_orders` rechaza órdenes ya terminales: las dos se fusionan
         # mientras están 'abierta' y el status terminal de A se fija después,
@@ -299,9 +303,11 @@ class TestTablesAdvanced(unittest.TestCase):
         order_b = fx.make_customer_order(db, ts, status="abierta")
         fx.make_order_item(db, order_b, variant_b)
 
-        promo = fx.make_promotion(db, type="percent", value=Decimal("10"), status="active", min_qty=1)
-        fx.add_variant_to_promotion(db, promo, variant_a)
-        fx.add_variant_to_promotion(db, promo, variant_b)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("10"), min_qty=1,
+            variants=[variant_a, variant_b],
+        )
         db.commit()
 
         # Mismo patrón que el test anterior: se fusionan mientras están

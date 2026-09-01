@@ -54,8 +54,8 @@ class TestListPromotionsA09(unittest.TestCase):
         cat = fx.make_category(db)
         prod = fx.make_product(db, category=cat)
         variant = fx.make_variant(db, product=prod, price=8000)
-        promo = fx.make_promotion(db, name="10% Granizados", type="percent", value=10, min_qty=1)
-        fx.add_variant_to_promotion(db, promo, variant)
+        promo = fx.make_promotion(db, name="10% Granizados")
+        fx.add_rule_to_promotion(db, promo, type="percent", value=10, min_qty=1, variants=[variant])
         db.commit()
         user = SimpleNamespace(id="u1")
         response = Response()
@@ -68,17 +68,17 @@ class TestListPromotionsA09(unittest.TestCase):
         self.assertNotIn("overlaps", item)
         self.assertNotIn("priority", item)
         self.assertNotIn("targets", item)
-        self.assertEqual(len(item["variants"]), 1)
-        self.assertEqual(item["variants"][0]["unit_price"], 8000)
-        self.assertEqual(item["condition_text"], "10% en estas 1 variantes")
+        self.assertNotIn("variants", item)  # spec 063 (2026-09-01): vive en cada regla
+        regla = item["rules"][0]
+        self.assertEqual(len(regla["variants"]), 1)
+        self.assertEqual(regla["variants"][0]["unit_price"], 8000)
+        self.assertEqual(regla["condition_text"], "10% en estas 1 variantes")
 
     def test_filtro_closed_by_refactor_lista_las_finalizadas_por_la_migracion(self):
         """FR-025: `?closed_by_refactor=true` filtra `closed_by_refactor_at IS NOT NULL`."""
         db = fx.new_session()
-        viva = fx.make_promotion(db, name="viva", type="percent", value=10, min_qty=1)
-        cerrada = fx.make_promotion(
-            db, name="cerrada por refactor", type="combo", value=0, status="finished",
-        )
+        viva = fx.make_promotion(db, name="viva")
+        cerrada = fx.make_promotion(db, name="cerrada por refactor", status="finished")
         cerrada.closed_by_refactor_at = datetime(2026, 8, 31, 12, 0)
         db.commit()
         user = SimpleNamespace(id="u1")
