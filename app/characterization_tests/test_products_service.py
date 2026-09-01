@@ -54,7 +54,7 @@ class TestUpdateProductA44(unittest.TestCase):
             db, "commit", side_effect=RuntimeError("fallo ajeno a la imagen")
         ):
             with self.assertRaises(RuntimeError):
-                service.update_product(db, product.id, ProductUpdate(image_url=NEW_URL))
+                service.update_product(db, fx.make_tenant_stub(), product.id, ProductUpdate(image_url=NEW_URL))
 
         mock_delete.assert_not_called()
 
@@ -75,7 +75,7 @@ class TestUpdateProductA44(unittest.TestCase):
         ) as mock_delete, mock.patch.object(
             db, "commit", side_effect=lambda: (orden.append("commit"), real_commit())
         ):
-            service.update_product(db, product.id, ProductUpdate(image_url=NEW_URL))
+            service.update_product(db, fx.make_tenant_stub(), product.id, ProductUpdate(image_url=NEW_URL))
 
         self.assertEqual(orden, ["commit", "delete"])
         mock_delete.assert_called_once()
@@ -100,7 +100,7 @@ class TestUpdateProductA44(unittest.TestCase):
         with mock.patch(
             "app.api.v1.products.service.delete_object", side_effect=_delete_falla
         ):
-            result = service.update_product(db, product.id, ProductUpdate(image_url=NEW_URL))
+            result = service.update_product(db, fx.make_tenant_stub(), product.id, ProductUpdate(image_url=NEW_URL))
 
         self.assertEqual(result.image_url, NEW_URL)
 
@@ -133,7 +133,7 @@ class TestCreateProductWithVariantTree(unittest.TestCase):
                 VariantSaveIn(name="Grande", price=Decimal("12000")),
             ],
         )
-        product = service.create_product(db, data)
+        product = service.create_product(db, fx.make_tenant_stub(), data)
 
         variants = db.execute(
             select(ProductVariant)
@@ -171,7 +171,7 @@ class TestCreateProductWithVariantTree(unittest.TestCase):
         service = ProductService()
 
         product = service.create_product(
-            db, ProductCreate(category_id=category.id, name="Cono Simple", preparation_type="prepared")
+            db, fx.make_tenant_stub(), ProductCreate(category_id=category.id, name="Cono Simple", preparation_type="prepared")
         )
 
         variants = db.execute(
@@ -201,7 +201,7 @@ class TestCreateProductWithVariantTree(unittest.TestCase):
                 )
             ],
         )
-        product = service.create_product(db, data)
+        product = service.create_product(db, fx.make_tenant_stub(), data)
         response = service.to_save_response(product)
 
         self.assertEqual(len(response.variants), 1)
@@ -229,7 +229,7 @@ class TestUpdateProductWithVariantTree(unittest.TestCase):
                 # v2 ("Mediana") no aparece -> se desactiva
             ]
         )
-        service.update_product(db, product.id, data)
+        service.update_product(db, fx.make_tenant_stub(), product.id, data)
         db.expire_all()
 
         v1_db = db.get(ProductVariant, v1.id)
@@ -267,7 +267,7 @@ class TestUpdateProductWithVariantTree(unittest.TestCase):
                 )
             ]
         )
-        service.update_product(db, product.id, data)
+        service.update_product(db, fx.make_tenant_stub(), product.id, data)
         db.expire_all()
 
         v1_db = db.get(ProductVariant, v1.id)
@@ -286,7 +286,7 @@ class TestUpdateProductWithVariantTree(unittest.TestCase):
         db.commit()
         service = ProductService()
 
-        service.update_product(db, product.id, ProductUpdate(name="Nuevo nombre"))
+        service.update_product(db, fx.make_tenant_stub(), product.id, ProductUpdate(name="Nuevo nombre"))
         db.expire_all()
 
         v1_db = db.get(ProductVariant, v1.id)
@@ -315,7 +315,7 @@ class TestConsolidatedSaveAtomicity(unittest.TestCase):
             ]
         )
         with self.assertRaises(HTTPException) as ctx:
-            service.update_product(db, product.id, data)
+            service.update_product(db, fx.make_tenant_stub(), product.id, data)
         self.assertEqual(ctx.exception.detail["variant_index"], 3)
 
         db.expire_all()
@@ -346,7 +346,7 @@ class TestConsolidatedSaveAtomicity(unittest.TestCase):
             ],
         )
         with self.assertRaises(HTTPException) as ctx:
-            service.create_product(db, data)
+            service.create_product(db, fx.make_tenant_stub(), data)
         self.assertEqual(ctx.exception.detail["variant_index"], 0)
 
         db.expire_all()
@@ -374,7 +374,7 @@ class TestConsolidatedSaveAtomicity(unittest.TestCase):
             ]
         )
         with self.assertRaises(HTTPException) as ctx:
-            service.update_product(db, product.id, data)
+            service.update_product(db, fx.make_tenant_stub(), product.id, data)
         self.assertEqual(ctx.exception.detail["variant_index"], 0)
 
         db.expire_all()

@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 from decimal import Decimal
 
@@ -153,6 +154,10 @@ class OptionGroupCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, examples=["Sabores de helado"])
     min_select: int = Field(0, ge=0)
     max_select: int = Field(1, ge=1)
+    # spec 064: sin default -- "incluido" (sabor cubierto por el precio de la
+    # presentación) y "con_recargo" (topping con precio propio) son dos casos de uso
+    # igual de válidos; el administrador debe elegir uno explícitamente (FR-001).
+    pricing_type: Literal["incluido", "con_recargo"]
 
 
 class OptionGroupUpdate(BaseModel):
@@ -160,6 +165,7 @@ class OptionGroupUpdate(BaseModel):
     min_select: int | None = Field(None, ge=0)
     max_select: int | None = Field(None, ge=1)
     active: bool | None = None
+    pricing_type: Literal["incluido", "con_recargo"] | None = None
 
 
 class OptionGroupResponse(BaseModel):
@@ -168,6 +174,7 @@ class OptionGroupResponse(BaseModel):
     min_select: int
     max_select: int
     active: bool
+    pricing_type: str
     options: list[OptionResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

@@ -76,9 +76,22 @@ def grupos_que_descuentan(db: Session, links: Sequence[VariantOptionGroup]) -> s
     if not gids:
         return set()
     por_grupo = {l.option_group_id for l in links if l.quantity_per_option > 0}
+    # spec 064, FR-009 [corrige A-32/RN-CAT-39]: mismo criterio de tres condiciones que
+    # `group_discounts` (app/catalog_engine/consumption.py) -- una opción con cantidad
+    # puesta pero sin insumo enlazado o desactivada NO cuenta como "descuenta inventario"
+    # aquí tampoco. Antes de esta spec, esta función exigía solo `item_quantity > 0`,
+    # discrepando de `group_discounts` (que ya exigía además `active` e
+    # `inventory_item_id` no nulo) -- esa discrepancia hoy podía forzar "elige
+    # exactamente el máximo" sobre un grupo a medio configurar que, al confirmar la
+    # venta, `ensure_lines_consume_inventory` ya trataba como si no descontara nada.
     por_opcion = set(db.execute(
         select(Option.option_group_id)
-        .where(Option.option_group_id.in_(gids), Option.item_quantity > 0)
+        .where(
+            Option.option_group_id.in_(gids),
+            Option.active.is_(True),
+            Option.inventory_item_id.is_not(None),
+            Option.item_quantity > 0,
+        )
         .distinct()
     ).scalars().all())
     return por_grupo | por_opcion
