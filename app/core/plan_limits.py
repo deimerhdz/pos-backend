@@ -123,28 +123,40 @@ def enforce_plan_limit(db: Session, tenant: Tenant, resource_key: str) -> None:
         )
 
 
+def ensure_module_access(db: Session, tenant: Tenant, module_key: str) -> None:
+    """Misma comprobación que `require_module_access` (acceso a módulo por plan,
+    FR-008/FR-009/FR-019), pero invocable directamente dentro de un handler —
+    no solo como dependencia de ruta completa de FastAPI. Existe para gatear
+    campos concretos (ej. `Product.tracks_inventory`, `Option.inventory_item_id`)
+    dentro de endpoints que deben seguir funcionando para tenants sin el módulo
+    (spec 064, research.md Decisión 4) — a diferencia de `unit_measures`/`reports`
+    (spec 062), donde el módulo completo se gatea a nivel de router/ruta."""
+    ensure_plan_not_expired(tenant)
+    access_column = f"{module_key}_access"
+    labels = {"inventario": "inventario", "compras": "compras", "promociones": "promociones"}
+    label = labels.get(module_key, module_key)
+
+    plan = db.get(Plan, tenant.plan_id)
+    if not getattr(plan, access_column):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"Tu plan actual no incluye el módulo de {label}.",
+        )
+
+
 def require_module_access(module_key: str) -> Callable:
     """Dependencia FastAPI: deniega el acceso si el plan vigente del tenant
     no incluye `module_key` (FR-008/FR-009), o si el plan venció (FR-019).
     Sin lock — solo lectura, no hay condición de carrera que resolver para
-    un acceso de módulo."""
-    access_column = f"{module_key}_access"
-    labels = {"inventario": "inventario", "compras": "compras", "promociones": "promociones"}
-    label = labels.get(module_key, module_key)
+    un acceso de módulo. Wrapper delgado sobre `ensure_module_access` (spec 064)
+    — mismo comportamiento de siempre para los routers que ya la usan."""
 
     def _dependency(
         tenant: Tenant = Depends(get_tenant),
         db: Session = Depends(get_db),
         _user: User = Depends(get_current_user),
     ) -> None:
-        ensure_plan_not_expired(tenant)
-
-        plan = db.get(Plan, tenant.plan_id)
-        if not getattr(plan, access_column):
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                f"Tu plan actual no incluye el módulo de {label}.",
-            )
+        ensure_module_access(db, tenant, module_key)
 
     return _dependency
 

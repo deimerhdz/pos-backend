@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
 from app.core.crud import get_or_404
+from app.core.models import Tenant
+from app.core.plan_limits import ensure_module_access
 from app.core.storage import delete_object, key_from_public_url
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
@@ -52,8 +54,13 @@ class ProductService:
     def get_or_404(self, db: Session, id: UUID) -> Product:
         return get_or_404(db, Product, id, "Product not found")
 
-    def create_product(self, db: Session, data: ProductCreate) -> Product:
+    def create_product(self, db: Session, tenant: Tenant, data: ProductCreate) -> Product:
         self._validate_fks(db, data.category_id)
+        # spec 064, FR-011/FR-012: activar "maneja inventario" exige el módulo Inventario
+        # en el plan vigente del tenant -- gating a nivel de campo (research.md Decisión 4):
+        # crear un producto con tracks_inventory=False sigue funcionando sin ese módulo.
+        if data.tracks_inventory:
+            ensure_module_access(db, tenant, "inventario")
         try:
             product = Product(
                 category_id=data.category_id,
@@ -84,7 +91,7 @@ class ProductService:
         db.refresh(product)
         return product
 
-    def update_product(self, db: Session, id: UUID, data: ProductUpdate) -> Product:
+    def update_product(self, db: Session, tenant: Tenant, id: UUID, data: ProductUpdate) -> Product:
         product = self.get_or_404(db, id)
         self._validate_fks(db, data.category_id)
         if data.category_id is not None:
@@ -106,6 +113,11 @@ class ProductService:
         if data.available is not None:
             product.available = data.available
         if data.tracks_inventory is not None:
+            # spec 064, FR-011/FR-012: solo reevalúa el plan cuando el valor realmente
+            # cambia a `True` -- un PATCH que no toca este campo, o que lo deja igual,
+            # nunca dispara un 403 sorpresivo por otra edición no relacionada.
+            if data.tracks_inventory and not product.tracks_inventory:
+                ensure_module_access(db, tenant, "inventario")
             product.tracks_inventory = data.tracks_inventory
 
         try:

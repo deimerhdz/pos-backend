@@ -81,7 +81,7 @@ def create_product(
     _: User = Depends(require_tenant_admin),
 ):
     enforce_plan_limit(db, tenant, "productos")  # spec 033, FR-005/FR-006
-    product = service.create_product(db, body)
+    product = service.create_product(db, tenant, body)
     return service.to_save_response(product)
 
 
@@ -105,9 +105,10 @@ def update_product(
     id: UUID,
     body: ProductUpdate,
     db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
     _: User = Depends(require_tenant_admin),
 ):
-    product = service.update_product(db, id, body)
+    product = service.update_product(db, tenant, id, body)
     return service.to_save_response(product)
 
 
@@ -126,9 +127,10 @@ def replace_product(
     id: UUID,
     body: ProductUpdate,
     db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
     _: User = Depends(require_tenant_admin),
 ):
-    product = service.update_product(db, id, body)
+    product = service.update_product(db, tenant, id, body)
     return service.to_save_response(product)
 
 

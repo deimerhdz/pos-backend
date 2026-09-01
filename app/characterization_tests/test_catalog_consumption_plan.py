@@ -132,15 +132,21 @@ class PlanLineConsumptionTests(unittest.TestCase):
 
 
 class GroupDiscountsCriteriaTests(unittest.TestCase):
-    """RN-CAT-39 [DISCREPANCIA]: `grupos_que_descuentan` (line_pricing) y
-    `group_discounts` (consumption_plan) responden distinto a la misma
-    pregunta ("¿este grupo descuenta inventario?") para una opción con
-    `item_quantity>0` pero sin `inventory_item_id`."""
+    """RN-CAT-39 [RESUELTA por spec 064, FR-009 -- ver
+    specs/000-reconocimiento/registro-de-anomalias.md, entrada de resolución de A-32]:
+    `grupos_que_descuentan` (line_pricing) y `group_discounts` (consumption_plan) antes
+    respondían distinto a la misma pregunta ("¿este grupo descuenta inventario?") para una
+    opción con `item_quantity>0` pero sin `inventory_item_id`. Desde spec 064,
+    `grupos_que_descuentan` exige exactamente el mismo criterio de tres condiciones que
+    `group_discounts` (`active=True`, `inventory_item_id` no nulo, `item_quantity>0`) --
+    este test ya NO congela una discrepancia, congela que ambas funciones coinciden
+    siempre. Autorizado explícitamente por decisión de negocio (spec.md 064,
+    Clarifications 2026-09-01: "sí, unificar el criterio")."""
 
     def setUp(self):
         self.db = f.new_session()
 
-    def test_rn_cat_39_discrepancia_opcion_con_item_quantity_pero_sin_insumo_ligado(self):
+    def test_rn_cat_39_resuelta_opcion_con_item_quantity_pero_sin_insumo_ligado_no_descuenta(self):
         variant = f.make_variant(self.db)
         group = f.make_option_group(self.db, min_select=1, max_select=1)
         link = f.link_variant_group(self.db, variant, group, quantity_per_option=Decimal("0"))
@@ -152,12 +158,14 @@ class GroupDiscountsCriteriaTests(unittest.TestCase):
         # group_discounts (consumption_plan): exige inventory_item_id no nulo -> False
         self.assertFalse(group_discounts(self.db, link))
 
-        # grupos_que_descuentan (line_pricing): solo mira item_quantity>0, sin
-        # exigir inventory_item_id -> SÍ lo cuenta como "que descuenta"
+        # grupos_que_descuentan (line_pricing), desde spec 064: mismo criterio de tres
+        # condiciones que group_discounts -> también False (antes de spec 064, esta
+        # función solo miraba item_quantity>0 y devolvía True aquí -- la discrepancia
+        # original de RN-CAT-39).
         consumen = grupos_que_descuentan_lp(self.db, [link])
-        self.assertIn(group.id, consumen)
+        self.assertNotIn(group.id, consumen)
 
-    def test_ambos_criterios_coinciden_cuando_la_opcion_tiene_insumo_ligado(self):
+    def test_ambos_criterios_coinciden_cuando_la_opcion_tiene_insumo_activo_y_ligado(self):
         variant = f.make_variant(self.db)
         insumo = f.make_inventory_item(self.db)
         group = f.make_option_group(self.db, min_select=1, max_select=1)
@@ -166,13 +174,29 @@ class GroupDiscountsCriteriaTests(unittest.TestCase):
         self.assertTrue(group_discounts(self.db, link))
         self.assertIn(group.id, grupos_que_descuentan_lp(self.db, [link]))
 
+    def test_ambos_criterios_coinciden_cuando_la_opcion_tiene_insumo_ligado_pero_inactiva(self):
+        """Tercera combinación (spec 064, FR-009): insumo enlazado y cantidad > 0, pero la
+        opción está desactivada -- ninguno de los dos criterios la cuenta como
+        "descuenta"."""
+        variant = f.make_variant(self.db)
+        insumo = f.make_inventory_item(self.db)
+        group = f.make_option_group(self.db, min_select=1, max_select=1)
+        link = f.link_variant_group(self.db, variant, group, quantity_per_option=Decimal("0"))
+        f.make_option(
+            self.db, group=group,
+            inventory_item_id=insumo.id, item_quantity=Decimal("10"), active=False,
+        )
+        self.assertFalse(group_discounts(self.db, link))
+        self.assertNotIn(group.id, grupos_que_descuentan_lp(self.db, [link]))
+
     def test_grupos_que_descuentan_solo_vive_en_line_pricing_no_en_consumption_plan(self):
         """`grupos_que_descuentan` (plural, sobre una lista de links) solo
         existe en `line_pricing.py`; `consumption_plan.py` define su propia
         función distinta, `group_discounts` (singular, sobre un solo link) —
-        dos nombres para dos funciones con criterio distinto (RN-CAT-39), no
-        una sola reexportada. Se congela para no confundirlas al mantener
-        este test."""
+        dos nombres, dos funciones, dos firmas distintas, aunque desde spec 064
+        comparten el mismo criterio (RN-CAT-39, ver `GroupDiscountsCriteriaTests`
+        arriba). No son una sola función reexportada bajo dos nombres — se congela
+        para no confundirlas al mantener este test."""
         import app.api.v1.catalog.consumption_plan as cp
         self.assertFalse(hasattr(cp, "grupos_que_descuentan"))
 

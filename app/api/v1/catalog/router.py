@@ -1,14 +1,15 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.db import get_db
+from app.core.db import get_db, get_tenant
 from app.core.crud import get_or_404, ensure_unique
 from app.core.dependencies import get_current_user, require_tenant_admin
-from app.core.models import User
+from app.core.models import User, Tenant
+from app.core.plan_limits import ensure_module_access
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.recipe_item import RecipeItem
@@ -286,7 +287,12 @@ def create_option_group(
     if body.max_select < body.min_select:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "max_select < min_select")
     ensure_unique(db, OptionGroup, OptionGroup.name, body.name, "Option group name already exists")
-    group = OptionGroup(name=body.name, min_select=body.min_select, max_select=body.max_select)
+    group = OptionGroup(
+        name=body.name,
+        min_select=body.min_select,
+        max_select=body.max_select,
+        pricing_type=body.pricing_type,
+    )
     db.add(group)
     db.commit()
     db.refresh(group)
@@ -321,6 +327,17 @@ def update_option_group(
         if not body.active and group.active:
             _bloquear_si_esta_en_uso(db, group_id, "desactivar este grupo")
         group.active = body.active
+    if body.pricing_type is not None:
+        # spec 064, FR-004: pasar de "con_recargo" a "incluido" fuerza $0 en todas las
+        # opciones del grupo -- mismo criterio no destructivo ya usado por RN-CAT-38
+        # (desvincular insumo resetea item_quantity). La confirmación previa al usuario
+        # es responsabilidad del frontend (research.md Decisión 2); el backend aplica
+        # el cambio directamente.
+        if body.pricing_type == "incluido" and group.pricing_type != "incluido":
+            db.execute(
+                update(Option).where(Option.option_group_id == group_id).values(extra_price=0)
+            )
+        group.pricing_type = body.pricing_type
     db.commit()
     db.refresh(group)
     return group
@@ -354,9 +371,21 @@ def add_option(
     group_id: UUID,
     body: OptionCreate,
     db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
     _: User = Depends(require_tenant_admin),
 ):
-    get_or_404(db, OptionGroup, group_id, "Option group not found")
+    group = get_or_404(db, OptionGroup, group_id, "Option group not found")
+    if group.pricing_type == "incluido" and body.extra_price != 0:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Los grupos «Incluido» no permiten precio distinto de $0.",
+        )
+    # spec 064, FR-011/FR-012: guardar insumo o cantidad de consumo exige el módulo
+    # Inventario en el plan del tenant -- gating a nivel de campo, no de ruta completa
+    # (research.md Decisión 4): un topping sin insumo (precio puro) sigue funcionando
+    # sin importar el plan.
+    if body.inventory_item_id is not None or body.item_quantity > 0:
+        ensure_module_access(db, tenant, "inventario")
     if body.inventory_item_id is not None:
         get_or_404(db, InventoryItem, body.inventory_item_id, "Inventory item not found")
     dup = db.execute(
@@ -386,6 +415,7 @@ def update_option(
     option_id: UUID,
     body: OptionUpdate,
     db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
     _: User = Depends(require_tenant_admin),
 ):
     option = get_or_404(db, Option, option_id, "Option not found")
@@ -401,6 +431,11 @@ def update_option(
             raise HTTPException(status.HTTP_409_CONFLICT, "Option name already exists in group")
         option.name = body.name
     if body.extra_price is not None:
+        if option.option_group.pricing_type == "incluido" and body.extra_price != 0:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Los grupos «Incluido» no permiten precio distinto de $0.",
+            )
         option.extra_price = body.extra_price
     # `None` explícito desliga el insumo; ausente = no tocar.
     if "inventory_item_id" in body.model_fields_set:
@@ -414,6 +449,23 @@ def update_option(
         option.item_quantity = body.item_quantity
     if body.active is not None:
         option.active = body.active
+    # spec 064, FR-011/FR-012: solo exige el módulo cuando ESTE request intenta agregar o
+    # aumentar consumo de inventario -- enlazar un insumo nuevo, o subir item_quantity en
+    # una opción que ya tiene (o pasa a tener) insumo. NO se evalúa sobre el estado final
+    # completo de la opción: una opción que ya tenía insumo configurado de antes (dato
+    # preservado, FR-013) puede seguir editándose en cualquier otro campo (ej. `name`) sin
+    # que ese insumo heredado dispare un 403 por una edición que no lo toca. Desvincular
+    # (que ya fuerza item_quantity=0 por RN-CAT-38) nunca exige el módulo tampoco.
+    intenta_enlazar_insumo = (
+        "inventory_item_id" in body.model_fields_set and body.inventory_item_id is not None
+    )
+    intenta_subir_cantidad = (
+        body.item_quantity is not None
+        and body.item_quantity > 0
+        and option.inventory_item_id is not None
+    )
+    if intenta_enlazar_insumo or intenta_subir_cantidad:
+        ensure_module_access(db, tenant, "inventario")
     db.commit()
     db.refresh(option)
     return option
