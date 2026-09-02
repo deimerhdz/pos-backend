@@ -14,6 +14,11 @@ class CategoryCreate(BaseModel):
         description="Descripción opcional de la categoría.",
         examples=["Gaseosas, jugos y aguas"],
     )
+    display_order: int | None = Field(
+        None, ge=0,
+        description="Posición en el filtro del menú QR; si se omite, se asigna automáticamente al final de la lista actual.",
+        examples=[10],
+    )
 
 
 class CategoryUpdate(BaseModel):
@@ -32,6 +37,11 @@ class CategoryUpdate(BaseModel):
         description="Estado activo/inactivo de la categoría.",
         examples=[True],
     )
+    display_order: int | None = Field(
+        None, ge=0,
+        description="Posición en el filtro del menú QR; si se omite, se asigna automáticamente al final de la lista actual.",
+        examples=[10],
+    )
 
 
 class CategoryResponse(BaseModel):
@@ -42,6 +52,7 @@ class CategoryResponse(BaseModel):
         examples=["Gaseosas, jugos y aguas"],
     )
     active: bool = Field(..., description="Indica si la categoría está activa.", examples=[True])
+    display_order: int = Field(..., description="Posición en el filtro del menú QR.", examples=[10])
     created_at: datetime = Field(..., description="Fecha de creación del registro.")
     updated_at: datetime | None = Field(None, description="Fecha de la última actualización.")
 

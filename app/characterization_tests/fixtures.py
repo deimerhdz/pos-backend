@@ -103,6 +103,7 @@ def make_category(db: Session, **kw) -> Category:
     kw.setdefault("id", _uid())
     kw.setdefault("name", f"categoria-{kw['id']}")
     kw.setdefault("active", True)
+    kw.setdefault("display_order", 0)
     obj = Category(**kw)
     db.add(obj)
     db.flush()
