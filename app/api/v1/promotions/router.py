@@ -97,7 +97,7 @@ def update_promotion(promotion_id: UUID, body: PromotionUpdate, db: Session = De
 
 
 @router.patch("/{promotion_id}/shape", response_model=PromotionResponse,
-              summary="Cambiar tipo o conjunto de variantes (solo en borrador)")
+              summary="Cambiar reglas y conjunto de variantes (borrador o pausada)")
 def update_promotion_shape(promotion_id: UUID, body: PromotionShapeUpdate,
                            db: Session = Depends(get_db),
                            user: User = Depends(require_tenant_admin)):

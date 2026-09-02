@@ -95,7 +95,7 @@ def create_app()->FastAPI:
     # (research.md § 6): fuera de "prod", o sin SENTRY_DSN, nunca se llama a
     # sentry_sdk.init() y cualquier capture_exception posterior es un no-op.
     if settings.ENVIRONMENT == "prod" and settings.SENTRY_DSN:
-        sentry_sdk.init(dsn=settings.SENTRY_DSN, environment=settings.ENVIRONMENT)
+        sentry_sdk.init(dsn=settings.SENTRY_DSN, environment=settings.ENVIRONMENT, enable_logs=True,)
 
     app = FastAPI(title="Pos", lifespan=lifespan)
 
