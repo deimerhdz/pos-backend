@@ -62,6 +62,34 @@ class SuperAdminSentryIntegrationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 500)
         mock_capture.assert_called_once()
 
+    # ---------------------------------------------------------- (a2) prod + 500 ya envuelto como HTTPException
+
+    def test_httpexception_500_ya_envuelta_tambien_reporta_a_sentry(self):
+        """Caso real observado en producción: `tenant_create()`
+        (`app/core/db.py`) atrapa cualquier excepción inesperada y la
+        relanza como `HTTPException(500, "Internal server error")` *antes*
+        de que llegue a `RequestIdMiddleware`. Sin este caso, ese camino
+        nunca reportaba a Sentry ni quedaba correlacionado por
+        `request_id` en los logs del servidor."""
+        from fastapi import HTTPException
+
+        with patch.object(settings, "ENVIRONMENT", "prod"), patch(
+            "app.core.error_middleware.sentry_sdk.capture_exception"
+        ) as mock_capture, patch(
+            "app.api.v1.super_admin.router.calculate_plan_vencimiento",
+            side_effect=HTTPException(status_code=500, detail="Internal server error"),
+        ):
+            plan = fx.make_plan(self.db, precio_mensual=10000)
+            tenant = fx.make_tenant(self.db)
+            self.db.commit()
+            resp = self.client.patch(
+                f"/api/v1/super-admin/tenants/{tenant.id}",
+                json={"plan_id": str(plan.id), "ciclo_facturacion": "mensual"},
+            )
+
+        self.assertEqual(resp.status_code, 500)
+        mock_capture.assert_called_once()
+
     # ---------------------------------------------------------- (b) prod + error esperado
 
     def test_error_de_negocio_esperado_en_produccion_no_reporta_a_sentry(self):
@@ -96,6 +124,25 @@ class SuperAdminSentryIntegrationTests(unittest.TestCase):
             self.assertEqual(expected_resp.status_code, 404)
 
         mock_capture.assert_not_called()
+
+    # ---------------------------------------------------------- (e) la terminal muestra el mismo contexto que Sentry
+
+    def test_terminal_muestra_el_mismo_contexto_que_se_envia_a_sentry_en_cualquier_entorno(self):
+        """El log de servidor debe incluir module/operation/request_id/user_id
+        (los mismos campos que se envían a Sentry) sin importar el entorno —
+        en dev no hay Sentry, pero sí se necesita poder depurar localmente."""
+        self.assertNotEqual(settings.ENVIRONMENT, "prod")
+
+        with self.assertLogs("app.core.error_middleware", level="ERROR") as captured:
+            resp = self._force_unexpected_failure()
+
+        self.assertEqual(resp.status_code, 500)
+        [log_line] = captured.output
+        self.assertIn("module=super-admin", log_line)
+        self.assertIn("operation=PATCH /api/v1/super-admin/tenants/", log_line)
+        self.assertIn(f"user_id={self.admin.id}", log_line)
+        request_id = resp.json()["request_id"]
+        self.assertIn(f"request_id={request_id}", log_line)
 
     # ---------------------------------------------------------- (d) el módulo funciona sin Sentry
 

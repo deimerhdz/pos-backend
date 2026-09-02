@@ -78,7 +78,17 @@ def _request_id(request: Request) -> str:
 
 def _report_unexpected_exception(request: Request, exc: Exception, request_id: str, *, module: str) -> None:
     operation = f"{request.method} {request.url.path}"
-    logger.exception("Falla técnica inesperada en %s (request_id=%s)", operation, request_id)
+    user_id = getattr(request.state, "super_admin_id", None)
+
+    # Mismo contexto que se envía a Sentry (module/operation/request_id/
+    # user_id), en la terminal, siempre — sin importar el entorno, para que
+    # se pueda depurar en desarrollo igual que se correlaciona en producción
+    # (la traza completa se agrega sola: `logger.exception` adjunta
+    # `exc_info` después de este mensaje).
+    logger.exception(
+        "Falla técnica inesperada | module=%s operation=%s request_id=%s user_id=%s",
+        module, operation, request_id, user_id if user_id is not None else "-",
+    )
 
     # Fuera de producción, sentry_sdk.init() nunca se llamó (app/main.py) — sin
     # cliente activo, capture_exception ya sería un no-op, pero se corta antes
@@ -90,7 +100,6 @@ def _report_unexpected_exception(request: Request, exc: Exception, request_id: s
         scope.set_tag("module", module)
         scope.set_tag("operation", operation)
         scope.set_tag("request_id", request_id)
-        user_id = getattr(request.state, "super_admin_id", None)
         if user_id is not None:
             scope.set_user({"id": str(user_id)})
         sentry_sdk.capture_exception(exc)
@@ -118,7 +127,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             return JSONResponse(body, status_code=status_code)
 
 
-def register_error_handlers(app: FastAPI, path_prefix: str) -> None:
+def register_error_handlers(app: FastAPI, path_prefix: str, *, module: str = "super-admin") -> None:
     """Registra los handlers de traducción a HTTP con alcance a `path_prefix`.
 
     Para cualquier ruta que no empiece por `path_prefix`, cada handler delega
@@ -130,7 +139,20 @@ def register_error_handlers(app: FastAPI, path_prefix: str) -> None:
     async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
         if not request.url.path.startswith(path_prefix):
             return await default_http_exception_handler(request, exc)
-        status_code, body = envelope_from_http_exception(exc, _request_id(request))
+        request_id = _request_id(request)
+        if exc.status_code >= 500:
+            # Un HTTPException >=500 sigue siendo una falla técnica, así ya
+            # venga envuelta desde más abajo (p. ej. `tenant_create` en
+            # `app/core/db.py`, que atrapa cualquier excepción inesperada y
+            # la relanza como HTTPException(500, "Internal server error")).
+            # Sin esto, ese camino nunca pasaba por `RequestIdMiddleware` (ya
+            # llega convertido en respuesta antes de esa capa) y ni el
+            # `request_id` ni el reporte a Sentry quedaban correlacionados
+            # con el error real — capturar `exc` aquí igual reporta a Sentry
+            # la excepción original completa, por el encadenamiento
+            # implícito de Python (`__cause__`/`__context__`).
+            _report_unexpected_exception(request, exc, request_id, module=module)
+        status_code, body = envelope_from_http_exception(exc, request_id)
         return JSONResponse(body, status_code=status_code)
 
     @app.exception_handler(RequestValidationError)
