@@ -24,7 +24,8 @@ from app.models.option_group import OptionGroup
 from app.models.variant_option_group import VariantOptionGroup
 from app.models.dining_table import DiningTable
 from app.api.v1.promotions.service import (
-    active_variant_set_rules, menu_unit_discount, variant_set_condition_text,
+    active_variant_set_rules, menu_unit_discount, menu_variant_promotion,
+    variant_display_names, variant_set_condition_text,
 )
 from app.api.v1.menu.schemas import (
     MenuCategoryResponse, MenuProductResponse, MenuVariantResponse,
@@ -86,6 +87,11 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
     # variantes vigentes en este instante (la vigencia es de la promoción,
     # compartida por todas sus reglas).
     rules = active_variant_set_rules(db, now)
+    # spec 066: los nombres del descriptor, **una vez por llamada** y fuera del
+    # bucle de variantes — dentro sería un N+1 (research.md D-12).
+    promo_names = variant_display_names(
+        db, {v.product_variant_id for r in rules for v in r.variants}
+    )
 
     categories = db.execute(
         select(Category).where(Category.active.is_(True)).order_by(Category.name)
@@ -152,22 +158,25 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
                     groups.append(grupo)
                     union.setdefault(g.id, grupo)
 
-                # Al navegar el menú aún no hay carrito: solo `percent` con
-                # `min_qty == 1` baja el precio unitario (spec 063,
-                # contracts/superficies-consumo.md §1).
+                # Al navegar el menú aún no hay carrito: solo las reglas con
+                # `min_qty == 1` bajan el precio unitario (spec 063,
+                # contracts/superficies-consumo.md §1). spec 066 (A-68): eso incluye
+                # ahora `package_price`, y el tipo real viaja en `discount_kind`.
                 discounted_price = None
                 discount_kind = None
+                promotion = None
                 if rules:
                     disc = menu_unit_discount(rules, v.id, v.price)
-                    if disc is not None and disc > 0:
-                        discounted_price = (v.price - disc).quantize(
-                            Decimal("0.01"), rounding=ROUND_HALF_UP
-                        )
-                        discount_kind = "percent"
+                    if disc is not None:
+                        discounted_price, discount_kind = disc
+                    # spec 066 (FR-007): la condición y el equivalente por unidad,
+                    # ya calculados y ya renderizados por el backend.
+                    promotion = menu_variant_promotion(rules, v.id, v.price, promo_names)
 
                 variants.append(MenuVariantResponse(
                     id=v.id, name=v.name, price=v.price, discounted_price=discounted_price,
                     discount_kind=discount_kind, option_groups=groups, available=v_pedible,
+                    promotion=promotion,
                 ))
                 pedible = pedible or v_pedible
 
@@ -202,8 +211,15 @@ def _build_menu_promotions(db: Session, now: datetime) -> list[MenuPromotionAnno
     # (vigencia en ese instante, FR-022 / SC-007), evaluado sobre la
     # promoción dueña de cada regla.
     by_promotion: dict = {}   # promotion_id -> MenuPromotionAnnouncement
-    for rule in active_variant_set_rules(db, now):
-        text = variant_set_condition_text(rule)
+    reglas = active_variant_set_rules(db, now)
+    # spec 066: los nombres del descriptor se resuelven **una vez por llamada**,
+    # sobre la unión de los conjuntos vigentes. Dentro del bucle sería un N+1
+    # (research.md D-12).
+    names = variant_display_names(
+        db, {v.product_variant_id for r in reglas for v in r.variants}
+    )
+    for rule in reglas:
+        text = variant_set_condition_text(rule, names)
         if text is None:
             continue
         promo = rule.promotion
