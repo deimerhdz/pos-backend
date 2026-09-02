@@ -83,8 +83,10 @@ class TestUS1ArmarPromocion(unittest.TestCase):
         data = service.serialize_promotion(self.db, promo)
         self.assertEqual(data["status"], "draft")
         regla = data["rules"][0]
+        # spec 066 (A-66): texto por nombres. El listado de administración lee el
+        # mismo `condition_text` que el cartel del menú (SC-005).
         self.assertEqual(regla["condition_text"],
-                         "Llevando 2 de estas 8 variantes pagas $12.000")
+                         "Llevando 2 entre licor-0, licor-1, licor-2 y 5 más pagas $12.000")
         self.assertEqual(len(regla["variants"]), 8)
         self.assertTrue(all(v["unit_price"] == Decimal("8000") for v in regla["variants"]))
 
