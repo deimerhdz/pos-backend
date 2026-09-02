@@ -335,5 +335,97 @@ class TestUS5MantenimientoPorLote(unittest.TestCase):
         self.assertTrue(all(r.promotion_id == self.promo.id for r in self.promo.rules))
 
 
+class TestSpec071EdicionEnPausada(unittest.TestCase):
+    """spec 071 (A-69, FR-013 a FR-018): una promoción `Pausada` deja de
+    bloquear `update_shape` — agregar/quitar reglas completas y editar el
+    conjunto de variantes de las existentes, sin duplicar la promoción.
+    `Activa` sigue bloqueando todo, sin cambio (ver `test_ca2_cambiar_reglas_
+    de_una_activa_bloquea` en `TestUS5DuplicarEditarEstados`, que no se toca).
+    """
+
+    def setUp(self):
+        self.db = fx.new_session()
+        prod = fx.make_product(self.db)
+        self.v1 = fx.make_variant(self.db, product=prod, price=Decimal("8000"), name="v1")
+        self.v2 = fx.make_variant(self.db, product=prod, price=Decimal("8000"), name="v2")
+        self.v3 = fx.make_variant(self.db, product=prod, price=Decimal("8000"), name="v3")
+        self.db.commit()
+        self.promo = service.create(self.db, _create_payload(
+            name="pausada", type="percent", value=Decimal("10"), min_qty=1,
+            variant_ids=[self.v1.id],
+        ))
+        service.change_status(self.db, self.promo, "active")
+        service.change_status(self.db, self.promo, "paused")
+        self.db.commit()
+
+    def test_pausada_permite_agregar_producto_al_conjunto_de_una_regla_existente(self):
+        service.update_shape(self.db, self.promo, PromotionShapeUpdate(rules=[_rule(
+            type="percent", value=Decimal("10"), min_qty=1,
+            variant_ids=[self.v1.id, self.v2.id],
+        )]))
+        self.db.commit()
+        self.assertEqual(len(self.promo.rules), 1)
+        self.assertEqual(
+            {pv.product_variant_id for pv in self.promo.rules[0].variants},
+            {self.v1.id, self.v2.id},
+        )
+
+    def test_pausada_permite_agregar_una_regla_nueva(self):
+        service.update_shape(self.db, self.promo, PromotionShapeUpdate(rules=[
+            _rule(type="percent", value=Decimal("10"), min_qty=1, variant_ids=[self.v1.id]),
+            _rule(type="package_price", value=Decimal("12000"), min_qty=2, variant_ids=[self.v2.id, self.v3.id]),
+        ]))
+        self.db.commit()
+        self.assertEqual(len(self.promo.rules), 2)
+
+    def test_pausada_permite_quitar_una_regla_conservando_al_menos_una(self):
+        service.update_shape(self.db, self.promo, PromotionShapeUpdate(rules=[
+            _rule(type="percent", value=Decimal("10"), min_qty=1, variant_ids=[self.v1.id]),
+            _rule(type="package_price", value=Decimal("12000"), min_qty=2, variant_ids=[self.v2.id, self.v3.id]),
+        ]))
+        self.db.commit()
+        self.assertEqual(len(self.promo.rules), 2)
+
+        service.update_shape(self.db, self.promo, PromotionShapeUpdate(rules=[
+            _rule(type="percent", value=Decimal("10"), min_qty=1, variant_ids=[self.v1.id]),
+        ]))
+        self.db.commit()
+        self.assertEqual(len(self.promo.rules), 1)
+
+    def test_pausada_no_permite_quitar_la_ultima_regla(self):
+        """FR-018: `PromotionShapeUpdate.rules` exige `min_length=1` — el
+        propio esquema de Pydantic, no una guarda nueva de `update_shape`."""
+        with self.assertRaises(ValidationError):
+            PromotionShapeUpdate(rules=[])
+
+    def test_pausada_sigue_aplicando_el_bloqueo_de_precio_de_paquete_sin_descuento(self):
+        """FR-016 (spec 063) sigue corriendo dentro de `update_shape` sin
+        condicionar por el nuevo estado permitido."""
+        with self.assertRaises(HTTPException) as ctx:
+            service.update_shape(self.db, self.promo, PromotionShapeUpdate(rules=[_rule(
+                type="package_price", value=Decimal("20000"), min_qty=2,
+                variant_ids=[self.v1.id],
+            )]))
+        self.assertEqual(ctx.exception.status_code, 409)
+        # No debe ser el 409 de "solo borrador/pausada" — debe llegar hasta la
+        # guarda de FR-016 y traer su detalle propio.
+        self.assertIn("cheapest_unit_price", ctx.exception.detail)
+
+    def test_reactivar_tras_editar_en_pausada_usa_el_conjunto_corregido(self):
+        service.update_shape(self.db, self.promo, PromotionShapeUpdate(rules=[_rule(
+            type="percent", value=Decimal("10"), min_qty=1,
+            variant_ids=[self.v2.id],
+        )]))
+        self.db.commit()
+        service.change_status(self.db, self.promo, "active")
+        self.db.commit()
+
+        now = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+        vigentes = service.active_variant_set_rules(self.db, now)
+        variantes_vigentes = {pv.product_variant_id for r in vigentes for pv in r.variants}
+        self.assertIn(self.v2.id, variantes_vigentes)
+        self.assertNotIn(self.v1.id, variantes_vigentes)
+
+
 if __name__ == "__main__":
     unittest.main()
