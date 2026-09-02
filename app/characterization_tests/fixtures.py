@@ -170,10 +170,29 @@ def make_option_group(db: Session, **kw) -> OptionGroup:
     kw.setdefault("min_select", 0)
     kw.setdefault("max_select", 1)
     kw.setdefault("active", True)
+    # spec 064: "con_recargo" es el default de fábrica (server_default de la columna) --
+    # se fija aquí explícitamente por el mismo motivo que el resto de este fixture fija
+    # sus defaults (legibilidad del test, no depender del server_default de la DDL).
+    kw.setdefault("pricing_type", "con_recargo")
     obj = OptionGroup(**kw)
     db.add(obj)
     db.flush()
     return obj
+
+
+def make_tenant_stub(**kw):
+    """Objeto `tenant` mínimo, NO persistido -- suficiente para pasar a
+    `ProductService.create_product`/`update_product` (spec 064) en tests de este módulo,
+    que no incluye las tablas `tenants`/`plans` en su schema de SQLite (fuera de su
+    alcance). Solo sirve para tests que nunca activan `tracks_inventory=True`, que es el
+    único camino que llega a leer sus atributos (`ensure_module_access`); para tests que sí
+    lo activan, usar los fixtures reales de `plan_fixtures.py`."""
+    from types import SimpleNamespace
+
+    kw.setdefault("id", _uid())
+    kw.setdefault("plan_id", _uid())
+    kw.setdefault("plan_vence_en", None)
+    return SimpleNamespace(**kw)
 
 
 def make_option(db: Session, group: OptionGroup | None = None, **kw) -> Option:

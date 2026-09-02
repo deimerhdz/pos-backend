@@ -64,8 +64,21 @@ class Sale(UUIDPrimaryKeyMixin, Base):
     # Promoción aplicada automáticamente (RF-012); su descuento está incluido en `discount`.
     # `SET NULL`, igual que los `combo_id` de cart/order/sale_items: sin él,
     # borrar una promoción ya vendida lanzaba IntegrityError -> 500.
+    #
+    # spec 063 (FR-021, A-64): `promotion_id` SE CONSERVA y se sigue poblando
+    # cuando **una sola** promoción explica todo el descuento; con dos o más
+    # queda `NULL` como hoy, pero `applied_promotions` (abajo) lo cubre — cierra A-29.
     promotion_id: Mapped[Optional[UUID]] = mapped_column(
         ForeignKey("promotions.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # spec 063 (FR-021, A-64): snapshot inmutable al emitir —
+    # `[{"promotion_id", "name", "amount"}]`, una entrada por promoción que
+    # descontó alguna línea de este cobro, con su monto AGREGADO (no por línea).
+    # Mismo patrón que `sale_items.options`. Nace `'[]'` para todo lo existente
+    # (no retroactivo).
+    applied_promotions: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
 
     # Efectivo recibido y cambio entregado (RF-029). Nullable: ventas antiguas

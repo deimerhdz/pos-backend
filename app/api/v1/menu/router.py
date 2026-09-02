@@ -24,7 +24,8 @@ from app.models.option_group import OptionGroup
 from app.models.variant_option_group import VariantOptionGroup
 from app.models.dining_table import DiningTable
 from app.api.v1.promotions.service import (
-    active_discount_promotions, active_presentation_promotions, best_line_discount,
+    active_variant_set_rules, menu_unit_discount, menu_variant_promotion,
+    variant_display_names, variant_set_condition_text,
 )
 from app.api.v1.menu.schemas import (
     MenuCategoryResponse, MenuProductResponse, MenuVariantResponse,
@@ -82,8 +83,15 @@ def _option_availability(db: Session) -> dict[UUID, bool]:
 def _build_menu(db: Session) -> list[MenuCategoryResponse]:
     avail = _option_availability(db)
     now = datetime.now(timezone.utc)
-    promos = active_discount_promotions(db, now)
-    promo_by_id = {p.id: p for p in promos}
+    # spec 063 (revisión 2026-09-01): reglas de promoción por conjunto de
+    # variantes vigentes en este instante (la vigencia es de la promoción,
+    # compartida por todas sus reglas).
+    rules = active_variant_set_rules(db, now)
+    # spec 066: los nombres del descriptor, **una vez por llamada** y fuera del
+    # bucle de variantes — dentro sería un N+1 (research.md D-12).
+    promo_names = variant_display_names(
+        db, {v.product_variant_id for r in rules for v in r.variants}
+    )
 
     categories = db.execute(
         select(Category).where(Category.active.is_(True)).order_by(Category.name)
@@ -150,22 +158,25 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
                     groups.append(grupo)
                     union.setdefault(g.id, grupo)
 
-                # Cantidad 1 a propósito: al navegar el menú aún no hay carrito, así
-                # que una promo con `min_qty > 1` no se muestra hasta que el
-                # comensal la tenga (`serialize_cart` sí conoce la cantidad real).
+                # Al navegar el menú aún no hay carrito: solo las reglas con
+                # `min_qty == 1` bajan el precio unitario (spec 063,
+                # contracts/superficies-consumo.md §1). spec 066 (A-68): eso incluye
+                # ahora `package_price`, y el tipo real viaja en `discount_kind`.
                 discounted_price = None
                 discount_kind = None
-                if promos:
-                    discount, promo_id = best_line_discount(promos, p.id, cat.id, 1, v.price)
-                    if discount > 0:
-                        discounted_price = (v.price - discount).quantize(
-                            Decimal("0.01"), rounding=ROUND_HALF_UP
-                        )
-                        discount_kind = promo_by_id[promo_id].type
+                promotion = None
+                if rules:
+                    disc = menu_unit_discount(rules, v.id, v.price)
+                    if disc is not None:
+                        discounted_price, discount_kind = disc
+                    # spec 066 (FR-007): la condición y el equivalente por unidad,
+                    # ya calculados y ya renderizados por el backend.
+                    promotion = menu_variant_promotion(rules, v.id, v.price, promo_names)
 
                 variants.append(MenuVariantResponse(
                     id=v.id, name=v.name, price=v.price, discounted_price=discounted_price,
                     discount_kind=discount_kind, option_groups=groups, available=v_pedible,
+                    promotion=promotion,
                 ))
                 pedible = pedible or v_pedible
 
@@ -187,29 +198,44 @@ def _money(value: Decimal) -> str:
 
 
 def _build_menu_promotions(db: Session, now: datetime) -> list[MenuPromotionAnnouncement]:
-    """Anuncios de promociones de precio por presentación **vigentes en este
-    instante** (spec 040, FR-021): `status == "active"` **y** `_valid_now`
-    verdadero (ventana de día/hora en la zona del tenant). `_build_menu` no se
-    toca. `now` viene aware (`datetime.now(timezone.utc)`), no arrastra A-08."""
-    anuncios: list[MenuPromotionAnnouncement] = []
-    for promo in active_presentation_promotions(db, now):
-        reglas = [
-            MenuPromotionRule(
-                presentation_name=r.presentation.name if r.presentation else "",
-                min_qty=r.min_qty,
-                pack_price=r.pack_price,
-                text=(
-                    f"Llevando {r.min_qty} de cualquier sabor en presentación "
-                    f"{r.presentation.name if r.presentation else ''} por "
-                    f"{_money(r.pack_price)}"
-                ),
+    """Anuncios de promociones por conjunto de variantes **vigentes en este
+    instante** (spec 063, FR-022 / SC-007): `status == "active"` **y**
+    `_valid_now` verdadero (ventana de día/hora en la zona del tenant).
+    `_build_menu` no se toca. `now` viene aware, no arrastra A-08.
+
+    spec 063 (revisión 2026-09-01): una promoción anuncia **una `rules[]` por
+    cada `PromotionRule` vigente** que tenga (antes: siempre 1, una promoción
+    = una combinación). El DTO `MenuPromotionAnnouncement.rules[]` ya tenía
+    esta forma (research.md D-R3) — solo cambia la cardinalidad."""
+    # `active_variant_set_rules` ya exige `status == "active"` + `_valid_now`
+    # (vigencia en ese instante, FR-022 / SC-007), evaluado sobre la
+    # promoción dueña de cada regla.
+    by_promotion: dict = {}   # promotion_id -> MenuPromotionAnnouncement
+    reglas = active_variant_set_rules(db, now)
+    # spec 066: los nombres del descriptor se resuelven **una vez por llamada**,
+    # sobre la unión de los conjuntos vigentes. Dentro del bucle sería un N+1
+    # (research.md D-12).
+    names = variant_display_names(
+        db, {v.product_variant_id for r in reglas for v in r.variants}
+    )
+    for rule in reglas:
+        text = variant_set_condition_text(rule, names)
+        if text is None:
+            continue
+        promo = rule.promotion
+        anuncio = by_promotion.get(promo.id)
+        if anuncio is None:
+            anuncio = MenuPromotionAnnouncement(
+                promotion_id=promo.id, promotion_name=promo.name, rules=[],
             )
-            for r in promo.presentation_rules
-        ]
-        if reglas:
-            anuncios.append(MenuPromotionAnnouncement(
-                promotion_id=promo.id, promotion_name=promo.name, rules=reglas,
-            ))
+            by_promotion[promo.id] = anuncio
+        anuncio.rules.append(MenuPromotionRule(
+            text=text,
+            variant_count=len(rule.variants),
+            min_qty=rule.min_qty,
+            value=rule.value,
+        ))
+    anuncios = list(by_promotion.values())
     return anuncios
 
 

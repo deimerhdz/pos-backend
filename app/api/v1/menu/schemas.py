@@ -30,17 +30,47 @@ class MenuOptionGroupResponse(BaseModel):
     options: list[MenuOptionResponse] = Field(default_factory=list)
 
 
+class MenuVariantPromotion(BaseModel):
+    """spec 066 (FR-007): información de la **única** regla vigente que cubre esta
+    presentación en este instante — FR-012 y la spec 063 FR-014 impiden que haya
+    dos. Derivada, nunca persistida.
+
+    Viaja con los textos **ya compuestos**: el redondeo al peso sobre `Decimal` no
+    tiene equivalente exacto en el `number` de JavaScript, así que componerlos una
+    sola vez en Python es lo que hace verificable SC-005 (research.md D-4). El
+    frontend imprime cadenas; no recalcula importes (FR-007).
+
+    El importe vinculante lo sigue calculando el cobro (FR-011): esto es
+    informativo."""
+    condition_text: str          # FR-004 completo — idéntico al cartel y a administración
+    short_condition: str         # "2 x $12.000" | "3 x -15%"            (FR-008)
+    unit_equivalent: Decimal     # ya redondeado al peso                  (FR-009)
+    unit_equivalent_approx: bool # el exacto no era entero en pesos       (FR-009)
+    unit_equivalent_text: str    # "$6.000 c/u" | "≈ $4.333 c/u"          (FR-009)
+    display_text: str            # "2 x $12.000 · $6.000 c/u"             (FR-008)
+    type: PromotionType
+    min_qty: int
+    value: Decimal
+
+
 class MenuVariantResponse(BaseModel):
     id: UUID
     name: str
     price: Decimal
-    # Precio ya con el mejor descuento percent/fixed vigente aplicado, o `None` si
-    # ninguna promoción aplica. Se evalúa asumiendo cantidad 1 (aún no hay carrito).
+    # Precio ya con el mejor descuento vigente aplicado, o `None` si ninguna
+    # promoción aplica. Se evalúa asumiendo cantidad 1 (aún no hay carrito).
+    # spec 066 (A-68): cubre también `package_price` con `min_qty == 1`, donde vale
+    # el valor de la regla **tal cual** — es el importe que el cobro aplica, incluso
+    # si resulta mayor o igual que `price` (FR-010, FR-015).
     discounted_price: Decimal | None = None
-    # Tipo de la promoción que generó `discounted_price` ("percent"/"fixed"), o
-    # `None` si no hay descuento — el cliente lo usa solo para elegir cómo mostrar
-    # la insignia de descuento (% vs. monto fijo), nunca para recalcular precios.
+    # Tipo de la promoción que generó `discounted_price`, o `None` si no hay
+    # descuento — el cliente lo usa solo para elegir cómo mostrar la insignia,
+    # nunca para recalcular precios. spec 066: lleva el tipo **real** de la regla,
+    # así que ahora puede valer `"package_price"` (research.md D-13).
     discount_kind: PromotionType | None = None
+    # spec 066 (FR-007): la regla vigente que cubre esta presentación, ya calculada.
+    # Aditivo y opcional: un cliente sin desplegar lo ignora y sigue igual que hoy.
+    promotion: MenuVariantPromotion | None = None
     # Los grupos cuelgan de la presentación: cuántas opciones se eligen cambia con el
     # tamaño (la ensalada pequeña 1 sabor, la mediana 2). Esta es la fuente autoritativa.
     option_groups: list[MenuOptionGroupResponse] = Field(default_factory=list)
@@ -72,18 +102,19 @@ class MenuCategoryResponse(BaseModel):
 
 
 class MenuPromotionRule(BaseModel):
-    presentation_name: str
-    min_qty: int
-    pack_price: Decimal
-    # Texto legible construido en el backend, p. ej.:
-    # "Llevando 2 de cualquier sabor en presentación 8oz por $12.000".
+    # Texto legible construido en el backend (spec 063, `variant_set_condition_text`),
+    # p. ej.: "Llevando 2 de estas 8 variantes pagas $12.000".
     text: str
+    # spec 063: el anuncio describe el conjunto de variantes, ya no una presentación.
+    variant_count: int
+    min_qty: int
+    value: Decimal
 
 
 class MenuPromotionAnnouncement(BaseModel):
-    """Anuncio de una promoción de precio por presentación **vigente en este
-    instante** (spec 040, FR-021). Se expone aparte de `GET /menu`: su
-    `response_model` y `_build_menu` no cambian (research.md D12)."""
+    """Anuncio de una promoción por conjunto de variantes **vigente en este
+    instante** (spec 063, FR-022). Se expone aparte de `GET /menu`: su
+    `response_model` y `_build_menu` no cambian (research.md D9)."""
     promotion_id: UUID
     promotion_name: str
     rules: list[MenuPromotionRule] = Field(default_factory=list)
