@@ -49,12 +49,6 @@ down_revision: Union[str, Sequence[str], None] = '3ad34a2b8146'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-_CK_TYPE = op.f("ck__promotions__ck_promotion_type")
-_CK_VALUE = op.f("ck__promotions__ck_promotion_value_positive")
-_CK_MIN_QTY = op.f("ck__promotions__ck_promotion_min_qty")
-_CK_PERCENT = op.f("ck__promotions__ck_promotion_percent_range")
-
-
 def _has_table(schema: str, table: str) -> bool:
     return op.get_bind().execute(
         text("SELECT to_regclass(:q)"), {"q": f"{schema}.{table}"}
@@ -201,6 +195,13 @@ def upgrade(schema: str) -> None:
     )
     op.drop_column("promotion_variants", "promotion_id", schema=schema)
 
+    # `op.f(...)` solo puede invocarse aquí dentro (el proxy de `Operations`
+    # no existe al importar el módulo) — no subir esto a nivel de módulo.
+    _CK_TYPE = op.f("ck__promotions__ck_promotion_type")
+    _CK_VALUE = op.f("ck__promotions__ck_promotion_value_positive")
+    _CK_MIN_QTY = op.f("ck__promotions__ck_promotion_min_qty")
+    _CK_PERCENT = op.f("ck__promotions__ck_promotion_percent_range")
+
     op.drop_constraint(_CK_TYPE, "promotions", schema=schema, type_="check")
     op.drop_constraint(_CK_VALUE, "promotions", schema=schema, type_="check")
     op.drop_constraint(_CK_MIN_QTY, "promotions", schema=schema, type_="check")
@@ -258,6 +259,12 @@ def downgrade(schema: str) -> None:
         "promotion_variants", "promotion_rule_id",
         existing_type=sa.UUID(), nullable=True, schema=schema,
     )
+
+    # Ídem `upgrade()`: `op.f(...)` calculado aquí dentro, nunca a nivel de módulo.
+    _CK_TYPE = op.f("ck__promotions__ck_promotion_type")
+    _CK_VALUE = op.f("ck__promotions__ck_promotion_value_positive")
+    _CK_MIN_QTY = op.f("ck__promotions__ck_promotion_min_qty")
+    _CK_PERCENT = op.f("ck__promotions__ck_promotion_percent_range")
 
     op.create_check_constraint(
         _CK_TYPE, "promotions",

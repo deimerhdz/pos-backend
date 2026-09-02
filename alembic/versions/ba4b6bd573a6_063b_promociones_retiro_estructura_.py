@@ -38,9 +38,6 @@ down_revision: Union[str, Sequence[str], None] = '387ef3e638cd'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-_CK_TYPE = op.f("ck__promotions__ck_promotion_type")
-
-
 def _has_table(schema: str, table: str) -> bool:
     return op.get_bind().execute(
         text("SELECT to_regclass(:q)"), {"q": f"{schema}.{table}"}
@@ -51,6 +48,10 @@ def _has_table(schema: str, table: str) -> bool:
 def upgrade(schema: str) -> None:
     if not _has_table(schema, "promotions"):
         return
+
+    # `op.f(...)` solo puede invocarse aquí dentro (el proxy de `Operations`
+    # no existe al importar el módulo) — no subir esto a nivel de módulo.
+    _CK_TYPE = op.f("ck__promotions__ck_promotion_type")
 
     # --- borrado de lo que el modelo nuevo deja sin sentido ---
     op.drop_table("promotion_presentation_rules", schema=schema)
@@ -88,6 +89,9 @@ def upgrade(schema: str) -> None:
 def downgrade(schema: str) -> None:
     if not _has_table(schema, "promotions"):
         return
+
+    # Ídem `upgrade()`: `op.f(...)` calculado aquí dentro, nunca a nivel de módulo.
+    _CK_TYPE = op.f("ck__promotions__ck_promotion_type")
 
     # --- CHECKs (estructura de spec 040) ---
     op.drop_constraint(_CK_TYPE, "promotions", schema=schema, type_="check")
