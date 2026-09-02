@@ -5,6 +5,7 @@ Extracción de `app/api/v1/catalog/line_pricing.py` y `consumption_plan.py`
 del contrato — ver contracts/module-api.md Contrato A.
 """
 from app.catalog_engine.core import (
+    ChosenOption as ChosenOption,
     ConsumptionLine as ConsumptionLine,
     _exige_maximo as _exige_maximo,
     compute_line_price as compute_line_price,

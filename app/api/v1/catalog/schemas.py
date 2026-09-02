@@ -150,6 +150,16 @@ class OptionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class OptionSelectionIn(BaseModel):
+    """Una opción elegida junto con cuántas unidades de ella (spec 065). `quantity`
+    default 1 -- el mismo significado que "incluir este id en `option_ids`" tenía antes
+    de esta spec. Compartida por `CartItemIn`/`CartItemUpdate`, la línea de `POST
+    /orders`, `orders/consolidation.py` y la línea de venta de mostrador."""
+
+    option_id: UUID
+    quantity: int = Field(1, ge=1)
+
+
 class OptionGroupCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, examples=["Sabores de helado"])
     min_select: int = Field(0, ge=0)
@@ -158,6 +168,12 @@ class OptionGroupCreate(BaseModel):
     # presentación) y "con_recargo" (topping con precio propio) son dos casos de uso
     # igual de válidos; el administrador debe elegir uno explícitamente (FR-001).
     pricing_type: Literal["incluido", "con_recargo"]
+    # spec 065: a diferencia de pricing_type, "conteo" (el comportamiento de hoy) sí es
+    # un default de negocio razonable -- omitirlo no rompe ningún catálogo existente
+    # (FR-001, research.md Decisión 5).
+    selection_mode: Literal["conteo", "cantidad"] = "conteo"
+    max_quantity_per_option: int | None = Field(None, gt=0)
+    max_total_quantity: int | None = Field(None, gt=0)
 
 
 class OptionGroupUpdate(BaseModel):
@@ -166,6 +182,9 @@ class OptionGroupUpdate(BaseModel):
     max_select: int | None = Field(None, ge=1)
     active: bool | None = None
     pricing_type: Literal["incluido", "con_recargo"] | None = None
+    selection_mode: Literal["conteo", "cantidad"] | None = None
+    max_quantity_per_option: int | None = Field(None, gt=0)
+    max_total_quantity: int | None = Field(None, gt=0)
 
 
 class OptionGroupResponse(BaseModel):
@@ -175,6 +194,9 @@ class OptionGroupResponse(BaseModel):
     max_select: int
     active: bool
     pricing_type: str
+    selection_mode: str
+    max_quantity_per_option: int | None
+    max_total_quantity: int | None
     options: list[OptionResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

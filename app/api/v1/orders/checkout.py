@@ -23,6 +23,7 @@ from app.models.table_session import TableSession
 from app.models.session_participant import SessionParticipant
 from app.models.cart import Cart
 from app.models.option import Option
+from app.catalog_engine import ChosenOption
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.cash_shift import CashShift
@@ -56,11 +57,12 @@ _CONSUMED_KITCHEN = ("en_preparacion", "listo")
 _NOT_DEDUCTED = ("recibida",)
 
 
-def _item_options(db: Session, item: OrderItem) -> list[Option]:
-    opt_ids = [o.option_id for o in item.options]
-    if not opt_ids:
+def _item_options(db: Session, item: OrderItem) -> list[ChosenOption]:
+    quantities = {o.option_id: o.quantity for o in item.options}
+    if not quantities:
         return []
-    return db.execute(select(Option).where(Option.id.in_(opt_ids))).scalars().all()
+    options = db.execute(select(Option).where(Option.id.in_(quantities.keys()))).scalars().all()
+    return [ChosenOption(opt, quantities[opt.id]) for opt in options]
 
 
 def _reload_order(db: Session, order_id: UUID) -> CustomerOrder:
@@ -226,9 +228,9 @@ def order_sale_lines(
             product_variant_id=it.product_variant_id,
             description=description,
             options=[
-                {"option_id": str(o.id), "name": o.name,
-                 "extra_price": str(o.extra_price)}
-                for o in _item_options(db, it)
+                {"option_id": str(chosen.option.id), "name": chosen.option.name,
+                 "extra_price": str(chosen.option.extra_price), "quantity": chosen.quantity}
+                for chosen in _item_options(db, it)
             ],
             quantity=it.quantity,
             unit_price=Decimal(it.unit_price),
@@ -582,7 +584,7 @@ def cancel_order(
     deducted = order.status not in _NOT_DEDUCTED
 
     try:
-        a_revertir: list[tuple[OrderItem, list[Option]]] = []
+        a_revertir: list[tuple[OrderItem, list[ChosenOption]]] = []
         perdidos: list[dict] = []
 
         for it in order.items:

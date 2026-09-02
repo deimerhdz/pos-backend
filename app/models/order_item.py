@@ -99,10 +99,15 @@ class OrderItemOption(UUIDPrimaryKeyMixin, Base):
         ForeignKey("options.id"), nullable=False, index=True
     )
 
+    # spec 065: unidades elegidas de esta opción (grupo "cantidad"); siempre 1 para un
+    # grupo "conteo" (validado en validate_option_selection, no asumido aquí).
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+
     __table_args__ = (
         UniqueConstraint(
             "order_item_id", "option_id",
             name="uq__order_item_options__order_item_id__option_id",
         ),
+        CheckConstraint("quantity > 0", name="ck_order_item_options_quantity_positive"),
         {"schema": "tenant"},
     )

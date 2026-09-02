@@ -34,6 +34,7 @@ from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
 from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.option import Option
+from app.catalog_engine import ChosenOption
 from app.models.payment import PaymentMethod
 from app.models.product_variant import ProductVariant
 from app.api.v1.catalog.line_pricing import (
@@ -209,12 +210,14 @@ def _cart_consumption(
     for item in cart.items:
         if exclude_item_id is not None and item.id == exclude_item_id:
             continue
-        opt_ids = [o.option_id for o in item.options]
-        options = db.execute(
-            select(Option).where(Option.id.in_(opt_ids))
-        ).scalars().all() if opt_ids else []
+        quantities = {o.option_id: o.quantity for o in item.options}
+        options = (
+            db.execute(select(Option).where(Option.id.in_(quantities.keys())))
+            .scalars().all() if quantities else []
+        )
+        chosen = [ChosenOption(opt, quantities[opt.id]) for opt in options]
         for iid, need in required_consumption(
-            db, item.product_variant_id, item.quantity, options
+            db, item.product_variant_id, item.quantity, chosen
         ).items():
             total[iid] += need
     return total
@@ -315,7 +318,7 @@ def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartRespons
     if not variant.active:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
 
-    options = load_valid_options(db, data.option_ids, variant=variant)
+    options = load_valid_options(db, data.options, variant=variant)
 
     # Disponibilidad: consumo del carrito actual + la línea nueva.
     required = _cart_consumption(db, cart)
@@ -333,8 +336,10 @@ def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartRespons
         )
         db.add(item)
         db.flush()
-        for opt in options:
-            db.add(CartItemOption(cart_item_id=item.id, option_id=opt.id))
+        for chosen in options:
+            db.add(CartItemOption(
+                cart_item_id=item.id, option_id=chosen.option.id, quantity=chosen.quantity,
+            ))
         db.commit()
     except Exception:
         db.rollback()
@@ -355,15 +360,17 @@ def update_item(
     new_qty = data.quantity if data.quantity is not None else item.quantity
     variant = get_or_404(db, ProductVariant, item.product_variant_id, "Variant not found")
 
-    if data.option_ids is not None:
-        options = load_valid_options(db, data.option_ids, variant=variant)
+    if data.options is not None:
+        options = load_valid_options(db, data.options, variant=variant)
     else:
         # Selección ya guardada: no se revalida, o un cambio de min/max en el catálogo
         # impediría hasta bajar la cantidad de una línea que ya estaba en el carrito.
-        opt_ids = [o.option_id for o in item.options]
-        options = db.execute(
-            select(Option).where(Option.id.in_(opt_ids))
-        ).scalars().all() if opt_ids else []
+        quantities = {o.option_id: o.quantity for o in item.options}
+        loaded = (
+            db.execute(select(Option).where(Option.id.in_(quantities.keys())))
+            .scalars().all() if quantities else []
+        )
+        options = [ChosenOption(opt, quantities[opt.id]) for opt in loaded]
 
     # Disponibilidad: resto del carrito (sin esta línea) + la línea editada.
     required = _cart_consumption(db, cart, exclude_item_id=item_id)
@@ -376,12 +383,14 @@ def update_item(
         item.unit_price = compute_line_price(variant, options)
         if data.notes is not None:
             item.notes = data.notes
-        if data.option_ids is not None:
+        if data.options is not None:
             for o in list(item.options):
                 db.delete(o)
             db.flush()
-            for opt in options:
-                db.add(CartItemOption(cart_item_id=item.id, option_id=opt.id))
+            for chosen in options:
+                db.add(CartItemOption(
+                    cart_item_id=item.id, option_id=chosen.option.id, quantity=chosen.quantity,
+                ))
         db.commit()
     except Exception:
         db.rollback()
@@ -607,7 +616,9 @@ def submit_cart(
             db.add(item)
             db.flush()
             for o in ci.options:
-                db.add(OrderItemOption(order_item_id=item.id, option_id=o.option_id))
+                db.add(OrderItemOption(
+                    order_item_id=item.id, option_id=o.option_id, quantity=o.quantity,
+                ))
 
         db.add(OrderPaymentAttempt(
             order_id=order.id,

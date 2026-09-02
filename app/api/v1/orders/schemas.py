@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.v1.catalog.schemas import OptionSelectionIn
 from app.api.v1.sales.schemas import PaymentIn
 from app.core.timezone import UtcDatetime
 
@@ -114,7 +115,9 @@ class OrderItemIn(BaseModel):
     # spec 063 (FR-024): el mecanismo de combo se retira; `combo_id` ya no se acepta.
     product_variant_id: UUID
     quantity: int = Field(1, ge=1)
-    option_ids: list[UUID] = Field(default_factory=list)
+    # spec 065: reemplaza `option_ids: list[UUID]` -- cada entrada trae su propia
+    # cantidad elegida (default 1, el mismo significado que tenía "incluir este id").
+    options: list[OptionSelectionIn] = Field(default_factory=list)
     notes: str | None = Field(None, max_length=500)
 
 
@@ -147,6 +150,7 @@ class OrderCreate(BaseModel):
 class OrderItemOptionResponse(BaseModel):
     id: UUID
     option_id: UUID
+    quantity: int
 
     model_config = ConfigDict(from_attributes=True)
 

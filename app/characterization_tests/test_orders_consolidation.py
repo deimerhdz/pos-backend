@@ -29,6 +29,7 @@ from fastapi import HTTPException
 from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import consolidation, service
 from app.api.v1.orders.schemas import OrderCreate, OrderItemIn, OrderChannel
+from app.api.v1.catalog.schemas import OptionSelectionIn
 from app.models.customer_order import CustomerOrder
 from app.models.sale import Sale
 
@@ -95,7 +96,7 @@ class TestConsolidation(unittest.TestCase):
         db.commit()
         user = self._user()
 
-        data = OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[])
+        data = OrderItemIn(product_variant_id=variant.id, quantity=1, options=[])
         with self.assertRaises(HTTPException) as ctx:
             consolidation.add_item_to_table(db, table.id, data, user)
         self.assertEqual(ctx.exception.status_code, 422)
@@ -114,7 +115,7 @@ class TestConsolidation(unittest.TestCase):
 
         data = OrderItemIn(
             product_variant_id=variant.id, quantity=1,
-            option_ids=[o.id for o in options[:3]],
+            options=[OptionSelectionIn(option_id=o.id) for o in options[:3]],
         )
         order = consolidation.add_item_to_table(db, table.id, data, user)
 
@@ -136,7 +137,7 @@ class TestConsolidation(unittest.TestCase):
 
         data = OrderItemIn(
             product_variant_id=variant.id, quantity=1,
-            option_ids=[o.id for o in options],
+            options=[OptionSelectionIn(option_id=o.id) for o in options],
         )
         with self.assertRaises(HTTPException) as ctx:
             consolidation.add_item_to_table(db, table.id, data, user)
@@ -155,13 +156,13 @@ class TestConsolidation(unittest.TestCase):
         db.commit()
         user = self._user()
 
-        data_add = OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[])
+        data_add = OrderItemIn(product_variant_id=variant.id, quantity=1, options=[])
         with self.assertRaises(HTTPException) as ctx_add:
             consolidation.add_item_to_table(db, table.id, data_add, user)
 
         data_create = OrderCreate(
             channel=OrderChannel.POS,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[])],
         )
         with self.assertRaises(HTTPException) as ctx_create:
             service.create_order(db, data_create, uuid4())
@@ -185,7 +186,7 @@ class TestConsolidation(unittest.TestCase):
 
         data = OrderCreate(
             channel=OrderChannel.POS,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())

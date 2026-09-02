@@ -230,15 +230,16 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
             # Deduplica, exige que estén activas y valida la selección contra los
             # grupos del producto. Antes este bucle cargaba las opciones a mano y se
             # saltaba las tres cosas.
-            options = load_valid_options(db, line.option_ids, variant=variant)
+            options = load_valid_options(db, line.options, variant=variant)
             unit_price = compute_line_price(variant, options)
             options_snapshot: list[dict] = [
                 {
-                    "option_id": str(option.id),
-                    "name": option.name,
-                    "extra_price": str(option.extra_price),
+                    "option_id": str(chosen.option.id),
+                    "name": chosen.option.name,
+                    "extra_price": str(chosen.option.extra_price),
+                    "quantity": chosen.quantity,
                 }
-                for option in options
+                for chosen in options
             ]
 
             lines.append(SaleLine(

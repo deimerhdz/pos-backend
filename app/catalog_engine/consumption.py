@@ -44,7 +44,7 @@ from app.models.product_variant import ProductVariant
 from app.models.recipe_item import RecipeItem
 from app.models.variant_option_group import VariantOptionGroup
 
-from app.catalog_engine.core import ConsumptionLine
+from app.catalog_engine.core import ChosenOption, ConsumptionLine
 
 
 def load_recipe(db: Session, variant_id: UUID) -> list[RecipeItem]:
@@ -87,7 +87,7 @@ def group_discounts(db: Session, link: VariantOptionGroup) -> bool:
 
 
 def plan_line_consumption(
-    db: Session, variant_id: UUID, quantity: int, options: Sequence[Option]
+    db: Session, variant_id: UUID, quantity: int, options: Sequence[ChosenOption]
 ) -> list[ConsumptionLine]:
     """Qué consume una línea de `quantity` unidades de `variant_id` con `options`
     elegidas. Read-only.
@@ -116,7 +116,8 @@ def plan_line_consumption(
         for g in load_variant_groups(db, variant_id)
     }
 
-    for option in options:
+    for chosen in options:
+        option = chosen.option
         if option.inventory_item_id is None:
             continue
         # None → esta variante no ofrece el grupo de la opción (la validación de
@@ -127,10 +128,13 @@ def plan_line_consumption(
         per_unit = del_grupo if manda_el_tamano else Decimal(option.item_quantity)
         if per_unit <= 0:
             continue
+        # spec 065: multiplica también por la cantidad elegida de esta opción --
+        # siempre 1 en un grupo "conteo", así que esto no cambia ningún consumo
+        # existente (research.md Decisión 2).
         lines.append(
             ConsumptionLine(
                 option.inventory_item_id,
-                per_unit * qty,
+                per_unit * qty * chosen.quantity,
                 "variante" if manda_el_tamano else "opcion",
             )
         )
@@ -139,7 +143,7 @@ def plan_line_consumption(
 
 
 def required_consumption(
-    db: Session, variant_id: UUID, quantity: int, options: Sequence[Option]
+    db: Session, variant_id: UUID, quantity: int, options: Sequence[ChosenOption]
 ) -> dict[UUID, Decimal]:
     """El plan agregado por insumo. Es lo que necesitan el chequeo preventivo de
     disponibilidad y el pre-bloqueo de filas, a los que solo les importa el total
@@ -172,7 +176,7 @@ def _tracks_inventory(db: Session, variant_id: UUID) -> bool:
 
 
 def ensure_lines_consume_inventory(
-    db: Session, entries: Sequence[tuple[UUID, int, Sequence[Option]]]
+    db: Session, entries: Sequence[tuple[UUID, int, Sequence[ChosenOption]]]
 ) -> None:
     """Rechaza el lote si alguna línea no descontaría **nada**.
 
