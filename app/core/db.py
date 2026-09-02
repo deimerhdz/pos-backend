@@ -161,14 +161,28 @@ def get_shared_metadata():
 def get_tenant_specific_metadata():
     """identify all the tables we need to create
     Returns:
-        Metadata: the information for specific tenant 
+        Metadata: the information for specific tenant
     """
     meta = MetaData(schema="tenant")
 
-    for table in Base.metadata.tables.values():
-       
-        if table.schema == "tenant":
-            table.to_metadata(meta)
+    tenant_tables = [t for t in Base.metadata.tables.values() if t.schema == "tenant"]
+    for table in tenant_tables:
+        table.to_metadata(meta)
+
+    # spec 070: una tabla de tenant puede referenciar, por FK, una tabla de
+    # otro schema (hoy: payment_methods.catalog_id -> shared.payment_method_catalog,
+    # spec 032). `to_metadata()` no puede resolver esa FK dentro de `meta` si
+    # la tabla referenciada no está también copiada aquí — sin esto,
+    # `create_all()` revienta con NoReferencedTableError antes de crear
+    # ninguna tabla nueva del tenant. `checkfirst=True` (default de
+    # `create_all`) evita que se intente recrear una tabla compartida que ya
+    # existe.
+    for table in tenant_tables:
+        for fk in table.foreign_keys:
+            target = fk.column.table
+            if target.schema != "tenant" and target.key not in meta.tables:
+                target.to_metadata(meta)
+
     return meta
 
 
