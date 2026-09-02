@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     # En producción cada sondeo serializaba ~6 sentencias a texto y las escribía:
     # era el mayor coste por request.
     SQL_ECHO:Optional[bool] = Field(default=None,env="SQL_ECHO")
+    # DSN de Sentry (spec 068). `None` = Sentry nunca se inicializa, sin importar el
+    # entorno. Cuando está presente, solo se usa si además ENVIRONMENT == "prod"
+    # (app/main.py) — nunca el DSN de producción en un entorno no productivo.
+    SENTRY_DSN:Optional[str] = Field(default=None,env="SENTRY_DSN")
     REDIS_URL:str =  Field(env="REDIS_URL")
     # URL base del servicio de email; el envío hace POST a EMAIL_API_URL + /api/email/send.
     EMAIL_API_URL:str = Field(...,env="EMAIL_API_URL")

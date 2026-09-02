@@ -1,5 +1,6 @@
 from uuid import UUID
 import logging
+import sentry_sdk
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import select
@@ -151,7 +152,7 @@ def create_tenant(body: TenantCreateWithUser):
                 password=password,
             ),
         )
-    except Exception:
+    except Exception as exc:
         # El tenant ya fue creado y commiteado; no romper la respuesta si la
         # mensajería (Redis/worker) no está disponible.
         logger.warning(
@@ -159,5 +160,9 @@ def create_tenant(body: TenantCreateWithUser):
             body.tenant_name,
             exc_info=True,
         )
+        # Visibilidad en producción sin afectar la respuesta (spec 068,
+        # research.md § 9): no-op fuera de "prod" porque ahí sentry_sdk nunca
+        # se inicializó (app/main.py).
+        sentry_sdk.capture_exception(exc)
 
     return {"status": "ok", "tenant": body.tenant_name}

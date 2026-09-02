@@ -2,14 +2,16 @@
 import logging
 from contextlib import asynccontextmanager
 
+import sentry_sdk
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
+from app.core.error_middleware import RequestIdMiddleware, register_error_handlers
 from app.core.redis import token_blocklist
 from app.core.event_bus import event_bus
 from app.core.scheduler import start_scheduler
 from app.core.db import initialize_database
-from app.api.v1.admin.router import router as admin_router
 from app.api.v1.auth.routes import auth_router
 from app.api.v1.categories.router import router as categories_router
 from app.api.v1.unit_measures.router import router as unit_measures_router
@@ -82,7 +84,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print("❌ Error cerrando Redis:", e)
 
+# Único prefijo con manejo de errores estandarizado por ahora (spec 068).
+# Migrar otro módulo a este mismo patrón es agregar su prefijo aquí — sin
+# duplicar app/core/domain_errors.py, error_response.py ni error_middleware.py.
+SUPER_ADMIN_ERROR_PREFIX = "/api/v1/super-admin"
+
+
 def create_app()->FastAPI:
+    # Sentry solo se inicializa en producción y con DSN configurado
+    # (research.md § 6): fuera de "prod", o sin SENTRY_DSN, nunca se llama a
+    # sentry_sdk.init() y cualquier capture_exception posterior es un no-op.
+    if settings.ENVIRONMENT == "prod" and settings.SENTRY_DSN:
+        sentry_sdk.init(dsn=settings.SENTRY_DSN, environment=settings.ENVIRONMENT)
+
     app = FastAPI(title="Pos", lifespan=lifespan)
 
     app.add_middleware(
@@ -99,10 +113,12 @@ def create_app()->FastAPI:
         # promociones (GET /promotions).
         expose_headers=["ETag", "Retry-After", "X-Server-Time"],
     )
+    app.add_middleware(RequestIdMiddleware, path_prefix=SUPER_ADMIN_ERROR_PREFIX)
+    register_error_handlers(app, path_prefix=SUPER_ADMIN_ERROR_PREFIX)
 
     initialize_database()
 
-    app.include_router(admin_router, prefix="/api/v1")
+    
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(categories_router, prefix="/api/v1")
     app.include_router(unit_measures_router, prefix="/api/v1")
