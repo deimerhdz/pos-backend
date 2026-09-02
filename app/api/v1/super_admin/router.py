@@ -1,5 +1,6 @@
 from uuid import UUID
-
+import logging
+import sentry_sdk
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import select
@@ -12,9 +13,17 @@ from app.core.plan_limits import calculate_plan_vencimiento, validate_billing_cy
 from app.core.timezone import utc_now
 from app.models.plan import Plan
 from app.api.v1.users.schemas import UserResponse
-from app.api.v1.super_admin.schemas import TenantPlanUpdate, TenantResponse
+from app.api.v1.super_admin.schemas import TenantPlanUpdate, TenantResponse,TenantCreateWithUser
 from app.api.v1.super_admin.payment_methods_router import router as payment_methods_catalog_router
 from app.api.v1.super_admin.plans_router import router as plans_router
+
+from app.celery_task import send_email_task
+from app.core.config import settings
+from app.core.db import tenant_create
+from app.core.dependencies import get_current_super_admin
+from app.core.mail import welcome_email_body
+from app.core.utils import generate_random_password
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/super-admin",
@@ -110,3 +119,50 @@ def update_tenant_plan(
     db.commit()
     db.refresh(tenant)
     return tenant
+
+
+
+@router.post("/tenants", dependencies=[Depends(get_current_super_admin)])
+def create_tenant(body: TenantCreateWithUser):
+    password = generate_random_password()
+
+    tenant_create(
+        name=body.tenant_name,
+        schema=body.schema_name,
+        host=body.host,
+        admin_name=body.name,
+        admin_email=body.email,
+        admin_password=password,
+        plan_id=body.plan_id,
+        ciclo_facturacion=body.ciclo_facturacion,
+    )
+
+    if settings.ENVIRONMENT == "prod":
+        login_url = f"https://{body.host}.skeilopos.com/login"
+    else:
+        login_url = f"http://{body.host}.localhost:4200/login"
+    try:
+        send_email_task.delay(
+            recipients=[body.email],
+            subject=f"Bienvenido a {body.tenant_name}",
+            body=welcome_email_body(
+                tenant_name=body.tenant_name,
+                login_url=login_url,
+                email=body.email,
+                password=password,
+            ),
+        )
+    except Exception as exc:
+        # El tenant ya fue creado y commiteado; no romper la respuesta si la
+        # mensajería (Redis/worker) no está disponible.
+        logger.warning(
+            "No se pudo encolar el correo de bienvenida para el tenant '%s'",
+            body.tenant_name,
+            exc_info=True,
+        )
+        # Visibilidad en producción sin afectar la respuesta (spec 068,
+        # research.md § 9): no-op fuera de "prod" porque ahí sentry_sdk nunca
+        # se inicializó (app/main.py).
+        sentry_sdk.capture_exception(exc)
+
+    return {"status": "ok", "tenant": body.tenant_name}

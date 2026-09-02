@@ -190,6 +190,7 @@ def get_authenticated_user(
 
 
 def get_current_super_admin(
+    request: Request,
     token_data: dict = Depends(get_valid_token_data),
     db: Session = Depends(get_shared_db),
 ) -> User:
@@ -214,6 +215,12 @@ def get_current_super_admin(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Super admin not found or inactive",
         )
+
+    # Contexto para observabilidad (spec 068): el middleware de errores de
+    # super-admin lo usa para etiquetar los eventos de Sentry con quién
+    # originó la solicitud. Aditivo: no cambia el valor de retorno ni los
+    # `raise` de arriba.
+    request.state.super_admin_id = user.id
 
     return user
 
