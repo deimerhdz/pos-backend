@@ -12,11 +12,26 @@ from fastapi import HTTPException
 
 from app.characterization_tests import fixtures as f
 from app.catalog_engine import (
+    ChosenOption,
     check_availability,
     compute_line_price,
     load_valid_options,
     validate_option_selection,
 )
+from app.api.v1.catalog.schemas import OptionSelectionIn
+
+
+def _chosen(*options, quantity: int = 1) -> list[ChosenOption]:
+    """spec 065: envuelve opciones crudas en `ChosenOption(option, 1)` -- este
+    módulo congela `compute_line_price`/`validate_option_selection` desde antes de
+    esa spec, cuando recibían `list[Option]` directamente (Principio III)."""
+    return [ChosenOption(opt, quantity) for opt in options]
+
+
+def _selections(*option_ids) -> list[OptionSelectionIn]:
+    """spec 065: `load_valid_options` recibe `list[OptionSelectionIn]`, no
+    `list[UUID]`, desde esa spec."""
+    return [OptionSelectionIn(option_id=oid) for oid in option_ids]
 
 
 class ComputeLinePriceTests(unittest.TestCase):
@@ -30,7 +45,7 @@ class ComputeLinePriceTests(unittest.TestCase):
         group = f.make_option_group(self.db)
         chocolate = f.make_option(self.db, group=group, extra_price=Decimal("1000"))
         mani = f.make_option(self.db, group=group, extra_price=Decimal("500"))
-        total = compute_line_price(variant, [chocolate, mani])
+        total = compute_line_price(variant, _chosen(chocolate, mani))
         self.assertEqual(total, Decimal("16500"))
 
     def test_rn_cat_01_sin_opciones_es_solo_el_precio_de_la_variante(self):
@@ -42,12 +57,12 @@ class ComputeLinePriceTests(unittest.TestCase):
         variant = f.make_variant(self.db, price=Decimal("100.01"))
         group = f.make_option_group(self.db)
         opt = f.make_option(self.db, group=group, extra_price=Decimal("0.02"))
-        total = compute_line_price(variant, [opt])
+        total = compute_line_price(variant, _chosen(opt))
         self.assertEqual(total, Decimal("100.03"))
         # Ninguna reducción de escala: 3 opciones de 0.001 no se pierden por redondeo.
         variant2 = f.make_variant(self.db, price=Decimal("0"))
         opts = [f.make_option(self.db, group=group, extra_price=Decimal("0.001")) for _ in range(3)]
-        self.assertEqual(compute_line_price(variant2, opts), Decimal("0.003"))
+        self.assertEqual(compute_line_price(variant2, _chosen(*opts)), Decimal("0.003"))
 
 
 class CheckAvailabilityTests(unittest.TestCase):
@@ -114,7 +129,7 @@ class ValidateOptionSelectionTests(unittest.TestCase):
         variant, group, _ = self._variante_con_grupo(min_select=1, max_select=2, quantity_per_option=0)
         opt = f.make_option(self.db, group=group)
         # No lanza: 1 opción está en [1,2].
-        validate_option_selection(self.db, variant, [opt])
+        validate_option_selection(self.db, variant, _chosen(opt))
 
     def test_rn_cat_27_grupo_normal_min_1_max_2_de_3_es_un_problema_no_bloqueante(self):
         """RN-CAT-27 dice "se rechaza", pero el grupo del ejemplo no descuenta
@@ -124,7 +139,7 @@ class ValidateOptionSelectionTests(unittest.TestCase):
         no como sugiere el enunciado de la regla."""
         variant, group, _ = self._variante_con_grupo(min_select=1, max_select=2, quantity_per_option=0)
         opts = [f.make_option(self.db, group=group) for _ in range(3)]
-        validate_option_selection(self.db, variant, opts)  # no lanza (tolerado)
+        validate_option_selection(self.db, variant, _chosen(*opts))  # no lanza (tolerado)
 
     def test_rn_cat_27_con_strict_option_selection_true_si_bloquea(self):
         """Con el flag en True (no el default), la misma violación de RN-CAT-27
@@ -137,7 +152,7 @@ class ValidateOptionSelectionTests(unittest.TestCase):
         settings.STRICT_OPTION_SELECTION = True
         try:
             with self.assertRaises(HTTPException) as ctx:
-                validate_option_selection(self.db, variant, opts)
+                validate_option_selection(self.db, variant, _chosen(*opts))
             self.assertEqual(ctx.exception.status_code, 422)
             self.assertIn("como máximo 2", ctx.exception.detail["error"])
         finally:
@@ -149,14 +164,14 @@ class ValidateOptionSelectionTests(unittest.TestCase):
         variant, group, _ = self._variante_con_grupo(min_select=3, max_select=3, quantity_per_option=120)
         opt = f.make_option(self.db, group=group)
         with self.assertRaises(HTTPException) as ctx:
-            validate_option_selection(self.db, variant, [opt])
+            validate_option_selection(self.db, variant, _chosen(opt))
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertIn("exactamente 3", ctx.exception.detail["error"])
 
     def test_rn_cat_28_grupo_obligatorio_que_descuenta_acepta_exactamente_el_maximo(self):
         variant, group, _ = self._variante_con_grupo(min_select=3, max_select=3, quantity_per_option=120)
         opts = [f.make_option(self.db, group=group) for _ in range(3)]
-        validate_option_selection(self.db, variant, opts)  # no lanza
+        validate_option_selection(self.db, variant, _chosen(*opts))  # no lanza
 
     def test_rn_cat_28_grupo_obligatorio_menor_a_min_igual_a_max_tambien_exige_max_no_min(self):
         """min_select=2, max_select=3, quantity_per_option>0: sigue exigiendo el
@@ -164,7 +179,7 @@ class ValidateOptionSelectionTests(unittest.TestCase):
         variant, group, _ = self._variante_con_grupo(min_select=2, max_select=3, quantity_per_option=50)
         opts = [f.make_option(self.db, group=group) for _ in range(2)]
         with self.assertRaises(HTTPException) as ctx:
-            validate_option_selection(self.db, variant, opts)
+            validate_option_selection(self.db, variant, _chosen(*opts))
         self.assertIn("exactamente 3", ctx.exception.detail["error"])
 
     def test_rn_cat_29_grupo_obligatorio_no_elegido_pide_el_maximo_si_descuenta(self):
@@ -186,7 +201,7 @@ class ValidateOptionSelectionTests(unittest.TestCase):
         variant, group, _ = self._variante_con_grupo(min_select=3, max_select=3, quantity_per_option=120)
         opt = f.make_option(self.db, group=group)
         with self.assertRaises(HTTPException):
-            validate_option_selection(self.db, variant, [opt])
+            validate_option_selection(self.db, variant, _chosen(opt))
 
     def test_rn_cat_31_grupo_que_no_descuenta_tolera_violacion_con_strict_false(self):
         """Grupo «Toppings» obligatorio (min=1) sin quantity_per_option ni
@@ -201,7 +216,7 @@ class ValidateOptionSelectionTests(unittest.TestCase):
         variant = f.make_variant(self.db)
         grupo_ajeno = f.make_option_group(self.db)
         opcion_ajena = f.make_option(self.db, group=grupo_ajeno, extra_price=Decimal("3000"))
-        validate_option_selection(self.db, variant, [opcion_ajena])  # no lanza
+        validate_option_selection(self.db, variant, _chosen(opcion_ajena))  # no lanza
 
     def test_rn_cat_33_a04_sin_pasar_variant_load_valid_options_no_valida_nada(self):
         """A-04 / RN-CAT-33: `load_valid_options` sin `variant=` no valida
@@ -210,32 +225,37 @@ class ValidateOptionSelectionTests(unittest.TestCase):
         group = f.make_option_group(self.db, min_select=3, max_select=3)
         # Grupo exige exactamente 3, pero no se pasa `variant`.
         opt = f.make_option(self.db, group=group)
-        options = load_valid_options(self.db, [opt.id])  # sin variant=
+        options = load_valid_options(self.db, _selections(opt.id))  # sin variant=
         self.assertEqual(len(options), 1)
 
     def test_load_valid_options_con_variant_si_aplica_la_validacion(self):
         variant, group, _ = self._variante_con_grupo(min_select=3, max_select=3, quantity_per_option=120)
         opt = f.make_option(self.db, group=group)
         with self.assertRaises(HTTPException):
-            load_valid_options(self.db, [opt.id], variant=variant)
+            load_valid_options(self.db, _selections(opt.id), variant=variant)
 
-    def test_load_valid_options_deduplica_ids_repetidos(self):
+    def test_load_valid_options_option_id_repetido_lanza_422(self):
+        """spec 065 (research.md Decisión 1/2): antes de esa spec, un `option_id`
+        repetido se deduplicaba en silencio; ahora se rechaza con 422 -- reemplaza
+        el comportamiento congelado por `test_load_valid_options_deduplica_ids_repetidos`
+        (Principio III, cambio de forma autorizado explícitamente por esa spec)."""
         group = f.make_option_group(self.db)
         opt = f.make_option(self.db, group=group)
-        options = load_valid_options(self.db, [opt.id, opt.id, opt.id])
-        self.assertEqual(len(options), 1)
+        with self.assertRaises(HTTPException) as ctx:
+            load_valid_options(self.db, _selections(opt.id, opt.id, opt.id))
+        self.assertEqual(ctx.exception.status_code, 422)
 
     def test_load_valid_options_opcion_inactiva_lanza_422(self):
         group = f.make_option_group(self.db)
         opt = f.make_option(self.db, group=group, active=False)
         with self.assertRaises(HTTPException) as ctx:
-            load_valid_options(self.db, [opt.id])
+            load_valid_options(self.db, _selections(opt.id))
         self.assertEqual(ctx.exception.status_code, 422)
 
     def test_load_valid_options_opcion_inexistente_lanza_404(self):
         import uuid
         with self.assertRaises(HTTPException) as ctx:
-            load_valid_options(self.db, [uuid.uuid4()])
+            load_valid_options(self.db, _selections(uuid.uuid4()))
         self.assertEqual(ctx.exception.status_code, 404)
 
 

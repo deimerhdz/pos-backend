@@ -13,7 +13,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.core import inventory_reasons as reasons
-from app.models.option import Option
+from app.catalog_engine import ChosenOption
 from app.models.order_item import OrderItem
 from app.api.v1.inventory.stock import lock_items, record_movement
 from app.api.v1.catalog.consumption_plan import (
@@ -24,7 +24,7 @@ from app.api.v1.catalog.consumption_plan import (
 
 
 def ensure_consumes_inventory(
-    db: Session, entries: list[tuple[OrderItem, list[Option]]]
+    db: Session, entries: list[tuple[OrderItem, list[ChosenOption]]]
 ) -> None:
     """Rechaza las líneas que no descontarían **nada**. Adaptador de
     `ensure_lines_consume_inventory` a las líneas de orden; la venta de mostrador usa
@@ -35,7 +35,7 @@ def ensure_consumes_inventory(
 
 
 def lock_consumption(
-    db: Session, entries: list[tuple[OrderItem, list[Option]]]
+    db: Session, entries: list[tuple[OrderItem, list[ChosenOption]]]
 ) -> None:
     """Pre-bloquea, en orden canónico de id, todos los insumos que consumirán las
     líneas dadas. Debe llamarse **antes** de la primera mutación de stock para que
@@ -51,7 +51,7 @@ def lock_consumption(
 
 def deduct_order_items(
     db: Session,
-    entries: list[tuple[OrderItem, list[Option]]],
+    entries: list[tuple[OrderItem, list[ChosenOption]]],
     user_id: UUID | None,
     reference_id: UUID,
 ) -> None:
@@ -69,7 +69,7 @@ def deduct_order_items(
 
 def reverse_order_items(
     db: Session,
-    entries: list[tuple[OrderItem, list[Option]]],
+    entries: list[tuple[OrderItem, list[ChosenOption]]],
     user_id: UUID | None,
     reference_id: UUID,
 ) -> None:
@@ -84,7 +84,7 @@ def reverse_order_items(
 def deduct_order_item(
     db: Session,
     order_item: OrderItem,
-    options: list[Option],
+    options: list[ChosenOption],
     user_id: UUID | None,
     reference_id: UUID,
 ) -> None:
@@ -105,7 +105,7 @@ def deduct_order_item(
 def reverse_order_item(
     db: Session,
     order_item: OrderItem,
-    options: list[Option],
+    options: list[ChosenOption],
     user_id: UUID | None,
     reference_id: UUID,
 ) -> None:

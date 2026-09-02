@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.crud import get_or_404
 from app.core.models import User
 from app.models.option import Option
+from app.catalog_engine import ChosenOption
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import EN_CURSO, OrderItem, OrderItemOption
 from app.models.order_item_void_log import OrderItemVoidLog
@@ -34,11 +35,12 @@ _ALLOWED: dict[str, frozenset[str]] = {
 }
 
 
-def _item_options(db: Session, item: OrderItem) -> list[Option]:
-    opt_ids = [o.option_id for o in item.options]
-    if not opt_ids:
+def _item_options(db: Session, item: OrderItem) -> list[ChosenOption]:
+    quantities = {o.option_id: o.quantity for o in item.options}
+    if not quantities:
         return []
-    return db.execute(select(Option).where(Option.id.in_(opt_ids))).scalars().all()
+    options = db.execute(select(Option).where(Option.id.in_(quantities.keys()))).scalars().all()
+    return [ChosenOption(opt, quantities[opt.id]) for opt in options]
 
 
 def transition_kitchen(
@@ -122,7 +124,7 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
 
     # Validar el reemplazo ANTES de mutar (para un 422 limpio si aplica).
     repl_variant = None
-    repl_options: list[Option] = []
+    repl_options: list[ChosenOption] = []
     if data.replacement is not None:
         repl_variant = get_or_404(
             db, ProductVariant, data.replacement.product_variant_id, "Variant not found"
@@ -132,7 +134,7 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
                 status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {repl_variant.id}"
             )
         repl_options = load_valid_options(
-            db, data.replacement.option_ids, variant=repl_variant
+            db, data.replacement.options, variant=repl_variant
         )
 
     try:
@@ -162,8 +164,10 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
             )
             db.add(new_item)
             db.flush()
-            for opt in repl_options:
-                db.add(OrderItemOption(order_item_id=new_item.id, option_id=opt.id))
+            for chosen in repl_options:
+                db.add(OrderItemOption(
+                    order_item_id=new_item.id, option_id=chosen.option.id, quantity=chosen.quantity,
+                ))
             # Nuevo consumo (con lock; puede 400 y hacer rollback total).
             deduct_order_items(
                 db, [(new_item, repl_options)], user.id, reference_id=order_id

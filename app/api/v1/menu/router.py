@@ -133,8 +133,14 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
                     ]
                     # Un grupo obligatorio sin ninguna opción con stock deja esta
                     # presentación imposible de pedir: mejor decirlo aquí que dejar al
-                    # comensal chocar con el 409 al añadir al carrito.
-                    if link.min_select > 0 and not any(o.available for o in options):
+                    # comensal chocar con el 409 al añadir al carrito. spec 065: un
+                    # grupo "cantidad" nunca es obligatorio (FR-003), sin importar
+                    # `min_select` heredado del `VariantOptionGroup`.
+                    if (
+                        g.selection_mode != "cantidad"
+                        and link.min_select > 0
+                        and not any(o.available for o in options)
+                    ):
                         v_pedible = False
                     grupo = MenuOptionGroupResponse(
                         id=g.id, name=g.name,
@@ -147,6 +153,9 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
                             link.quantity_per_option > 0
                             or any(o.item_quantity > 0 for o in g.options if o.active)
                         ),
+                        selection_mode=g.selection_mode,
+                        max_quantity_per_option=g.max_quantity_per_option,
+                        max_total_quantity=g.max_total_quantity,
                         options=options,
                     )
                     groups.append(grupo)

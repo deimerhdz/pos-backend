@@ -33,12 +33,24 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.characterization_tests import fixtures as f
-from app.catalog_engine import check_availability, compute_line_price, validate_option_selection
+from app.catalog_engine import (
+    ChosenOption,
+    check_availability,
+    compute_line_price,
+    validate_option_selection,
+)
 from app.catalog_engine import ensure_lines_consume_inventory, plan_line_consumption
 
 
 def _dec(x) -> str:
     return str(Decimal(x))
+
+
+def _chosen(*options: Any) -> list[ChosenOption]:
+    """spec 065: envuelve opciones crudas en `ChosenOption(option, 1)` -- este golden
+    master congela el motor desde antes de esa spec, cuando recibía `list[Option]`
+    directamente (Principio III). `quantity=1` no cambia ningún valor del reporte."""
+    return [ChosenOption(opt, 1) for opt in options]
 
 
 def _try(fn):
@@ -83,11 +95,11 @@ def _case_opciones_extra_price_decimales() -> dict[str, Any]:
     cereza = f.make_option(db, group=group, name="Cereza", extra_price=Decimal("100.00"))
     qty = 1
 
-    price = compute_line_price(variant, [chispas, cereza])
-    v_status, v_val = _try(lambda: validate_option_selection(db, variant, [chispas, cereza]))
-    lines = plan_line_consumption(db, variant.id, qty, [chispas, cereza])
+    price = compute_line_price(variant, _chosen(chispas, cereza))
+    v_status, v_val = _try(lambda: validate_option_selection(db, variant, _chosen(chispas, cereza)))
+    lines = plan_line_consumption(db, variant.id, qty, _chosen(chispas, cereza))
     e_status, e_val = _try(
-        lambda: ensure_lines_consume_inventory(db, [(variant.id, qty, [chispas, cereza])])
+        lambda: ensure_lines_consume_inventory(db, [(variant.id, qty, _chosen(chispas, cereza))])
     )
 
     return {
@@ -120,10 +132,10 @@ def _case_a02_tamano_manda_sobre_opcion() -> dict[str, Any]:
     qty = 1
     opciones = [fresa, choco, vainilla]
 
-    price = compute_line_price(variant, opciones)
-    v_status, v_val = _try(lambda: validate_option_selection(db, variant, opciones))
-    lines = plan_line_consumption(db, variant.id, qty, opciones)
-    e_status, e_val = _try(lambda: ensure_lines_consume_inventory(db, [(variant.id, qty, opciones)]))
+    price = compute_line_price(variant, _chosen(*opciones))
+    v_status, v_val = _try(lambda: validate_option_selection(db, variant, _chosen(*opciones)))
+    lines = plan_line_consumption(db, variant.id, qty, _chosen(*opciones))
+    e_status, e_val = _try(lambda: ensure_lines_consume_inventory(db, [(variant.id, qty, _chosen(*opciones))]))
 
     return {
         "descripcion": "A-02 [PROTEGIDA] / RN-CAT-18: el tamaño (120g) manda sobre la opción "
@@ -153,10 +165,10 @@ def _case_opcion_manda_cuando_tamano_no_define() -> dict[str, Any]:
     names = {insumo.id: "ChispasChoc"}
     qty = 3
 
-    price = compute_line_price(variant, [chispas])
-    v_status, v_val = _try(lambda: validate_option_selection(db, variant, [chispas]))
-    lines = plan_line_consumption(db, variant.id, qty, [chispas])
-    e_status, e_val = _try(lambda: ensure_lines_consume_inventory(db, [(variant.id, qty, [chispas])]))
+    price = compute_line_price(variant, _chosen(chispas))
+    v_status, v_val = _try(lambda: validate_option_selection(db, variant, _chosen(chispas)))
+    lines = plan_line_consumption(db, variant.id, qty, _chosen(chispas))
+    e_status, e_val = _try(lambda: ensure_lines_consume_inventory(db, [(variant.id, qty, _chosen(chispas))]))
 
     return {
         "descripcion": "RN-CAT-18 (rama respaldo): el grupo no define quantity_per_option "
@@ -183,10 +195,10 @@ def _case_dos_opciones_mismo_insumo() -> dict[str, Any]:
     qty = 1
     opciones = [fresa, fresa_premium]
 
-    price = compute_line_price(variant, opciones)
-    v_status, v_val = _try(lambda: validate_option_selection(db, variant, opciones))
-    lines = plan_line_consumption(db, variant.id, qty, opciones)
-    e_status, e_val = _try(lambda: ensure_lines_consume_inventory(db, [(variant.id, qty, opciones)]))
+    price = compute_line_price(variant, _chosen(*opciones))
+    v_status, v_val = _try(lambda: validate_option_selection(db, variant, _chosen(*opciones)))
+    lines = plan_line_consumption(db, variant.id, qty, _chosen(*opciones))
+    e_status, e_val = _try(lambda: ensure_lines_consume_inventory(db, [(variant.id, qty, _chosen(*opciones))]))
 
     return {
         "descripcion": "RN-CAT-21: dos opciones distintas apuntando al mismo insumo generan "
@@ -209,10 +221,10 @@ def _case_opcion_sin_insumo_ligado() -> dict[str, Any]:
     sin_hielo = f.make_option(db, group=group, name="Sin hielo", inventory_item_id=None, item_quantity=Decimal("50"))
     qty = 1
 
-    price = compute_line_price(variant, [sin_hielo])
-    v_status, v_val = _try(lambda: validate_option_selection(db, variant, [sin_hielo]))
-    lines = plan_line_consumption(db, variant.id, qty, [sin_hielo])
-    e_status, e_val = _try(lambda: ensure_lines_consume_inventory(db, [(variant.id, qty, [sin_hielo])]))
+    price = compute_line_price(variant, _chosen(sin_hielo))
+    v_status, v_val = _try(lambda: validate_option_selection(db, variant, _chosen(sin_hielo)))
+    lines = plan_line_consumption(db, variant.id, qty, _chosen(sin_hielo))
+    e_status, e_val = _try(lambda: ensure_lines_consume_inventory(db, [(variant.id, qty, _chosen(sin_hielo))]))
 
     return {
         "descripcion": "RN-CAT-22: opción sin `inventory_item_id` (aunque tenga item_quantity=50 "
@@ -234,13 +246,13 @@ def _case_per_unit_cero_no_genera_linea() -> dict[str, Any]:
     opt = f.make_option(db, group=group, name="Con gas", inventory_item_id=insumo.id, item_quantity=Decimal("0"))
     qty = 1
 
-    lines = plan_line_consumption(db, variant.id, qty, [opt])
+    lines = plan_line_consumption(db, variant.id, qty, _chosen(opt))
 
     return {
         "descripcion": "RN-CAT-23: insumo ligado pero cantidad resultante <=0 "
         "(quantity_per_option=0 Y item_quantity=0) -> no genera línea de consumo.",
         "entrada": {"variante": variant.name, "cantidad": qty, "opciones": [opt.name]},
-        "precio_linea": _dec(compute_line_price(variant, [opt])),
+        "precio_linea": _dec(compute_line_price(variant, _chosen(opt))),
         "validacion_opciones": "ok",
         "plan_consumo": [
             {"insumo": "Botella retornable", "cantidad": _dec(l.quantity), "origen": l.source} for l in lines
@@ -258,13 +270,13 @@ def _case_grupo_obligatorio_seleccion_invalida() -> dict[str, Any]:
     mango = f.make_option(db, group=group, name="Mango", inventory_item_id=insumo.id)
     qty = 1
 
-    v_status, v_val = _try(lambda: validate_option_selection(db, variant, [mango]))  # solo 1 de 2
+    v_status, v_val = _try(lambda: validate_option_selection(db, variant, _chosen(mango)))  # solo 1 de 2
 
     return {
         "descripcion": "RN-CAT-28/RN-CAT-30: grupo obligatorio que descuenta exige EXACTAMENTE "
         "el máximo (2); elegir 1 se rechaza con 422 siempre, sin importar STRICT_OPTION_SELECTION.",
         "entrada": {"variante": variant.name, "cantidad": qty, "opciones": [mango.name]},
-        "precio_linea": _dec(compute_line_price(variant, [mango])),
+        "precio_linea": _dec(compute_line_price(variant, _chosen(mango))),
         "validacion_opciones": v_status if v_status == "ok" else v_val,
         "plan_consumo": "no_evaluado_en_este_caso",
         "ensure_lines_consume_inventory": "no_evaluado_en_este_caso",
@@ -326,9 +338,9 @@ def _case_a06_opcion_de_grupo_ajeno_tolerada() -> dict[str, Any]:
     names = {insumo_ajeno.id: "Masa de pizza"}
     qty = 1
 
-    price = compute_line_price(variant, [opcion_ajena])
-    v_status, v_val = _try(lambda: validate_option_selection(db, variant, [opcion_ajena]))
-    lines = plan_line_consumption(db, variant.id, qty, [opcion_ajena])
+    price = compute_line_price(variant, _chosen(opcion_ajena))
+    v_status, v_val = _try(lambda: validate_option_selection(db, variant, _chosen(opcion_ajena)))
+    lines = plan_line_consumption(db, variant.id, qty, _chosen(opcion_ajena))
 
     return {
         "descripcion": "A-06 [PENDIENTE de decisión de negocio] / RN-CAT-32: con "

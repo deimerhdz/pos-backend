@@ -28,6 +28,7 @@ from app.api.v1.cart import service
 from app.api.v1.cart.schemas import (
     CartItemIn, CartItemUpdate, CartResponse, SessionOpenResponse,
 )
+from app.api.v1.catalog.schemas import OptionSelectionIn
 from app.models.cart import Cart
 from app.models.customer_order import CustomerOrder
 from app.models.session_participant import SessionParticipant
@@ -241,7 +242,7 @@ class TestCartService(unittest.TestCase):
 
         resp = service.add_item(
             db, participant.id,
-            CartItemIn(product_variant_id=variant.id, quantity=2, option_ids=[option.id]),
+            CartItemIn(product_variant_id=variant.id, quantity=2, options=[OptionSelectionIn(option_id=option.id)]),
         )
 
         self.assertEqual(len(resp.items), 1)

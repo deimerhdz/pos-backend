@@ -21,6 +21,7 @@ from app.models.session_participant import SessionParticipant
 from app.models.cart import Cart
 from app.models.cart_item import CartItem
 from app.models.option import Option
+from app.catalog_engine import ChosenOption
 from app.models.product_variant import ProductVariant
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
@@ -131,7 +132,7 @@ def consolidate_table(db: Session, table_id: UUID, user: User) -> CustomerOrder:
         # Se insertan todas las líneas primero y el inventario se descuenta en
         # bloque al final: así los locks de insumo se toman en orden canónico y
         # dos consolidaciones concurrentes no pueden deadlockear.
-        entries: list[tuple[OrderItem, list[Option]]] = []
+        entries: list[tuple[OrderItem, list[ChosenOption]]] = []
         for cart in carts_with_items:
             for ci in cart.items:
                 item = OrderItem(
@@ -146,14 +147,20 @@ def consolidate_table(db: Session, table_id: UUID, user: User) -> CustomerOrder:
                 db.add(item)
                 db.flush()
 
-                opt_ids = [o.option_id for o in ci.options]
-                options = db.execute(
-                    select(Option).where(Option.id.in_(opt_ids))
-                ).scalars().all() if opt_ids else []
+                # spec 065: copia desde el carrito sin recalcular -- la cantidad de
+                # cada opción ya quedó resuelta en `CartItemOption.quantity`.
+                quantities = {o.option_id: o.quantity for o in ci.options}
+                options = (
+                    db.execute(select(Option).where(Option.id.in_(quantities.keys())))
+                    .scalars().all() if quantities else []
+                )
+                chosen_options: list[ChosenOption] = []
                 for opt in options:
-                    db.add(OrderItemOption(order_item_id=item.id, option_id=opt.id))
+                    qty = quantities[opt.id]
+                    db.add(OrderItemOption(order_item_id=item.id, option_id=opt.id, quantity=qty))
+                    chosen_options.append(ChosenOption(opt, qty))
 
-                entries.append((item, options))
+                entries.append((item, chosen_options))
 
             cart.status = "confirmado"
 
@@ -190,13 +197,13 @@ def add_item_to_table(db: Session, table_id: UUID, data, user: User) -> Customer
     variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
     if not variant.active:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
-    options = load_valid_options(db, data.option_ids, variant=variant)
+    options = load_valid_options(db, data.options, variant=variant)
     lines = [(variant.id, data.quantity, options, compute_line_price(variant, options), None)]
 
     try:
         order = get_or_create_open_order(db, table.id, user.id)
 
-        entries: list[tuple[OrderItem, list[Option]]] = []
+        entries: list[tuple[OrderItem, list[ChosenOption]]] = []
         for product_variant_id, quantity, options, unit_price, combo_id in lines:
             item = OrderItem(
                 order_id=order.id,
@@ -210,8 +217,10 @@ def add_item_to_table(db: Session, table_id: UUID, data, user: User) -> Customer
             )
             db.add(item)
             db.flush()
-            for opt in options:
-                db.add(OrderItemOption(order_item_id=item.id, option_id=opt.id))
+            for chosen in options:
+                db.add(OrderItemOption(
+                    order_item_id=item.id, option_id=chosen.option.id, quantity=chosen.quantity,
+                ))
             entries.append((item, options))
 
         deduct_order_items(db, entries, user.id, reference_id=order.id)

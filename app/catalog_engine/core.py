@@ -9,12 +9,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import NamedTuple, Sequence, TYPE_CHECKING
 from uuid import UUID
 
 if TYPE_CHECKING:
     from app.models.option import Option
     from app.models.product_variant import ProductVariant
+
+
+class ChosenOption(NamedTuple):
+    """Una opción elegida junto con cuántas unidades de ella (spec 065). Siempre
+    `quantity == 1` para una opción de un grupo "conteo" -- validado en
+    `validate_option_selection`, no asumido por el resto del motor."""
+
+    option: "Option"
+    quantity: int
 
 
 @dataclass(frozen=True)
@@ -27,11 +36,13 @@ class ConsumptionLine:
     source: str  # 'receta' | 'variante' | 'opcion' — para diagnóstico y mensajes
 
 
-def compute_line_price(variant: ProductVariant, options: list[Option]) -> Decimal:
-    """Snapshot de precio de una línea: precio de la variante + extras de opción."""
+def compute_line_price(variant: ProductVariant, options: Sequence[ChosenOption]) -> Decimal:
+    """Snapshot de precio de una línea: precio de la variante + extras de opción,
+    cada uno multiplicado por su cantidad elegida (spec 065; siempre 1 en "conteo",
+    por lo que esto no cambia el precio de ningún grupo existente)."""
     price = Decimal(variant.price)
-    for option in options:
-        price += Decimal(option.extra_price)
+    for chosen in options:
+        price += Decimal(chosen.option.extra_price) * chosen.quantity
     return price
 
 

@@ -27,6 +27,7 @@ from sqlalchemy import select
 from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import service
 from app.api.v1.orders.schemas import OrderChannel, OrderCreate, OrderItemIn, OrderType
+from app.api.v1.catalog.schemas import OptionSelectionIn
 from app.models.inventory_movement import InventoryMovement
 from app.models.sale import Sale
 
@@ -58,7 +59,7 @@ class TestService(unittest.TestCase):
 
         data = OrderCreate(
             channel=OrderChannel.POS,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         order = service.create_order(db, data, uuid4())
 
@@ -133,7 +134,7 @@ class TestService(unittest.TestCase):
         data = OrderCreate(
             channel=OrderChannel.POS,
             hold_for_payment=True,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         order = service.create_order(db, data, uuid4())
 
@@ -156,7 +157,7 @@ class TestService(unittest.TestCase):
         data = OrderCreate(
             channel=OrderChannel.QR_MENU,
             hold_for_payment=True,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -179,7 +180,7 @@ class TestService(unittest.TestCase):
         data = OrderCreate(
             channel=OrderChannel.POS,
             dining_table_id=table.id,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -199,7 +200,7 @@ class TestService(unittest.TestCase):
         data = OrderCreate(
             channel=OrderChannel.POS,
             dining_table_id=table.id,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         order = service.create_order(db, data, uuid4())
         self.assertEqual(order.status, "abierta")
@@ -218,7 +219,7 @@ class TestService(unittest.TestCase):
             channel=OrderChannel.POS,
             order_type=OrderType.TAKEAWAY,
             dining_table_id=table.id,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -234,7 +235,7 @@ class TestService(unittest.TestCase):
             channel=OrderChannel.POS,
             order_type=OrderType.DELIVERY,
             dining_table_id=table.id,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -251,7 +252,7 @@ class TestService(unittest.TestCase):
             channel=OrderChannel.POS,
             order_type=OrderType.TAKEAWAY,
             customer_name="Consumidor final",
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
             hold_for_payment=True,
         )
         order = service.create_order(db, data, uuid4())
@@ -272,7 +273,7 @@ class TestService(unittest.TestCase):
         data = OrderCreate(
             channel=OrderChannel.WHATSAPP,
             order_type=OrderType.DINE_IN,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -286,7 +287,7 @@ class TestService(unittest.TestCase):
         data = OrderCreate(
             channel=OrderChannel.API,
             order_type=OrderType.DINE_IN,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -300,7 +301,7 @@ class TestService(unittest.TestCase):
         data = OrderCreate(
             channel=OrderChannel.QR_MENU,
             order_type=OrderType.TAKEAWAY,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -314,7 +315,7 @@ class TestService(unittest.TestCase):
         data = OrderCreate(
             channel=OrderChannel.QR_MENU,
             order_type=OrderType.DELIVERY,
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -354,7 +355,7 @@ class TestService(unittest.TestCase):
                 data = OrderCreate(
                     channel=channel,
                     order_type=order_type,
-                    items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+                    items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
                     **extra,
                 )
                 order = service.create_order(db, data, uuid4())
@@ -391,7 +392,7 @@ class TestCreateOrderDelivery(unittest.TestCase):
             delivery_address="Cra 45 #12-30, apto 301",
             delivery_phone="3011234567",
             delivery_fee=Decimal("6000"),
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
             hold_for_payment=True,
         )
         order = service.create_order(db, data, uuid4())
@@ -416,7 +417,7 @@ class TestCreateOrderDelivery(unittest.TestCase):
             customer_name="Ana Torres",
             delivery_address="Cra 45 #12-30",
             delivery_fee=Decimal("0"),
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         order = service.create_order(db, data, uuid4())
 
@@ -433,7 +434,7 @@ class TestCreateOrderDelivery(unittest.TestCase):
             order_type=OrderType.DELIVERY,
             delivery_address="Cra 45 #12-30",
             delivery_fee=Decimal("6000"),
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -449,7 +450,7 @@ class TestCreateOrderDelivery(unittest.TestCase):
             order_type=OrderType.DELIVERY,
             customer_name="Ana Torres",
             delivery_fee=Decimal("6000"),
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -465,7 +466,7 @@ class TestCreateOrderDelivery(unittest.TestCase):
             order_type=OrderType.DELIVERY,
             customer_name="Ana Torres",
             delivery_address="Cra 45 #12-30",
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())
@@ -483,7 +484,7 @@ class TestCreateOrderDelivery(unittest.TestCase):
             customer_name="   ",
             delivery_address="Cra 45 #12-30",
             delivery_fee=Decimal("6000"),
-            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, option_ids=[option.id])],
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         with self.assertRaises(HTTPException) as ctx:
             service.create_order(db, data, uuid4())

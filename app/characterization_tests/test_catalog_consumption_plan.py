@@ -12,12 +12,20 @@ from fastapi import HTTPException
 
 from app.characterization_tests import fixtures as f
 from app.catalog_engine import (
+    ChosenOption,
     ensure_lines_consume_inventory,
     group_discounts,
     plan_line_consumption,
     required_consumption,
 )
 from app.catalog_engine import grupos_que_descuentan as grupos_que_descuentan_lp
+
+
+def _chosen(*options, quantity: int = 1) -> list[ChosenOption]:
+    """spec 065: envuelve opciones crudas en `ChosenOption(option, 1)` -- este
+    módulo congela `plan_line_consumption`/`required_consumption` desde antes de
+    esa spec, cuando recibían `list[Option]` directamente (Principio III)."""
+    return [ChosenOption(opt, quantity) for opt in options]
 
 
 class PlanLineConsumptionTests(unittest.TestCase):
@@ -45,7 +53,7 @@ class PlanLineConsumptionTests(unittest.TestCase):
         f.link_variant_group(self.db, variant, group, quantity_per_option=Decimal("120"))
         fresa = f.make_option(self.db, group=group, inventory_item_id=insumo.id, item_quantity=Decimal("80"))
 
-        lines = plan_line_consumption(self.db, variant.id, 1, [fresa])
+        lines = plan_line_consumption(self.db, variant.id, 1, _chosen(fresa))
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0].quantity, Decimal("120"))
         self.assertEqual(lines[0].source, "variante")
@@ -57,7 +65,7 @@ class PlanLineConsumptionTests(unittest.TestCase):
         group = f.make_option_group(self.db, min_select=1, max_select=1)
         f.link_variant_group(self.db, variant, group, quantity_per_option=Decimal("0"))
         opt = f.make_option(self.db, group=group, inventory_item_id=insumo.id, item_quantity=Decimal("50"))
-        lines = plan_line_consumption(self.db, variant.id, 1, [opt])
+        lines = plan_line_consumption(self.db, variant.id, 1, _chosen(opt))
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0].quantity, Decimal("50"))
         self.assertEqual(lines[0].source, "opcion")
@@ -84,7 +92,7 @@ class PlanLineConsumptionTests(unittest.TestCase):
             f.make_option(self.db, group=group, inventory_item_id=i.id, item_quantity=Decimal("0"))
             for i in (insumo1, insumo2, insumo3)
         ]
-        lines = plan_line_consumption(self.db, variant.id, 1, opts)
+        lines = plan_line_consumption(self.db, variant.id, 1, _chosen(*opts))
         self.assertEqual(len(lines), 3)
         self.assertTrue(all(l.quantity == Decimal("120") for l in lines))
         self.assertEqual(sum(l.quantity for l in lines), Decimal("360"))
@@ -96,7 +104,7 @@ class PlanLineConsumptionTests(unittest.TestCase):
         f.link_variant_group(self.db, variant, group, quantity_per_option=Decimal("80"))
         fresa = f.make_option(self.db, group=group, inventory_item_id=insumo.id)
         fresa_premium = f.make_option(self.db, group=group, inventory_item_id=insumo.id)
-        lines = plan_line_consumption(self.db, variant.id, 1, [fresa, fresa_premium])
+        lines = plan_line_consumption(self.db, variant.id, 1, _chosen(fresa, fresa_premium))
         self.assertEqual(len(lines), 2, "no se fusionan en un solo movimiento")
         self.assertEqual({l.inventory_item_id for l in lines}, {insumo.id})
 
@@ -107,7 +115,7 @@ class PlanLineConsumptionTests(unittest.TestCase):
         sin_topping = f.make_option(
             self.db, group=group, inventory_item_id=None, item_quantity=Decimal("50")
         )
-        lines = plan_line_consumption(self.db, variant.id, 1, [sin_topping])
+        lines = plan_line_consumption(self.db, variant.id, 1, _chosen(sin_topping))
         self.assertEqual(lines, [])
 
     def test_rn_cat_23_cantidad_resultante_cero_no_genera_linea(self):
@@ -116,7 +124,7 @@ class PlanLineConsumptionTests(unittest.TestCase):
         group = f.make_option_group(self.db)
         f.link_variant_group(self.db, variant, group, quantity_per_option=Decimal("0"))
         opt = f.make_option(self.db, group=group, inventory_item_id=insumo.id, item_quantity=Decimal("0"))
-        lines = plan_line_consumption(self.db, variant.id, 1, [opt])
+        lines = plan_line_consumption(self.db, variant.id, 1, _chosen(opt))
         self.assertEqual(lines, [])
 
     def test_required_consumption_agrega_por_insumo(self):
@@ -126,7 +134,7 @@ class PlanLineConsumptionTests(unittest.TestCase):
         group = f.make_option_group(self.db, min_select=1, max_select=1)
         f.link_variant_group(self.db, variant, group, quantity_per_option=Decimal("3"))
         opt = f.make_option(self.db, group=group, inventory_item_id=insumo.id)
-        req = required_consumption(self.db, variant.id, 5, [opt])
+        req = required_consumption(self.db, variant.id, 5, _chosen(opt))
         # receta: 2*5=10; opcion (tamaño manda, =3): 3*5=15; total 25 del mismo insumo
         self.assertEqual(req[insumo.id], Decimal("25"))
 

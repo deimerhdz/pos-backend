@@ -292,6 +292,9 @@ def create_option_group(
         min_select=body.min_select,
         max_select=body.max_select,
         pricing_type=body.pricing_type,
+        selection_mode=body.selection_mode,
+        max_quantity_per_option=body.max_quantity_per_option,
+        max_total_quantity=body.max_total_quantity,
     )
     db.add(group)
     db.commit()
@@ -338,6 +341,12 @@ def update_option_group(
                 update(Option).where(Option.option_group_id == group_id).values(extra_price=0)
             )
         group.pricing_type = body.pricing_type
+    if body.selection_mode is not None:
+        group.selection_mode = body.selection_mode
+    if body.max_quantity_per_option is not None:
+        group.max_quantity_per_option = body.max_quantity_per_option
+    if body.max_total_quantity is not None:
+        group.max_total_quantity = body.max_total_quantity
     db.commit()
     db.refresh(group)
     return group
