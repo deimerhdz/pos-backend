@@ -18,6 +18,8 @@ Reemplaza el motor de las specs 012 (`evaluate` / `evaluate_detailed`) y 040
 `_tz`, `local_now`, `_in_time_window`, `_valid_now` se **conservan sin cambio de
 cuerpo** (A-57 intacto).
 """
+import unicodedata
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
@@ -297,39 +299,209 @@ def applied_to_dicts(applied: list) -> list[dict]:
     ]
 
 
-def menu_unit_discount(rules: list, variant_id, unit_price) -> Decimal | None:
-    """Descuento por variante para el menú público (contracts/superficies-consumo.md
-    §1): solo `percent` con `min_qty == 1` baja el precio unitario; `package_price`
-    y `percent` con `min_qty > 1` -> `None` (depende de cuántas unidades combinadas
-    haya, que en el menú sin carrito no existen — igual que hoy `qty_price`)."""
+def menu_unit_discount(rules: list, variant_id, unit_price) -> tuple[Decimal, str] | None:
+    """Precio unitario vigente para el menú público, con el tipo de regla que lo
+    produjo: `(discounted_price, discount_kind)`, o `None` si ninguna regla vigente
+    baja el precio de esta variante.
+
+    spec 063: solo `percent` con `min_qty == 1` bajaba el precio; `min_qty > 1`
+    depende de cuántas unidades combinadas haya, que en el menú sin carrito no
+    existen, y sigue devolviendo `None`.
+
+    spec 066 (A-68, FR-010): se suma `package_price` con `min_qty == 1`, que es un
+    **precio unitario especial**. Ahí el precio vigente es `rule.value` **tal cual**,
+    incluso si resulta mayor o igual que `unit_price`: no se recorta, no se descarta
+    y no se sustituye por el precio normal, porque es el importe que el cobro aplica.
+    Devolver `None` en ese caso reintroduciría el defecto que A-68 corrige
+    (mostrado ≠ cobrado), solo que en la dirección contraria. Lo que no se muestra
+    ahí es la **señal de ahorro**, y esa decisión la toma el frontend comparando dos
+    importes que ya le llegaron (FR-015, contracts/menu-info-promocion.md §4.2).
+
+    Devuelve una tupla —y no solo el importe— porque `discount_kind` debe llevar el
+    tipo **real** de la regla: el frontend acota la insignia de porcentaje a
+    `percent` para no fabricar un `-25%` que un `package_price` nunca enuncia
+    (research.md D-13)."""
     for r in rules:
-        if r.type != "percent" or r.min_qty != 1:
+        if r.min_qty != 1 or r.type not in LIVE_TYPES:
             continue
-        if variant_id in {v.product_variant_id for v in r.variants}:
-            return Decimal(unit_price) * Decimal(r.value) / Decimal(100)
+        if variant_id not in {v.product_variant_id for v in r.variants}:
+            continue
+        if r.type == "package_price":
+            return Decimal(r.value), "package_price"
+        descuento = Decimal(unit_price) * Decimal(r.value) / Decimal(100)
+        if descuento <= 0:
+            continue
+        precio = (Decimal(unit_price) - descuento).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        return precio, "percent"
     return None
 
 
-def variant_set_condition_text(rule: PromotionRule) -> str | None:
+def menu_variant_promotion(
+    rules: list,
+    variant_id,
+    unit_price: Decimal,
+    names: Mapping[UUID, str],
+) -> dict | None:
+    """Bloque `MenuVariantPromotion` de FR-007 para una variante, o `None` si
+    ninguna regla vigente la cubre.
+
+    `rules` son las de `active_variant_set_rules`: la vigencia ya está resuelta.
+    Se toma la **primera** regla cuyo conjunto contenga la variante, sin criterio de
+    desempate y sin inventar uno: `_guard_variant_overlap` (spec 063 FR-014) impide
+    que dos reglas vigentes compartan una variante en el mismo instante (FR-012)."""
+    for r in rules:
+        if variant_id not in {v.product_variant_id for v in r.variants}:
+            continue
+        # Una regla de tipo retirado no produce bloque. Hoy no llega aquí porque
+        # `active_variant_set_rules` ya filtra por `LIVE_TYPES`; la guarda se
+        # mantiene por si ese filtro cambia.
+        condition_text = variant_set_condition_text(r, names)
+        if condition_text is None:
+            continue
+        value = Decimal(r.value)
+        if r.type == "package_price":
+            # El precio del paquete es único: el mismo equivalente para todas las
+            # variantes del conjunto, aunque mezclen precios normales distintos.
+            exacto = value / Decimal(r.min_qty)
+            short_condition = f"{r.min_qty} x {_money(value)}"
+        else:
+            # Sobre el precio normal **de esta** variante.
+            exacto = Decimal(unit_price) * (Decimal(100) - value) / Decimal(100)
+            pct = f"{value:f}"
+            if "." in pct:
+                pct = pct.rstrip("0").rstrip(".")
+            short_condition = f"{r.min_qty} x -{pct}%"
+        # `≈` siempre que el exacto no sea entero en pesos, en los dos tipos
+        # (FR-009). Un precio de catálogo llega como `Decimal("8000.00")`, y
+        # `Decimal("8000.00") % 1` es `Decimal("0.00")`: compara igual a 0 sin
+        # normalizar antes.
+        aprox = exacto % 1 != 0
+        unit_equivalent = exacto.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        unit_equivalent_text = f"{'≈ ' if aprox else ''}{_money(unit_equivalent)} c/u"
+        return {
+            "condition_text": condition_text,
+            "short_condition": short_condition,
+            "unit_equivalent": unit_equivalent,
+            "unit_equivalent_approx": aprox,
+            "unit_equivalent_text": unit_equivalent_text,
+            # El separador es " · " (espacio, U+00B7, espacio), tal como lo fija FR-008.
+            "display_text": f"{short_condition} · {unit_equivalent_text}",
+            "type": r.type,
+            "min_qty": r.min_qty,
+            "value": value,
+        }
+    return None
+
+
+def _sort_key(name: str) -> str:
+    """Clave de ordenación de FR-002 (spec 066): sin tildes y sin distinguir
+    mayúsculas, para que el orden no dependa del punto de código ni de la
+    configuración regional. La réplica en TypeScript
+    (`promotion-condition.util.ts`) usa la misma definición: es lo que hace
+    verificable SC-005 entre los dos lenguajes."""
+    d = unicodedata.normalize("NFD", name)
+    return "".join(c for c in d if not unicodedata.combining(c)).casefold()
+
+
+def _set_descriptor(names: Iterable[str]) -> tuple[str, bool] | None:
+    """Descriptor del conjunto (spec 066, FR-002 y FR-003) y si nombra a más de
+    uno — lo segundo decide el `"entre "` de FR-004.
+
+    Recorta espacios, descarta vacíos, **deduplica por el nombre mostrado** (ocho
+    variantes llamadas `Pequeño 8oz` son un solo nombre) y ordena por `_sort_key`
+    con desempate por el nombre original, que mantiene determinista el caso de dos
+    nombres con la misma clave (`Pequeño` y `pequeño`).
+
+    `None` cuando no queda ningún nombre utilizable: ahí el texto vuelve al
+    respaldo por conteo (FR-006)."""
+    distintos = {n.strip() for n in names if n and n.strip()}
+    if not distintos:
+        return None
+    ordenados = sorted(distintos, key=lambda n: (_sort_key(n), n))
+    d = len(ordenados)
+    if d == 1:
+        return ordenados[0], False
+    if d == 2:
+        return f"{ordenados[0]} y {ordenados[1]}", True
+    if d == 3:
+        return f"{ordenados[0]}, {ordenados[1]} y {ordenados[2]}", True
+    # Los tres primeros del orden; `d - 3` cuenta **nombres distintos** restantes,
+    # no variantes (contracts/texto-condicion.md §2.2).
+    return f"{ordenados[0]}, {ordenados[1]}, {ordenados[2]} y {d - 3} más", True
+
+
+def variant_display_names(db: Session, variant_ids: Iterable[UUID]) -> dict[UUID, str]:
+    """`{product_variant_id: nombre utilizable}` en **una sola** consulta.
+
+    El nombre utilizable es el de la variante y, si queda vacío al recortar, el
+    del producto; una variante sin ninguno de los dos **no aparece en el mapa**,
+    porque no aporta nombre al descriptor (spec 066 FR-006, research.md D-3).
+
+    Nunca llamarla dentro de un bucle de variantes ni de reglas: el coste es
+    constante por llamada y debe seguir siéndolo (research.md D-12)."""
+    ids = set(variant_ids)
+    if not ids:
+        return {}
+    rows = db.execute(
+        select(ProductVariant.id, ProductVariant.name, Product.name)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(ProductVariant.id.in_(ids))
+    ).all()
+    names: dict[UUID, str] = {}
+    for variant_id, variant_name, product_name in rows:
+        usable = (variant_name or "").strip() or (product_name or "").strip()
+        if usable:
+            names[variant_id] = usable
+    return names
+
+
+def variant_set_condition_text(rule: PromotionRule, names: Mapping[UUID, str]) -> str | None:
     """Condición en lenguaje llano, español de Colombia (contract §5). `None`
     para una regla de tipo viejo (histórica, migrada de una promoción
-    `finished`)."""
+    `finished`).
+
+    spec 066 (A-66): el conjunto se describe por **nombres** de variante en vez
+    de por conteo. `names` (`{product_variant_id: nombre utilizable}`, de
+    `variant_display_names`) es **posicional y obligatorio** a propósito: un call
+    site que lo olvide debe romper en carga, no degradar en silencio al texto por
+    conteo y separar las superficies (SC-005, research.md D-1)."""
+    # El orden de las guardas importa: una regla histórica no se anuncia, ni
+    # siquiera con nombres disponibles (research.md D-3).
     if rule.type not in LIVE_TYPES:
         return None
     n = len(rule.variants)
     value = Decimal(rule.value)
+    descriptor = _set_descriptor(
+        names[v.product_variant_id]
+        for v in rule.variants
+        if v.product_variant_id in names
+    )
+    # `d` nombra el conjunto; `e` solo aparece cuando nombra a más de uno.
+    # Sin ningún nombre utilizable se conserva el respaldo por conteo (FR-006).
+    d = descriptor[0] if descriptor else f"estas {n} variantes"
+    e = "entre " if descriptor and descriptor[1] else ""
     if rule.type == "package_price":
         if rule.min_qty > 1:
-            return f"Llevando {rule.min_qty} de estas {n} variantes pagas {_money(value)}"
-        return f"Cada una de estas {n} variantes a {_money(value)}"
+            if descriptor is None:
+                return f"Llevando {rule.min_qty} de {d} pagas {_money(value)}"
+            return f"Llevando {rule.min_qty} {e}{d} pagas {_money(value)}"
+        if descriptor is None:
+            return f"Cada una de {d} a {_money(value)}"
+        return f"Cada {e}{d} a {_money(value)}"
     # `10.00` -> `10`, `12.50` -> `12.5` (`{value:g}` no despoja los ceros de un
     # Decimal; `.rstrip("0")` a secas convertiría `10` en `1`).
     pct = f"{value:f}"
     if "." in pct:
         pct = pct.rstrip("0").rstrip(".")
     if rule.min_qty == 1:
-        return f"{pct}% en estas {n} variantes"
-    return f"{pct}% llevando {rule.min_qty} de estas {n} variantes"
+        # `percent` con `min_qty 1` es la única de las cuatro que no lleva `e`
+        # (FR-004, contracts/texto-condicion.md §3).
+        return f"{pct}% en {d}"
+    if descriptor is None:
+        return f"{pct}% llevando {rule.min_qty} de {d}"
+    return f"{pct}% llevando {rule.min_qty} {e}{d}"
 
 
 # --------------------------- Solape real (bloqueo, FR-014) ---------------------------
@@ -668,10 +840,20 @@ def duplicate(db: Session, promo: Promotion, new_name: str) -> Promotion:
 
 def _serialize_rule(rule: PromotionRule, by_id: dict) -> dict:
     variants = []
+    # spec 066: los nombres del descriptor salen del `by_id` que
+    # `serialize_promotion` ya cargó — **cero consultas nuevas** aquí
+    # (contracts/texto-condicion.md §1). Mismo criterio que
+    # `variant_display_names`: el de la variante y, si está vacío, el del producto.
+    names: dict[UUID, str] = {}
     for pv in rule.variants:
         v, p = by_id.get(pv.product_variant_id, (None, None))
         if v is None:
             continue
+        usable = (v.name or "").strip()
+        if not usable and p:
+            usable = (p.name or "").strip()
+        if usable:
+            names[pv.product_variant_id] = usable
         variants.append({
             "product_variant_id": pv.product_variant_id,
             "description": f"{p.name} - {v.name}" if p else v.name,
@@ -682,7 +864,7 @@ def _serialize_rule(rule: PromotionRule, by_id: dict) -> dict:
         "type": rule.type,
         "value": rule.value,
         "min_qty": rule.min_qty,
-        "condition_text": variant_set_condition_text(rule),
+        "condition_text": variant_set_condition_text(rule, names),
         "variants": variants,
     }
 

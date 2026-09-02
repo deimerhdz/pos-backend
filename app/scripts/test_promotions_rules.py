@@ -52,8 +52,8 @@ for _k, _v in {
     os.environ.setdefault(_k, _v)
 
 from app.api.v1.promotions.service import (  # noqa: E402
-    _distribute_group_discount, _greedy_units, _in_time_window, _valid_now,
-    variant_set_condition_text,
+    _distribute_group_discount, _greedy_units, _in_time_window, _set_descriptor,
+    _valid_now, variant_set_condition_text,
 )
 from app.api.v1.promotions.schemas import PromotionType  # noqa: E402
 from app.models.promotion import PROMOTION_TYPES, Promotion, PromotionRule  # noqa: E402
@@ -189,32 +189,95 @@ rep3 = _distribute_group_discount([unit(0, 8000, V1), unit(1, 8000, V2)], Decima
 check("2X: -2.000 por línea", sorted(rep3.values()) == [Decimal("2000"), Decimal("2000")])
 
 
-# --- 5. Textos de condición (español de Colombia) ------------------------
-print("\n5. variant_set_condition_text")
+# --- 5. Descriptor del conjunto (spec 066, FR-002/FR-003) ----------------
+print("\n5. _set_descriptor")
 
-def _regla_texto(tipo, value, min_qty, n):
+def _descriptor_casos() -> None:
+    """spec 066 (A-66): el conjunto se nombra en vez de contarse. Deduplica por el
+    nombre mostrado, ordena sin tildes ni mayúsculas y resume a tres.
+
+    `variant_display_names` (T005) no se ejercita aquí: necesita una `Session` y
+    este script corre sin base de datos a propósito. La cubren los
+    characterization tests sobre SQLite."""
+    check("0 nombres -> None (respaldo por conteo, FR-006)",
+          _set_descriptor([]) is None)
+    check("solo vacíos y espacios -> None",
+          _set_descriptor(["", "   "]) is None)
+    check("1 nombre -> sin 'entre'",
+          _set_descriptor(["Pequeño 8oz"]) == ("Pequeño 8oz", False))
+    check("8 nombres iguales -> uno solo, sin 'entre' (FR-003)",
+          _set_descriptor(["Pequeño 8oz"] * 8) == ("Pequeño 8oz", False))
+    check("se recorta y se deduplica por el nombre mostrado",
+          _set_descriptor(["Pequeño 8oz", "  Pequeño 8oz  "]) == ("Pequeño 8oz", False))
+    check("los vacíos no cuentan, el nombre bueno sobrevive",
+          _set_descriptor(["  ", "Pequeño 8oz", ""]) == ("Pequeño 8oz", False))
+    check("2 nombres -> 'A y B'",
+          _set_descriptor(["Mediano 12oz", "Grande 16oz"])
+          == ("Grande 16oz y Mediano 12oz", True))
+    check("3 nombres -> orden alfabético, no el de selección",
+          _set_descriptor(["Pequeño 8oz", "Mediano 12oz", "Grande 16oz"])
+          == ("Grande 16oz, Mediano 12oz y Pequeño 8oz", True))
+    check("5 nombres -> tres primeros y 'y 2 más' (nombres, no variantes)",
+          _set_descriptor(["Durazno", "Ácai", "Cereza", "Almendra", "Banano"])
+          == ("Ácai, Almendra, Banano y 2 más", True))
+    check("la tilde no altera el orden: Ácai antes que Almendra (D-2)",
+          _set_descriptor(["Almendra", "Ácai"]) == ("Ácai y Almendra", True))
+    check("mayúsculas y minúsculas se ordenan juntas",
+          _set_descriptor(["banano", "Ácai"]) == ("Ácai y banano", True))
+
+_descriptor_casos()
+
+
+# --- 6. Textos de condición (español de Colombia) ------------------------
+print("\n6. variant_set_condition_text")
+
+def _regla_texto(tipo, value, min_qty, nombres):
     # spec 063 (revisión 2026-09-01): `variant_set_condition_text` recibe una
-    # REGLA, no una promoción — solo lee `type`/`value`/`min_qty`/`len(variants)`.
+    # REGLA, no una promoción.
+    # spec 066: y además el mapa `{product_variant_id: nombre utilizable}`,
+    # obligatorio. `nombres` lleva un elemento por variante del conjunto; un
+    # `None` es una variante sin nombre utilizable, que no entra al mapa (FR-006).
+    ids = [UUID(int=i) for i in range(len(nombres))]
     fake = SimpleNamespace(
         type=tipo, value=Decimal(str(value)), min_qty=min_qty,
-        variants=[object()] * n,
+        variants=[SimpleNamespace(product_variant_id=i) for i in ids],
     )
-    return variant_set_condition_text(fake)
+    return variant_set_condition_text(fake, {i: n for i, n in zip(ids, nombres) if n})
 
-check("package_price min_qty>1",
-      _regla_texto("package_price", 12000, 2, 8) == "Llevando 2 de estas 8 variantes pagas $12.000")
-check("package_price min_qty 1",
-      _regla_texto("package_price", 5000, 1, 3) == "Cada una de estas 3 variantes a $5.000")
-check("percent min_qty 1",
-      _regla_texto("percent", 10, 1, 5) == "10% en estas 5 variantes")
-check("percent min_qty>1",
-      _regla_texto("percent", 15, 3, 4) == "15% llevando 3 de estas 4 variantes")
-check("promoción finished de tipo viejo -> condition_text None",
-      _regla_texto("combo", 0, 1, 0) is None)
+# Tabla normativa de contracts/texto-condicion.md §5, los 10 casos. La misma que
+# ejercita `promotion-condition.util.spec.ts`: si un caso da distinto en los dos
+# lenguajes, las superficies se separaron (SC-005).
+check("1. paquete, 8 variantes con el mismo nombre -> un solo nombre, sin 'entre'",
+      _regla_texto("package_price", 12000, 2, ["Pequeño 8oz"] * 8)
+      == "Llevando 2 Pequeño 8oz pagas $12.000")
+check("2. paquete, conjunto de UNA variante -> nunca 'de estas 1 variantes'",
+      _regla_texto("package_price", 12000, 2, ["Pequeño 8oz"])
+      == "Llevando 2 Pequeño 8oz pagas $12.000")
+check("3. paquete, 3 nombres -> orden alfabético (Grande primero), con 'entre'",
+      _regla_texto("package_price", 15000, 2, ["Pequeño 8oz", "Mediano 12oz", "Grande 16oz"])
+      == "Llevando 2 entre Grande 16oz, Mediano 12oz y Pequeño 8oz pagas $15.000")
+check("4. paquete, 5 nombres -> tres primeros y 'y 2 más'",
+      _regla_texto("package_price", 15000, 2,
+                   ["Durazno", "Ácai", "Cereza", "Almendra", "Banano"])
+      == "Llevando 2 entre Ácai, Almendra, Banano y 2 más pagas $15.000")
+check("5. percent min_qty 1 -> sin 'entre' aunque el conjunto sea grande",
+      _regla_texto("percent", 10, 1, ["Pequeño 8oz"] * 8) == "10% en Pequeño 8oz")
+check("6. percent min_qty>1, 2 nombres -> 'entre A y B'",
+      _regla_texto("percent", 15, 3, ["Mediano 12oz", "Grande 16oz"])
+      == "15% llevando 3 entre Grande 16oz y Mediano 12oz")
+check("7. paquete min_qty 1 -> 'Cada {nombre} a {valor}'",
+      _regla_texto("package_price", 6000, 1, ["Pequeño 8oz"])
+      == "Cada Pequeño 8oz a $6.000")
+check("8. ningún nombre utilizable -> respaldo por conteo intacto (FR-006)",
+      _regla_texto("percent", 10, 1, [None, None, None]) == "10% en estas 3 variantes")
+check("9. regla histórica de tipo retirado -> None, antes de mirar nombres",
+      _regla_texto("combo", 0, 1, ["Pequeño 8oz"]) is None)
+check("10. porcentaje con decimal -> punto, no coma (FR-005 sin cambio)",
+      _regla_texto("percent", "12.5", 1, ["Pequeño 8oz"]) == "12.5% en Pequeño 8oz")
 
 
-# --- 6. El enum de ENTRADA admite exactamente {percent, package_price} ---
-print("\n6. Tipos vivos")
+# --- 7. El enum de ENTRADA admite exactamente {percent, package_price} ---
+print("\n7. Tipos vivos")
 check("PromotionType de entrada = {percent, package_price}",
       {t.value for t in PromotionType} == {"percent", "package_price"})
 check("PROMOTION_TYPES conserva los viejos + package_price (lee las finished)",

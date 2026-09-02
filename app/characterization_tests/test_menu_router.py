@@ -104,7 +104,12 @@ class TestMenuPromotionsAnnouncementUS5(unittest.TestCase):
         anuncios = _build_menu_promotions(db, datetime(2026, 8, 5, 18, 0, tzinfo=timezone.utc))
         self.assertEqual(len(anuncios), 1)
         regla = anuncios[0].rules[0]
-        self.assertEqual(regla.text, "Llevando 2 de estas 8 variantes pagas $12.000")
+        # spec 066 (A-66): el conjunto se nombra en vez de contarse. Ocho nombres
+        # distintos -> los tres primeros en orden alfabético y `y 5 más`.
+        self.assertEqual(regla.text,
+                         "Llevando 2 entre sabor-0, sabor-1, sabor-2 y 5 más pagas $12.000")
+        # `variant_count` se conserva aunque el texto ya no lo mencione: es un
+        # campo publicado de la spec 063 (spec 066, contracts/texto-condicion.md §7).
         self.assertEqual(regla.variant_count, 8)
         self.assertEqual(regla.min_qty, 2)
 

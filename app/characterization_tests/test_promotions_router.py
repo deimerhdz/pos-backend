@@ -53,7 +53,9 @@ class TestListPromotionsA09(unittest.TestCase):
         db = fx.new_session()
         cat = fx.make_category(db)
         prod = fx.make_product(db, category=cat)
-        variant = fx.make_variant(db, product=prod, price=8000)
+        # spec 066: sin `name` explícito el fixture genera `variante-{uid}`, que no
+        # es determinista y no permite afirmar el texto por nombres (research.md D-8).
+        variant = fx.make_variant(db, product=prod, price=8000, name="Pequeño 8oz")
         promo = fx.make_promotion(db, name="10% Granizados")
         fx.add_rule_to_promotion(db, promo, type="percent", value=10, min_qty=1, variants=[variant])
         db.commit()
@@ -72,7 +74,9 @@ class TestListPromotionsA09(unittest.TestCase):
         regla = item["rules"][0]
         self.assertEqual(len(regla["variants"]), 1)
         self.assertEqual(regla["variants"][0]["unit_price"], 8000)
-        self.assertEqual(regla["condition_text"], "10% en estas 1 variantes")
+        # spec 066 (A-66): el conjunto de una sola variante se nombra — el defecto
+        # reportado era justamente `"10% en estas 1 variantes"`.
+        self.assertEqual(regla["condition_text"], "10% en Pequeño 8oz")
 
     def test_filtro_closed_by_refactor_lista_las_finalizadas_por_la_migracion(self):
         """FR-025: `?closed_by_refactor=true` filtra `closed_by_refactor_at IS NOT NULL`."""
