@@ -25,7 +25,7 @@ from app.api.v1.catalog.schemas import (
     OptionCreate,
     OptionUpdate,
 )
-from app.catalog_engine.core import compute_line_price
+from app.catalog_engine.core import ChosenOption, compute_line_price
 
 
 class CreateOptionGroupPricingTypeTests(unittest.TestCase):
@@ -106,7 +106,7 @@ class AddOptionPricingTypeTests(unittest.TestCase):
         group = f.make_option_group(self.db, pricing_type="incluido")
         option = f.make_option(self.db, group=group, extra_price=Decimal("0"))
         self.db.commit()
-        self.assertEqual(compute_line_price(variant, [option]), Decimal("15000"))
+        self.assertEqual(compute_line_price(variant, [ChosenOption(option, 1)]), Decimal("15000"))
 
 
 class UpdateOptionGroupPricingTypeTests(unittest.TestCase):

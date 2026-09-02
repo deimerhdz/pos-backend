@@ -27,6 +27,13 @@ class MenuOptionGroupResponse(BaseModel):
     # elegir menos del máximo sirve de más y descuenta de menos, así que la UI
     # tiene que exigir el máximo en vez del mínimo.
     consume: bool = False
+    # spec 065: "conteo" (min/max_select cuentan opciones distintas, comportamiento
+    # de siempre) o "cantidad" (unidades libres por opción, sin mínimo posible;
+    # min_select/max_select se ignoran en ese modo). Los dos topes solo tienen
+    # efecto en modo "cantidad"; `None` = sin tope.
+    selection_mode: str = "conteo"
+    max_quantity_per_option: int | None = None
+    max_total_quantity: int | None = None
     options: list[MenuOptionResponse] = Field(default_factory=list)
 
 

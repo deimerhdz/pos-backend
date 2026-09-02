@@ -174,6 +174,9 @@ def make_option_group(db: Session, **kw) -> OptionGroup:
     # se fija aquí explícitamente por el mismo motivo que el resto de este fixture fija
     # sus defaults (legibilidad del test, no depender del server_default de la DDL).
     kw.setdefault("pricing_type", "con_recargo")
+    # spec 065: "conteo" es el default de fábrica (server_default) -- se fija aquí
+    # explícitamente por el mismo motivo que `pricing_type` arriba.
+    kw.setdefault("selection_mode", "conteo")
     obj = OptionGroup(**kw)
     db.add(obj)
     db.flush()

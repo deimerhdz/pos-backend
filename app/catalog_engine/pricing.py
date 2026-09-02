@@ -27,36 +27,41 @@ from app.models.option_group import OptionGroup
 from app.models.product_variant import ProductVariant
 from app.models.variant_option_group import VariantOptionGroup
 
-from app.catalog_engine.core import _exige_maximo
+from app.catalog_engine.core import ChosenOption, _exige_maximo
 from app.catalog_engine.consumption import load_variant_groups
+from app.api.v1.catalog.schemas import OptionSelectionIn
 
 logger = logging.getLogger(__name__)
 
 
 def load_valid_options(
-    db: Session, option_ids: list[UUID], *, variant: ProductVariant | None = None
-) -> list[Option]:
-    """Carga las opciones (dedup) validando existencia y que estén activas.
+    db: Session, selections: list[OptionSelectionIn], *, variant: ProductVariant | None = None
+) -> list[ChosenOption]:
+    """Carga las opciones elegidas validando existencia y que estén activas, junto con
+    la cantidad que trajo cada una (spec 065).
 
     Pasar `variant` valida además la selección contra los grupos del producto (ver
     `validate_option_selection`). Es opcional solo por compatibilidad con los pocos
     llamadores que aún no tienen la variante a mano; **pasarla siempre que se pueda**.
     """
     seen: set[UUID] = set()
-    options: list[Option] = []
-    for opt_id in option_ids:
-        if opt_id in seen:
-            continue
-        seen.add(opt_id)
-        option = get_or_404(db, Option, opt_id, f"Option {opt_id} not found")
+    chosen: list[ChosenOption] = []
+    for sel in selections:
+        if sel.option_id in seen:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Opción repetida en la selección: {sel.option_id}",
+            )
+        seen.add(sel.option_id)
+        option = get_or_404(db, Option, sel.option_id, f"Option {sel.option_id} not found")
         if not option.active:
             raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY, f"Opción inactiva: {opt_id}"
+                status.HTTP_422_UNPROCESSABLE_ENTITY, f"Opción inactiva: {sel.option_id}"
             )
-        options.append(option)
+        chosen.append(ChosenOption(option, sel.quantity))
     if variant is not None:
-        validate_option_selection(db, variant, options)
-    return options
+        validate_option_selection(db, variant, chosen)
+    return chosen
 
 
 def grupos_que_descuentan(db: Session, links: Sequence[VariantOptionGroup]) -> set[UUID]:
@@ -98,10 +103,11 @@ def grupos_que_descuentan(db: Session, links: Sequence[VariantOptionGroup]) -> s
 
 
 def validate_option_selection(
-    db: Session, variant: ProductVariant, options: Sequence[Option]
+    db: Session, variant: ProductVariant, options: Sequence[ChosenOption]
 ) -> None:
     """Comprueba que la selección respeta los grupos que ofrece **esta variante** y sus
-    `min_select`/`max_select`.
+    `min_select`/`max_select` (grupos "conteo") o sus topes de cantidad (grupos
+    "cantidad", spec 065).
 
     Hasta hace poco esto no se validaba en ningún camino de pedido (solo el frontend), y
     era un fallo de UX tolerable. **Con consumo por opción deja de serlo**: lo que se
@@ -123,12 +129,51 @@ def validate_option_selection(
     links = load_variant_groups(db, variant.id)
     bounds = {l.option_group_id: (l.min_select, l.max_select) for l in links}
     consumen = grupos_que_descuentan(db, links)
+    # spec 065: un grupo "cantidad" nunca es obligatorio, sin importar min_select del
+    # VariantOptionGroup (research.md Decisión 3) -- se necesita el modo de TODOS los
+    # grupos ofrecidos por la variante, no solo los que trajeron alguna ChosenOption,
+    # para que un grupo "cantidad" sin ninguna unidad elegida no caiga en la rama de
+    # "obligatorio sin elegir nada" de abajo.
+    selection_modes = dict(db.execute(
+        select(OptionGroup.id, OptionGroup.selection_mode).where(
+            OptionGroup.id.in_(bounds.keys())
+        )
+    ).all())
+
+    # spec 065: separar por selection_mode del grupo de cada ChosenOption *antes* de la
+    # lógica de conteo -- un grupo "cantidad" nunca entra en ella (no tiene mínimo
+    # posible, research.md Decisión 3), y una opción de un grupo "conteo" con
+    # quantity != 1 se rechaza aquí mismo en vez de perderse en silencio.
+    conteo_options: list[Option] = []
+    cantidad_por_grupo: dict[UUID, dict[UUID, int]] = defaultdict(dict)
+    group_cache: dict[UUID, OptionGroup] = {}
+    problems: list[tuple[UUID | None, str]] = []
+    # spec 065: `quantity>1` en "conteo" y los topes de "cantidad" son "422
+    # inmediato" (research.md Decisión 3) -- nunca sujetos a la tolerancia de
+    # `STRICT_OPTION_SELECTION`/"grupo no descuenta" que sí aplica a `bounds`
+    # (comportamiento heredado, sin cambios). Se acumulan aparte para no
+    # mezclarse con esa tolerancia.
+    hard_problems: list[tuple[UUID | None, str]] = []
+
+    for chosen_option in options:
+        option = chosen_option.option
+        group = option.option_group
+        group_cache[group.id] = group
+        if group.selection_mode == "cantidad":
+            cantidad_por_grupo[group.id][option.id] = (
+                cantidad_por_grupo[group.id].get(option.id, 0) + chosen_option.quantity
+            )
+        else:
+            if chosen_option.quantity != 1:
+                hard_problems.append(
+                    (group.id, "esta opción no admite más de una unidad")
+                )
+                continue
+            conteo_options.append(option)
 
     chosen: dict[UUID, int] = defaultdict(int)
-    for option in options:
+    for option in conteo_options:
         chosen[option.option_group_id] += 1
-
-    problems: list[tuple[UUID | None, str]] = []
 
     for gid, count in chosen.items():
         if gid not in bounds:
@@ -146,16 +191,35 @@ def validate_option_selection(
             problems.append((gid, f"exige al menos {lo} opción(es), se enviaron {count}"))
 
     for gid, (lo, hi) in bounds.items():
-        if lo > 0 and gid not in chosen:
+        if lo > 0 and gid not in chosen and selection_modes.get(gid) != "cantidad":
             faltan = hi if _exige_maximo(gid, lo, consumen) else lo
             problems.append((gid, f"es obligatorio: elige {faltan} opción(es)"))
 
-    if not problems:
+    # spec 065, FR-008/FR-009: topes opcionales por opción y por total del grupo. Nunca
+    # se exige un mínimo -- un grupo "cantidad" jamás aparece en la lista de "obligatorio
+    # sin elegir nada" de arriba.
+    for gid, por_opcion in cantidad_por_grupo.items():
+        group = group_cache[gid]
+        total = sum(por_opcion.values())
+        if group.max_quantity_per_option is not None:
+            for option_id, qty in por_opcion.items():
+                if qty > group.max_quantity_per_option:
+                    hard_problems.append(
+                        (gid, f"admite como máximo {group.max_quantity_per_option} "
+                              f"unidad(es) por opción, se pidieron {qty}")
+                    )
+        if group.max_total_quantity is not None and total > group.max_total_quantity:
+            hard_problems.append(
+                (gid, f"admite como máximo {group.max_total_quantity} unidad(es) en total, "
+                      f"se pidieron {total}")
+            )
+
+    if not problems and not hard_problems:
         return
 
     # Un problema en un grupo que descuenta inventario es siempre bloqueante.
     blocking = [p for p in problems if p[0] in consumen]
-    if not blocking and not settings.STRICT_OPTION_SELECTION:
+    if not blocking and not hard_problems and not settings.STRICT_OPTION_SELECTION:
         logger.warning(
             "Selección de opciones inválida (variante %s), tolerada por "
             "STRICT_OPTION_SELECTION=False: %s",
@@ -163,7 +227,7 @@ def validate_option_selection(
         )
         return
 
-    relevant = blocking or problems
+    relevant = hard_problems + blocking if (hard_problems or blocking) else problems
     names = {
         gid: name for gid, name in db.execute(
             select(OptionGroup.id, OptionGroup.name).where(

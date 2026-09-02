@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core import inventory_reasons as reasons
 from app.models.option import Option
+from app.catalog_engine import ChosenOption
 from app.models.sale import Sale, SaleItem
 from app.api.v1.inventory.stock import lock_items, record_movement
 from app.api.v1.catalog.consumption_plan import (
@@ -21,16 +22,18 @@ from app.api.v1.catalog.consumption_plan import (
 )
 
 
-def _sale_item_options(db: Session, si: SaleItem) -> list[Option]:
-    """Opciones vivas de una línea de venta, resueltas desde el snapshot JSONB."""
-    options: list[Option] = []
+def _sale_item_options(db: Session, si: SaleItem) -> list[ChosenOption]:
+    """Opciones vivas de una línea de venta, resueltas desde el snapshot JSONB.
+
+    `.get("quantity", 1)` tolera snapshots de antes de spec 065, sin esa clave."""
+    options: list[ChosenOption] = []
     for opt in (si.options or []):
         option_id = opt.get("option_id")
         if not option_id:
             continue
         option = db.get(Option, UUID(str(option_id)))
         if option is not None:
-            options.append(option)
+            options.append(ChosenOption(option, opt.get("quantity", 1)))
     return options
 
 

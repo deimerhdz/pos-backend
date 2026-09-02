@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.crud import get_or_404
 from app.models.product_variant import ProductVariant
 from app.models.option import Option
+from app.catalog_engine import ChosenOption
 from app.models.session_participant import SessionParticipant
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
@@ -230,7 +231,7 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
         db.add(order)
         db.flush()
 
-        entries: list[tuple[OrderItem, list[Option]]] = []
+        entries: list[tuple[OrderItem, list[ChosenOption]]] = []
         for line in data.items:
             variant = get_or_404(db, ProductVariant, line.product_variant_id, "Variant not found")
             if not variant.active:
@@ -239,7 +240,7 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             # Deduplica, exige que estén activas y valida la selección contra los
             # grupos del producto. Antes este bucle cargaba las opciones a mano y se
             # saltaba las tres cosas.
-            options = load_valid_options(db, line.option_ids, variant=variant)
+            options = load_valid_options(db, line.options, variant=variant)
 
             item = OrderItem(
                 order_id=order.id,
@@ -251,8 +252,10 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             db.add(item)
             db.flush()
 
-            for option in options:
-                db.add(OrderItemOption(order_item_id=item.id, option_id=option.id))
+            for chosen in options:
+                db.add(OrderItemOption(
+                    order_item_id=item.id, option_id=chosen.option.id, quantity=chosen.quantity,
+                ))
 
             item.unit_price = compute_line_price(variant, options)
             entries.append((item, options))

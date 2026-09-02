@@ -1,7 +1,7 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
 from sqlalchemy import String, Integer, Boolean, CheckConstraint
 from sqlalchemy.orm import mapped_column, Mapped, relationship
-from typing import List, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .option import Option
@@ -32,6 +32,17 @@ class OptionGroup(UUIDPrimaryKeyMixin, Base):
         String(20), nullable=False, server_default="con_recargo"
     )
 
+    # spec 065: "conteo" (default) es el comportamiento actual -- min_select/max_select
+    # cuentan opciones distintas. "cantidad" deja que el cliente elija unidades libres por
+    # opción, sin mínimo posible; min_select/max_select se ignoran en ese modo.
+    selection_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="conteo"
+    )
+
+    max_quantity_per_option: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    max_total_quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     options: Mapped[List["Option"]] = relationship(
         back_populates="option_group", cascade="all, delete-orphan"
     )
@@ -42,6 +53,18 @@ class OptionGroup(UUIDPrimaryKeyMixin, Base):
         CheckConstraint(
             "pricing_type IN ('incluido', 'con_recargo')",
             name="ck_option_group_pricing_type",
+        ),
+        CheckConstraint(
+            "selection_mode IN ('conteo', 'cantidad')",
+            name="ck_option_group_selection_mode",
+        ),
+        CheckConstraint(
+            "max_quantity_per_option IS NULL OR max_quantity_per_option > 0",
+            name="ck_option_group_max_quantity_per_option",
+        ),
+        CheckConstraint(
+            "max_total_quantity IS NULL OR max_total_quantity > 0",
+            name="ck_option_group_max_total_quantity",
         ),
         {"schema": "tenant"},
     )
