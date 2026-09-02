@@ -26,9 +26,8 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.characterization_tests import plan_fixtures as fx
-from app.api.v1.admin.schema import TenantCreateWithUser
 from app.api.v1.super_admin import router as super_admin_router
-from app.api.v1.super_admin.schemas import TenantPlanUpdate
+from app.api.v1.super_admin.schemas import TenantCreateWithUser, TenantPlanUpdate
 from app.core.plan_limits import enforce_plan_limit, require_module_access
 from app.core.timezone import utc_now
 
