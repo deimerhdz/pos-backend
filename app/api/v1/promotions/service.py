@@ -755,13 +755,15 @@ def update(db: Session, promo: Promotion, data) -> Promotion:
 
 
 def update_shape(db: Session, promo: Promotion, data) -> Promotion:
-    """spec 063 (revisión 2026-09-01, FR-001a/FR-018): reemplaza la lista
-    **completa** de reglas de la promoción. Solo en `draft`."""
-    if promo.status != "draft":
+    """spec 063 (revisión 2026-09-01, FR-001a/FR-018) + spec 071 (A-69,
+    FR-013 a FR-018): reemplaza la lista **completa** de reglas de la
+    promoción. Permitido en `draft` y, desde la spec 071, también en
+    `paused` — sigue bloqueado en `active` y `finished`."""
+    if promo.status not in ("draft", "paused"):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "Solo una promoción en borrador puede cambiar sus reglas. "
-            "Duplícala, edita la copia y finaliza la original.",
+            "Solo una promoción en borrador o pausada puede cambiar sus reglas. "
+            "Actívala y páusala para editarla, o duplícala.",
         )
     _guard_no_shared_variants_within_payload(data.rules)
     for rule in list(promo.rules):
