@@ -94,7 +94,8 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
     )
 
     categories = db.execute(
-        select(Category).where(Category.active.is_(True)).order_by(Category.name)
+        select(Category).where(Category.active.is_(True))
+        .order_by(Category.display_order.desc(), Category.name)
     ).scalars().all()
 
     products = db.execute(

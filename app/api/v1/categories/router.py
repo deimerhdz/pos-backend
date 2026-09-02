@@ -2,7 +2,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.core.db import get_db
 from app.core.dependencies import AccessTokenBearer, get_current_user
@@ -84,7 +84,13 @@ def create_category(
 ):
     ensure_unique(db, Category, Category.name, body.name, "Category name already exists")
 
-    category = Category(name=body.name, description=body.description)
+    if body.display_order is not None:
+        display_order = body.display_order
+    else:
+        current_max = db.execute(select(func.max(Category.display_order))).scalar()
+        display_order = (current_max or 0) + 1
+
+    category = Category(name=body.name, description=body.description, display_order=display_order)
     db.add(category)
     db.commit()
     db.refresh(category)
@@ -121,6 +127,9 @@ def update_category(
 
     if body.active is not None:
         category.active = body.active
+
+    if body.display_order is not None:
+        category.display_order = body.display_order
 
     db.commit()
     db.refresh(category)
