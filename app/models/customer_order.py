@@ -90,6 +90,24 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
 
+    # spec 073 (FR-008, A-70): instante contra el que se evalua la vigencia
+    # TEMPORAL (fechas, dia, franja) de las promociones de este pedido. Se fija
+    # una sola vez, al crear el pedido (`orders/service.py::create_order` y
+    # `cart/service.py`), y nunca se actualiza -- ni al agregar/anular items,
+    # ni al mover de mesa. Nullable sin default: las filas anteriores a esta
+    # spec quedan en NULL, sin backfill -- el helper `promotion_evaluation_instant`
+    # trata NULL como "usa la hora del cobro" (FR-012), comportamiento identico
+    # al actual para todo lo historico.
+    #
+    # `DateTime(timezone=True)` -- aware UTC, a diferencia de `created_at` (naive):
+    # el valor se pasa a `auto_discount` -> `local_now()` (`promotions/service.py`),
+    # que interpreta un naive como hora LOCAL del tenant; un UTC naive desplazaria
+    # la evaluacion de la franja por el offset (-5 en Colombia). `created_at` no
+    # sufre esto porque nunca se pasa a `local_now()` (research.md D1, data-model.md).
+    promotion_evaluated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Lock optimista para la transición abierta→bloqueada del cobro (Fase 7).
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
