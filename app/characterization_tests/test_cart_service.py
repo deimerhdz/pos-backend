@@ -560,6 +560,27 @@ class TestCartService(unittest.TestCase):
         self.assertIsNone(without_promo.discounted_unit_price)
         self.assertIsNone(without_promo.discounted_line_total)
 
+    def test_submit_cart_congela_el_instante_de_vigencia_de_promociones(self):
+        """spec 073, FR-018 (A-70): el flujo del carrito QR también congela el
+        instante de vigencia al confirmar el pedido — `CustomerOrder.
+        promotion_evaluated_at` queda poblado (≈ hora de la confirmación),
+        igual que un pedido de mostrador. Paridad de FR-018."""
+        db, table, ts, participant = self._seed_session()
+        variant, _, _ = self._seed_variant(db, price=Decimal("4000"))
+        efectivo = self._seed_efectivo(db)
+        service.add_item(db, participant.id, CartItemIn(product_variant_id=variant.id, quantity=1))
+
+        antes = datetime.now(timezone.utc)
+        order = service.submit_cart(db, participant, efectivo.id)
+        despues = datetime.now(timezone.utc)
+
+        self.assertIsNotNone(order.promotion_evaluated_at)
+        instante = order.promotion_evaluated_at
+        if instante.tzinfo is None:
+            instante = instante.replace(tzinfo=timezone.utc)
+        self.assertLessEqual(antes, instante)
+        self.assertLessEqual(instante, despues)
+
     def test_submit_cart_fallo_en_transaccion_no_toca_el_carrito(self):
         """spec 038, US1 (Acceptance Scenario 4 / CA-8, FR-004): si la
         creación del pedido falla dentro de la transacción (aquí, forzando

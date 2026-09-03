@@ -585,6 +585,11 @@ def submit_cart(
             order_type="DINE_IN",
             status="recibida",
             user_id=None,  # lo envió el comensal, no un usuario del sistema
+            # spec 073 (FR-008/FR-018, A-70): segundo punto de creación de
+            # CustomerOrder — el flujo del carrito QR también congela su instante
+            # de vigencia de promociones (aware UTC), igual que
+            # `orders/service.py::create_order` (research.md D2).
+            promotion_evaluated_at=datetime.now(timezone.utc),
         )
         db.add(order)
         db.flush()

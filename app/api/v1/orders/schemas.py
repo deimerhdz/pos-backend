@@ -341,3 +341,37 @@ class BillResponse(BaseModel):
     total: Decimal
     orders: list[BillOrderLine] = Field(default_factory=list)
     split: list[BillSessionLine] = Field(default_factory=list)
+
+
+# ---------- Preview de cobro (spec 073) ----------
+class CheckoutPreviewResponse(BaseModel):
+    """Desglose autoritativo de un cobro — lo que el panel de la Terminal
+    muestra y valida (spec 073, FR-001/FR-004). Forma común de
+    `GET /orders/{order_id}/checkout-preview` (pedido ya creado) y de
+    `POST /orders/draft-preview` (borrador sin guardar). Calculado con el mismo
+    motor que emite la venta (`order_sale_lines`/`auto_discount`/`compute_total`),
+    nunca replicado en el navegador."""
+    subtotal: Decimal
+    #: Descuento automático por promoción (spec 063), siempre ≥ 0.
+    discount: Decimal
+    #: Valor del domicilio del pedido (0 si no es DELIVERY o no tiene valor
+    #: cargado). El frontend pinta la fila solo cuando es > 0 (FR-004).
+    delivery_fee: Decimal
+    #: `max(0, subtotal - discount + delivery_fee)` — misma fórmula que
+    #: `build_sale` (research.md D6).
+    total: Decimal
+    #: Instante contra el que se evaluó la vigencia temporal de las promociones
+    #: (aware UTC). En `checkout-preview` es el instante congelado del pedido (o
+    #: la hora de la llamada para pedidos anteriores a esta spec); en
+    #: `draft-preview` es siempre la hora de la llamada (FR-008).
+    promotion_evaluated_at: UtcDatetime
+
+
+class DraftPreviewIn(BaseModel):
+    """Cuerpo de `POST /orders/draft-preview` (spec 073, FR-013): las mismas
+    líneas que `OrderCreate.items`, para que el frontend arme este cuerpo con
+    el mismo borrador que luego usará para el `POST /orders` real."""
+    items: list[OrderItemIn] = Field(..., min_length=1)
+    #: Igual que `OrderCreate.delivery_fee` — el frontend lo manda solo si el
+    #: borrador es de tipo domicilio (FR-003).
+    delivery_fee: Decimal | None = Field(None, ge=0)

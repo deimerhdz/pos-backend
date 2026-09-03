@@ -25,8 +25,10 @@ Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_orders_checkout -v
 """
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from decimal import Decimal
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 import unittest
 from uuid import uuid4
 
@@ -36,7 +38,9 @@ from sqlalchemy import select
 
 from app.characterization_tests import orders_fixtures as fx
 from app.api.v1.orders import checkout
-from app.api.v1.orders.schemas import BlockIn, CancelIn, CheckoutAndSendIn, PayIn
+from app.api.v1.orders.schemas import (
+    BlockIn, CancelIn, CheckoutAndSendIn, DraftPreviewIn, OrderItemIn, PayIn,
+)
 from app.api.v1.sales.schemas import PaymentIn
 from app.api.v1.promotions import service as promotions
 from app.models.audit_log import AuditLog
@@ -346,6 +350,176 @@ class TestCheckout(unittest.TestCase):
         sale = checkout.pay_order(db, order.id, data, cashier)
 
         self.assertEqual(sale.total, PRECIO)
+
+    # ------------------------------------ spec 073: compute_checkout_preview (US1)
+
+    def test_checkout_preview_pedido_de_mesa_con_promocion(self):
+        """spec 073, FR-001/FR-002/FR-004 (US1, Acceptance Scenario 1): 2 conos
+        a $8.000 + promoción del 50% llevando 2 → `{subtotal 16000, discount
+        8000, total 8000}`, calculado por el backend. Sin `db.commit()` ni
+        venta."""
+        s = self._seed_order_con_receta()
+        db, order, category = s["db"], s["order"], s["category"]
+        variant = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("8000"))
+        fx.make_order_item(db, order, variant, quantity=2)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=2, variants=[variant],
+        )
+        db.commit()
+
+        preview = checkout.compute_checkout_preview(db, order.id)
+
+        self.assertEqual(preview.subtotal, Decimal("16000"))
+        self.assertEqual(preview.discount, Decimal("8000"))
+        self.assertEqual(preview.delivery_fee, Decimal("0"))
+        self.assertEqual(preview.total, Decimal("8000"))
+        # No emitió venta ni cambió el estado del pedido.
+        self.assertEqual(db.execute(select(Sale)).scalars().all(), [])
+        db.refresh(order)
+        self.assertEqual(order.status, "abierta")
+
+    def test_checkout_preview_pedido_sin_promocion_discount_cero(self):
+        """FR-004: sin promoción vigente el descuento es 0."""
+        s = self._seed_order_con_receta()
+        db, order, variant = s["db"], s["order"], s["variant"]
+        fx.make_order_item(db, order, variant, quantity=1)
+        db.commit()
+
+        preview = checkout.compute_checkout_preview(db, order.id)
+
+        self.assertEqual(preview.subtotal, PRECIO)
+        self.assertEqual(preview.discount, Decimal("0"))
+        self.assertEqual(preview.total, PRECIO)
+
+    def test_checkout_preview_pedido_domicilio_incluye_el_valor_del_domicilio(self):
+        """FR-003: el total incluye el valor del domicilio, tomado del pedido."""
+        s = self._seed_order_con_receta()
+        db, order, category = s["db"], s["order"], s["category"]
+        order.order_type = "DELIVERY"
+        order.delivery_fee = Decimal("5000")
+        variant = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("8000"))
+        fx.make_order_item(db, order, variant, quantity=2)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=2, variants=[variant],
+        )
+        db.commit()
+
+        preview = checkout.compute_checkout_preview(db, order.id)
+
+        self.assertEqual(preview.subtotal, Decimal("16000"))
+        self.assertEqual(preview.discount, Decimal("8000"))
+        self.assertEqual(preview.delivery_fee, Decimal("5000"))
+        self.assertEqual(preview.total, Decimal("13000"))
+
+    def test_checkout_preview_delivery_sin_valor_de_envio_delivery_fee_cero(self):
+        """spec 073, US3: un pedido DELIVERY sin `delivery_fee` cargado →
+        `delivery_fee = 0`, la fila no aplica (FR-004)."""
+        s = self._seed_order_con_receta()
+        db, order, variant = s["db"], s["order"], s["variant"]
+        order.order_type = "DELIVERY"
+        order.delivery_fee = None
+        fx.make_order_item(db, order, variant, quantity=1)
+        db.commit()
+
+        preview = checkout.compute_checkout_preview(db, order.id)
+
+        self.assertEqual(preview.delivery_fee, Decimal("0"))
+        self.assertEqual(preview.total, PRECIO)
+
+    def test_checkout_preview_excluye_items_anulados(self):
+        """Edge Case 'Ítems anulados en cocina': no entran en subtotal, ni en el
+        conteo de unidades para el umbral, ni en el total."""
+        s = self._seed_order_con_receta()
+        db, order, variant = s["db"], s["order"], s["variant"]
+        fx.make_order_item(db, order, variant, quantity=1, estado_cocina="listo")
+        fx.make_order_item(db, order, variant, quantity=3, estado_cocina="anulado")
+        db.commit()
+
+        preview = checkout.compute_checkout_preview(db, order.id)
+
+        self.assertEqual(preview.subtotal, PRECIO)
+
+    def test_checkout_preview_404_si_el_pedido_no_existe(self):
+        db = fx.new_session()
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.compute_checkout_preview(db, uuid4())
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_checkout_preview_409_si_el_pedido_ya_no_es_cobrable(self):
+        """`pagada`/`cancelada` → 409 (contracts/preview-cobro-pedido.md)."""
+        for estado in ("pagada", "cancelada"):
+            s = self._seed_order_con_receta(order_status=estado)
+            db, order, variant = s["db"], s["order"], s["variant"]
+            fx.make_order_item(db, order, variant, quantity=1)
+            db.commit()
+            with self.assertRaises(HTTPException) as ctx:
+                checkout.compute_checkout_preview(db, order.id)
+            self.assertEqual(ctx.exception.status_code, 409)
+
+    # -------------------------------------- spec 073: compute_draft_preview (US5)
+
+    def test_draft_preview_dos_conos_con_promocion(self):
+        """spec 073, US5 (Scenario 2): un borrador con 2 conos a $8.000 + una
+        promoción del 50% llevando 2 → `{subtotal 16000, discount 8000, total
+        8000}`, sin persistir nada."""
+        s = self._seed_order_con_receta()
+        db, category = s["db"], s["category"]
+        variant = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("8000"))
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=2, variants=[variant],
+        )
+        db.commit()
+
+        data = DraftPreviewIn(items=[OrderItemIn(product_variant_id=variant.id, quantity=2)])
+        preview = checkout.compute_draft_preview(db, data)
+
+        self.assertEqual(preview.subtotal, Decimal("16000"))
+        self.assertEqual(preview.discount, Decimal("8000"))
+        self.assertEqual(preview.total, Decimal("8000"))
+        self.assertIsNotNone(preview.promotion_evaluated_at)
+        # No emitió venta (el preview no persiste nada).
+        self.assertEqual(db.execute(select(Sale)).scalars().all(), [])
+
+    def test_draft_preview_subtotal_coincide_con_el_que_pondria_create_order(self):
+        """El subtotal del preview coincide centavo a centavo con el que el
+        pedido real tendría (`compute_line_price`, mismo motor)."""
+        s = self._seed_order_con_receta()
+        db, category = s["db"], s["category"]
+        variant = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("7500"))
+        db.commit()
+
+        data = DraftPreviewIn(items=[OrderItemIn(product_variant_id=variant.id, quantity=3)])
+        preview = checkout.compute_draft_preview(db, data)
+        self.assertEqual(preview.subtotal, Decimal("22500"))
+
+    def test_draft_preview_422_si_la_variante_no_existe(self):
+        db = fx.new_session()
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.compute_draft_preview(
+                db, DraftPreviewIn(items=[OrderItemIn(product_variant_id=uuid4(), quantity=1)]),
+            )
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_draft_preview_422_si_items_vacio(self):
+        with self.assertRaises(Exception):  # ValidationError de pydantic
+            DraftPreviewIn(items=[])
+
+    def test_draft_preview_domicilio_incluye_el_valor_de_envio(self):
+        s = self._seed_order_con_receta()
+        db, category = s["db"], s["category"]
+        variant = fx.make_variant(db, product=fx.make_product(db, category=category), price=Decimal("8000"))
+        db.commit()
+
+        data = DraftPreviewIn(
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1)],
+            delivery_fee=Decimal("5000"),
+        )
+        preview = checkout.compute_draft_preview(db, data)
+        self.assertEqual(preview.delivery_fee, Decimal("5000"))
+        self.assertEqual(preview.total, Decimal("13000"))
 
     # -------------------------------------------------------- confirm_order (T028)
 
@@ -843,6 +1017,59 @@ class TestCheckout(unittest.TestCase):
                 payments=[self._pago(method.id, PRECIO)],
             )
 
+    def test_checkout_and_send_promocion_metodo_transferencia_sin_422(self):
+        """spec 073, US2 (FR-006): un pedido con promoción cobrado por un método
+        que NO es efectivo, con el importe = total con descuento, se emite al
+        primer intento — no dispara el 422 "los pagos que no son en efectivo no
+        pueden superar el total" (que sí saltaría si el navegador mandara el
+        precio pleno). El backend calcula el mismo descuento en el preview y en
+        el cobro."""
+        s = self._seed_hold_order_con_receta()
+        db, order, variant = s["db"], s["order"], s["variant"]
+        shift = s["shift"]
+        transferencia = fx.make_payment_method(db, is_cash=False)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=1, variants=[variant],
+        )
+        db.commit()
+        cashier = self._user()
+
+        total_con_descuento = PRECIO / 2  # 50% sobre 1 unidad
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=shift.id,
+            payments=[self._pago(transferencia.id, total_con_descuento)],
+        )
+        sale = checkout.checkout_and_send(db, order.id, data, cashier)
+
+        self.assertEqual(sale.total, total_con_descuento)
+        self.assertEqual(sale.discount, total_con_descuento)
+
+    def test_checkout_and_send_promocion_domicilio_total_con_descuento_mas_envio(self):
+        """spec 073, US2 Scenario 3: pedido a domicilio con promoción — el total
+        cobrado es `subtotal − descuento + domicilio`, sin 422."""
+        s = self._seed_hold_order_con_receta()
+        db, order, variant, shift = s["db"], s["order"], s["variant"], s["shift"]
+        order.order_type = "DELIVERY"
+        order.delivery_fee = Decimal("5000")
+        transferencia = fx.make_payment_method(db, is_cash=False)
+        promo = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=1, variants=[variant],
+        )
+        db.commit()
+        cashier = self._user()
+
+        esperado = PRECIO / 2 + Decimal("5000")
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=shift.id,
+            payments=[self._pago(transferencia.id, esperado)],
+        )
+        sale = checkout.checkout_and_send(db, order.id, data, cashier)
+
+        self.assertEqual(sale.total, esperado)
+        self.assertEqual(sale.delivery_fee, Decimal("5000"))
+
     def test_checkout_and_send_discount_cero_u_omitido_sigue_igual(self):
         """Contraste del test anterior: `discount=0` (explícito u omitido,
         que es su valor por defecto) se comporta exactamente igual que
@@ -865,6 +1092,252 @@ class TestCheckout(unittest.TestCase):
 # no CONGELA) se elimina — el motor por conjunto no tiene "pool" ni
 # reconciliación entre mecanismos (FR-014 garantiza una promoción por línea). Su
 # cobertura equivalente vive en `test_promotions_service.py` (US2).
+
+
+_BOGOTA = ZoneInfo("America/Bogota")
+
+
+def _utc_para_hora_local(y, mo, d, h, mi) -> datetime:
+    """Instante aware UTC que corresponde a `h:mi` hora local de Bogotá el
+    `y-mo-d` — para sembrar `promotion_evaluated_at` como lo haría `create_order`
+    (que guarda `datetime.now(timezone.utc)` aware) para un pedido tomado a esa
+    hora local."""
+    return datetime(y, mo, d, h, mi, tzinfo=_BOGOTA).astimezone(timezone.utc)
+
+
+class TestVigenciaCongelada(unittest.TestCase):
+    """spec 073, US4 (FR-008 a FR-012a, A-70): la vigencia TEMPORAL de las
+    promociones se evalúa contra el instante de creación del pedido, no la hora
+    del cobro. **Deroga comportamiento vigente — autorizado por A-70.**"""
+
+    def _user(self):
+        return fx.make_user_double()
+
+    def _pago(self, method_id, amount) -> PaymentIn:
+        return PaymentIn(payment_method_id=method_id, amount=amount)
+
+    def _seed(self, *, promo_evaluated_at=None, start_time=None, end_time=None, qty=2):
+        db = fx.new_session()
+        table = fx.make_dining_table(db, status="ocupada")
+        ts = fx.make_table_session(db, table=table)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=Decimal("8000"))
+        insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
+        fx.make_recipe_item(db, variant, insumo, quantity=Decimal("1"))
+        order = fx.make_customer_order(
+            db, ts, status="recibida", channel="POS",
+            promotion_evaluated_at=promo_evaluated_at,
+        )
+        fx.make_order_item(db, order, variant, quantity=qty, estado_cocina="pendiente")
+        promo = fx.make_promotion(
+            db, status="active", start_time=start_time, end_time=end_time,
+        )
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=2, variants=[variant],
+        )
+        register = fx.make_cash_register(db)
+        shift = fx.make_cash_shift(db, register=register)
+        method = fx.make_payment_method(db)
+        db.commit()
+        return dict(db=db, order=order, variant=variant, promo=promo, shift=shift, method=method)
+
+    def test_scenario1_pedido_dentro_de_franja_cobrado_despues_conserva_el_descuento(self):
+        """Pedido creado a las 19:00 (franja 18:00–20:00). Aunque se cobre
+        después de las 20:00, el descuento se aplica igual (FR-009)."""
+        s = self._seed(
+            promo_evaluated_at=_utc_para_hora_local(2026, 9, 2, 19, 0),
+            start_time=time(18, 0), end_time=time(20, 0),
+        )
+        preview = checkout.compute_checkout_preview(s["db"], s["order"].id)
+        self.assertEqual(preview.discount, Decimal("8000"))  # 50% de 2 x 8000
+
+    def test_scenario2_promo_que_empieza_despues_de_crear_el_pedido_no_aplica(self):
+        """Promoción vigente solo desde las 20:00; pedido creado a las 19:59 →
+        NO se aplica (no estaba vigente cuando se tomó el pedido)."""
+        s = self._seed(
+            promo_evaluated_at=_utc_para_hora_local(2026, 9, 2, 19, 59),
+            start_time=time(20, 0), end_time=time(23, 0),
+        )
+        preview = checkout.compute_checkout_preview(s["db"], s["order"].id)
+        self.assertEqual(preview.discount, Decimal("0"))
+
+    def test_scenario3_tercer_item_tras_vencer_recalcula_con_la_vigencia_congelada(self):
+        """FR-010: al agregar un tercer cono después de vencer la franja, el
+        descuento se recalcula sobre 3 unidades con la vigencia congelada —
+        2 descontadas, la tercera a precio pleno."""
+        s = self._seed(
+            promo_evaluated_at=_utc_para_hora_local(2026, 9, 2, 19, 0),
+            start_time=time(18, 0), end_time=time(20, 0), qty=3,
+        )
+        preview = checkout.compute_checkout_preview(s["db"], s["order"].id)
+        self.assertEqual(preview.subtotal, Decimal("24000"))
+        self.assertEqual(preview.discount, Decimal("8000"))  # solo el bloque de 2
+        self.assertEqual(preview.total, Decimal("16000"))
+
+    def test_scenario4_pedido_sin_instante_congelado_evalua_con_la_hora_del_cobro(self):
+        """FR-012: un pedido anterior a esta spec (sin `promotion_evaluated_at`)
+        se comporta exactamente como hoy — la promoción sin franja horaria
+        siempre aplica, evaluada contra la hora del cobro, sin rama especial."""
+        s = self._seed(promo_evaluated_at=None, start_time=None, end_time=None)
+        preview = checkout.compute_checkout_preview(s["db"], s["order"].id)
+        self.assertEqual(preview.discount, Decimal("8000"))
+        self.assertIsNotNone(preview.promotion_evaluated_at)  # cae a "ahora", aware
+
+    def test_scenario5_la_venta_emitida_persiste_el_instante_usado_fr_011a(self):
+        s = self._seed(
+            promo_evaluated_at=_utc_para_hora_local(2026, 9, 2, 19, 0),
+            start_time=time(18, 0), end_time=time(20, 0),
+        )
+        db, order, shift, method = s["db"], s["order"], s["shift"], s["method"]
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=shift.id,
+            payments=[self._pago(method.id, Decimal("8000"))],
+        )
+        sale = checkout.checkout_and_send(db, order.id, data, self._user())
+
+        self.assertEqual(sale.discount, Decimal("8000"))
+        self.assertIsNotNone(sale.promotion_evaluated_at)
+        # SQLite no preserva tzinfo (Postgres sí) — se compara el instante UTC.
+        def _naive_utc(dt):
+            return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+        self.assertEqual(
+            _naive_utc(sale.promotion_evaluated_at),
+            _naive_utc(order.promotion_evaluated_at),
+        )
+
+    def test_venta_anterior_a_la_spec_no_tiene_instante(self):
+        """FR-011/SC-007: una venta emitida sin ningún pedido congelado detrás
+        (`build_sale` sin el kwarg) deja la columna en NULL."""
+        s = self._seed(promo_evaluated_at=None, start_time=None, end_time=None)
+        db, order, shift, method = s["db"], s["order"], s["shift"], s["method"]
+        # `pay_order` (que sí pasa el kwarg) sobre un pedido sin instante:
+        # el helper cae a "ahora" y la venta guarda ese "ahora" — no NULL.
+        # El NULL real es para las ventas de mostrador directas (`sales/service`)
+        # o el histórico; se caracteriza en `test_orders_checkout` sobre
+        # `build_sale` sin el kwarg — aquí basta con no romper el camino.
+        order.status = "bloqueada"
+        db.commit()
+        sale = checkout.pay_order(
+            db, order.id, PayIn(cash_shift_id=shift.id, payments=[self._pago(method.id, Decimal("8000"))]),
+            self._user(),
+        )
+        self.assertIsNotNone(sale.promotion_evaluated_at)
+
+    def test_sale_response_expone_el_instante_para_el_detalle_de_venta_sc_009(self):
+        """spec 073, FR-011a/SC-009 (T032a): `SaleResponse` serializa
+        `promotion_evaluated_at` — el detalle de venta puede explicar un
+        descuento de una promoción hoy vencida sin cruzar el pedido."""
+        from app.api.v1.sales.schemas import SaleResponse
+
+        s = self._seed(
+            promo_evaluated_at=_utc_para_hora_local(2026, 9, 2, 19, 0),
+            start_time=time(18, 0), end_time=time(20, 0),
+        )
+        db, order, shift, method = s["db"], s["order"], s["shift"], s["method"]
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=shift.id,
+            payments=[self._pago(method.id, Decimal("8000"))],
+        )
+        sale = checkout.checkout_and_send(db, order.id, data, self._user())
+        full = db.execute(
+            select(Sale).where(Sale.id == sale.id)
+        ).scalar_one()
+
+        resp = SaleResponse.model_validate(full)
+        self.assertIsNotNone(resp.promotion_evaluated_at)
+        # Se serializa con el mismo formato que `sold_at` (UtcDatetime, con
+        # offset explícito).
+        serialized = resp.model_dump(mode="json")
+        self.assertIn("promotion_evaluated_at", serialized)
+        self.assertIsNotNone(serialized["promotion_evaluated_at"])
+
+        # El caso "null" (venta sin instante) se caracteriza en
+        # `test_venta_anterior_a_la_spec_no_tiene_instante` y en el default del
+        # propio campo (`promotion_evaluated_at: UtcDatetime | None = None`).
+
+    def test_regresion_fr_009a_promocion_pausada_pierde_el_descuento_sin_error(self):
+        """FR-009a: si el admin pausa la promoción entre crear el pedido y
+        cobrarlo, el descuento DESAPARECE (estado leído vivo) — el instante
+        congelado NO lo evita — y el cobro no falla."""
+        s = self._seed(
+            promo_evaluated_at=_utc_para_hora_local(2026, 9, 2, 19, 0),
+            start_time=time(18, 0), end_time=time(20, 0),
+        )
+        db, order, promo = s["db"], s["order"], s["promo"]
+        promo.status = "paused"
+        db.commit()
+
+        preview = checkout.compute_checkout_preview(db, order.id)
+        self.assertEqual(preview.discount, Decimal("0"))
+
+        data = CheckoutAndSendIn(
+            version=order.version, cash_shift_id=s["shift"].id,
+            payments=[self._pago(s["method"].id, Decimal("16000"))],
+        )
+        sale = checkout.checkout_and_send(db, order.id, data, self._user())  # sin error
+        self.assertEqual(sale.discount, Decimal("0"))
+
+
+class TestPromotionEvaluationInstant(unittest.TestCase):
+    """spec 073 (FR-009/FR-012/FR-012a, A-70): función pura
+    `checkout.promotion_evaluation_instant` — qué instante se usa para evaluar
+    la vigencia temporal de las promociones. Aislada, sin base de datos."""
+
+    @staticmethod
+    def _order(evaluated_at):
+        return SimpleNamespace(promotion_evaluated_at=evaluated_at)
+
+    def test_un_pedido_con_instante_congelado_lo_devuelve(self):
+        frozen = datetime(2026, 9, 2, 19, 59, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 2, 20, 5, tzinfo=timezone.utc)
+        got = checkout.promotion_evaluation_instant([self._order(frozen)], now=now)
+        self.assertEqual(got, frozen)
+
+    def test_un_pedido_sin_instante_devuelve_now_fr_012(self):
+        now = datetime(2026, 9, 2, 20, 5, tzinfo=timezone.utc)
+        got = checkout.promotion_evaluation_instant([self._order(None)], now=now)
+        self.assertEqual(got, now)
+
+    def test_varios_pedidos_devuelve_el_min_de_los_congelados_fr_012a(self):
+        a = datetime(2026, 9, 2, 19, 59, tzinfo=timezone.utc)
+        b = datetime(2026, 9, 2, 20, 5, tzinfo=timezone.utc)
+        c = datetime(2026, 9, 2, 20, 15, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 2, 20, 30, tzinfo=timezone.utc)
+        got = checkout.promotion_evaluation_instant(
+            [self._order(b), self._order(a), self._order(c)], now=now,
+        )
+        self.assertEqual(got, a)
+
+    def test_varios_pedidos_todos_sin_instante_devuelve_now(self):
+        now = datetime(2026, 9, 2, 20, 5, tzinfo=timezone.utc)
+        got = checkout.promotion_evaluation_instant(
+            [self._order(None), self._order(None)], now=now,
+        )
+        self.assertEqual(got, now)
+
+    def test_mezcla_congelado_y_null_devuelve_el_congelado_mas_antiguo(self):
+        frozen = datetime(2026, 9, 2, 19, 59, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 2, 20, 30, tzinfo=timezone.utc)
+        got = checkout.promotion_evaluation_instant(
+            [self._order(None), self._order(frozen), self._order(None)], now=now,
+        )
+        self.assertEqual(got, frozen)
+
+    def test_el_retorno_siempre_conserva_tzinfo_aunque_la_entrada_sea_naive(self):
+        """El guard defensivo normaliza cualquier naive a aware UTC — `min()` y
+        el retorno son homogéneos y `local_now()` los convierte bien."""
+        naive_frozen = datetime(2026, 9, 2, 19, 59)
+        naive_now = datetime(2026, 9, 2, 20, 5)
+        got_frozen = checkout.promotion_evaluation_instant(
+            [self._order(naive_frozen)], now=naive_now,
+        )
+        self.assertIsNotNone(got_frozen.tzinfo)
+        self.assertEqual(got_frozen, naive_frozen.replace(tzinfo=timezone.utc))
+
+        got_now = checkout.promotion_evaluation_instant([self._order(None)], now=naive_now)
+        self.assertIsNotNone(got_now.tzinfo)
+        self.assertEqual(got_now, naive_now.replace(tzinfo=timezone.utc))
 
 
 if __name__ == "__main__":

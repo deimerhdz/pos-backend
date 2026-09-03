@@ -14,6 +14,7 @@ no vive aquí:
 
 Quien llama decide; `build_sale` nunca toca stock.
 """
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -69,6 +70,31 @@ def ensure_open_shift(db: Session, cash_shift_id: UUID) -> CashShift:
     return shift
 
 
+def compute_total(
+    subtotal: Decimal,
+    discount: Decimal = Decimal("0"),
+    tax: Decimal = Decimal("0"),
+    tip: Decimal = Decimal("0"),
+    delivery_fee: Decimal = Decimal("0"),
+) -> Decimal:
+    """Fórmula única del total de un cobro (spec 073, research.md D6): la misma
+    aritmética que `build_sale` aplica al emitir la venta, extraída aquí para
+    que los previews de cobro (`compute_checkout_preview`/`compute_draft_preview`)
+    no dupliquen la suma/resta — cualquier cambio futuro (un impuesto que deje
+    de ser $0) los mantiene en sincronía por construcción.
+
+    Devuelve la aritmética cruda `subtotal - discount + tax + tip + delivery_fee`
+    (puede ser negativa): `build_sale` conserva su propio `422` de total
+    negativo, y los previews aplican el `max(0, …)` de FR-004/Edge Case."""
+    return (
+        Decimal(subtotal)
+        - Decimal(discount)
+        + Decimal(tax)
+        + Decimal(tip)
+        + Decimal(delivery_fee)
+    )
+
+
 def build_sale(
     db: Session,
     *,
@@ -87,6 +113,7 @@ def build_sale(
     customer_order_id: UUID | None = None,
     promotion_id: UUID | None = None,
     applied_promotions: list[dict] | None = None,
+    promotion_evaluated_at: datetime | None = None,
     invoice_prefix: str = "",
 ) -> Sale:
     """Arma `Sale` + `SaleItem` + `Payment`, deja la venta en `paid` y **emite su
@@ -120,6 +147,11 @@ def build_sale(
         promotion_id=promotion_id,
         # spec 063 (FR-021): snapshot de las promociones que descontaron.
         applied_promotions=applied_promotions or [],
+        # spec 073 (FR-011a, A-70): el instante con el que se evaluó la vigencia
+        # temporal de estas promociones — lo pasa el call site (la salida de
+        # `promotion_evaluation_instant`). `None` en ventas sin ningún pedido
+        # congelado detrás (venta de mostrador directa, histórico) → columna NULL.
+        promotion_evaluated_at=promotion_evaluated_at,
         status="issued",
     )
     db.add(sale)
@@ -141,7 +173,9 @@ def build_sale(
 
     # Spec 056, FR-011: el valor del domicilio (si la orden es DELIVERY) se
     # suma al total igual que tax/tip — 0 para cualquier otra orden (FR-012).
-    total = subtotal - Decimal(discount) + Decimal(tax) + Decimal(tip) + Decimal(delivery_fee)
+    # spec 073, research.md D6: misma fórmula que los previews de cobro, vía
+    # `compute_total` — el `422` de total negativo se conserva aquí.
+    total = compute_total(subtotal, discount, tax, tip, delivery_fee)
     if total < 0:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "El total no puede ser negativo"

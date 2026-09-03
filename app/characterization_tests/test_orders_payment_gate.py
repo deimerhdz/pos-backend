@@ -20,7 +20,9 @@ Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_orders_payment_gate -v
 """
+from datetime import datetime, time, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 import unittest
 
 from fastapi import HTTPException
@@ -32,6 +34,16 @@ from app.models.inventory_movement import InventoryMovement
 from app.models.sale import Sale
 
 PRECIO = Decimal("18000")
+
+_BOGOTA = ZoneInfo("America/Bogota")
+
+
+def _utc_para_hora_local(y, mo, d, h, mi) -> datetime:
+    """Instante aware UTC que corresponde a `h:mi` hora local de Bogotá el
+    `y-mo-d` — para sembrar `promotion_evaluated_at` como lo haría el flujo QR
+    al confirmar el carrito (que guarda `datetime.now(timezone.utc)` aware)
+    para un pedido tomado a esa hora local."""
+    return datetime(y, mo, d, h, mi, tzinfo=_BOGOTA).astimezone(timezone.utc)
 
 
 class TestOrdersPaymentGate(unittest.TestCase):
@@ -170,8 +182,10 @@ class TestOrdersPaymentGate(unittest.TestCase):
         self.assertIsNotNone(sale.invoice)
 
     def test_confirm_cash_orden_delivery_exige_cubrir_domicilio_y_lo_suma_al_total(self):
-        """spec 056: `_order_total` (usado por el chequeo previo FR-010a) y
-        `build_sale` deben coincidir en incluir el valor del domicilio."""
+        """spec 056: el chequeo previo FR-010a y `build_sale` deben coincidir en
+        incluir el valor del domicilio. spec 073 US7 (research.md D13): el
+        chequeo previo pasó de `_order_total` a `compute_checkout_preview(...)
+        .total` — sin promoción el resultado es el mismo (`discount = 0`)."""
         db, order = self._seed_order_recibida(precio=PRECIO)
         order.order_type = "DELIVERY"
         order.delivery_fee = Decimal("6000")
@@ -513,6 +527,215 @@ class TestOrdersPaymentGate(unittest.TestCase):
         # segunda llamada manual a confirm_order.
         db.refresh(order)
         self.assertEqual(order.status, "pagada")
+
+
+class TestConfirmCashChequeoPrevioConPromocion073(unittest.TestCase):
+    """spec 073, US7 (FR-021 a FR-024, A-70, research.md D13): el chequeo previo
+    del "monto recibido" de `confirm_cash_payment_attempt` compara contra el
+    `Total` autoritativo (subtotal − descuento por promoción + domicilio,
+    instante congelado) que devuelve `compute_checkout_preview`, no contra la
+    suma sin descuento de la ya eliminada `_order_total`.
+
+    No es characterization: es la corrección de un defecto — se verifica contra
+    spec.md Historia 7 / contracts/revision-pago-cajero-qr.md."""
+
+    CONO = Decimal("8000")
+
+    def _user(self):
+        return fx.make_user_double()
+
+    def _shift(self, db):
+        return fx.make_cash_shift(db)
+
+    def _seed_qr_order_con_promo(
+        self, *, promo_evaluated_at=None, start_time=None, end_time=None,
+        promo_status="active", qty=2, delivery_fee=None,
+    ):
+        """Pedido de comensal por QR en `recibida` con 2 conos a $8.000 y una
+        promoción del 50% llevando 2 sobre esa variante — más un intento de pago
+        en efectivo pendiente, listo para `confirm_cash_payment_attempt`."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db)
+        ts = fx.make_table_session(db, table=table)
+        participant = fx.make_participant(db, table_session=ts)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=self.CONO)
+        insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
+        fx.make_recipe_item(db, variant, insumo, quantity=Decimal("1"))
+        order_kw = dict(status="recibida", channel="QR_MENU", promotion_evaluated_at=promo_evaluated_at)
+        if delivery_fee is not None:
+            order_kw.update(order_type="DELIVERY", delivery_fee=delivery_fee)
+        order = fx.make_customer_order(db, ts, participant=participant, **order_kw)
+        fx.make_order_item(db, order, variant, quantity=qty, estado_cocina="pendiente")
+        promo = fx.make_promotion(
+            db, status=promo_status, start_time=start_time, end_time=end_time,
+        )
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=2, variants=[variant],
+        )
+        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
+        attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
+        db.commit()
+        return dict(db=db, order=order, promo=promo, attempt=attempt, variant=variant)
+
+    def test_scenario3_monto_exacto_con_descuento_confirma_sin_422_y_cambio_cero(self):
+        """Historia 7, Scenario 3: 2 conos + promoción del 50% llevando 2 →
+        `confirm_cash_payment_attempt` con $8.000 confirma al primer intento,
+        `change_amount = 0`, sin el 422 "monto menor al total"."""
+        s = self._seed_qr_order_con_promo()
+        db, attempt = s["db"], s["attempt"]
+
+        result = checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("8000"), self._shift(db).id, self._user(),
+        )
+
+        self.assertEqual(result.status, "confirmado")
+        self.assertEqual(result.change_amount, Decimal("0"))
+        sale = db.execute(
+            select(Sale).where(Sale.customer_order_id == s["order"].id)
+        ).scalar_one()
+        self.assertEqual(sale.total, Decimal("8000"))
+        self.assertEqual(sale.discount, Decimal("8000"))
+        self.assertEqual(sale.change_given, Decimal("0"))
+
+    def test_scenario2_diez_mil_recibidos_cambio_dos_mil_sobre_ocho_mil(self):
+        """Historia 7, Scenario 2: $10.000 recibidos → cambio $2.000 calculado
+        sobre $8.000 (no sobre $16.000), venta por $8.000."""
+        s = self._seed_qr_order_con_promo()
+        db, attempt = s["db"], s["attempt"]
+
+        result = checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("10000"), self._shift(db).id, self._user(),
+        )
+
+        self.assertEqual(result.change_amount, Decimal("2000"))
+        sale = db.execute(
+            select(Sale).where(Sale.customer_order_id == s["order"].id)
+        ).scalar_one()
+        self.assertEqual(sale.total, Decimal("8000"))
+        self.assertEqual(sale.change_given, Decimal("2000"))
+
+    def test_scenario4_monto_insuficiente_422_cita_el_total_real_no_el_inflado(self):
+        """Historia 7, Scenario 4: $5.000 no cubre el `Total` real $8.000 → 422
+        cuyo total citado es 8000 (faltan $3.000), NUNCA 16000."""
+        s = self._seed_qr_order_con_promo()
+        db, attempt = s["db"], s["attempt"]
+
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.confirm_cash_payment_attempt(
+                db, attempt.id, Decimal("5000"), self._shift(db).id, self._user(),
+            )
+
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("8000", str(ctx.exception.detail))
+        self.assertNotIn("16000", str(ctx.exception.detail))
+        db.refresh(attempt)
+        self.assertEqual(attempt.status, "pendiente")
+
+    def test_pedido_qr_delivery_con_promocion_compara_contra_subtotal_menos_descuento_mas_domicilio(self):
+        """FR-021/FR-023: pedido QR a domicilio con promoción + envío $5.000 →
+        el chequeo previo compara contra `16000 − 8000 + 5000 = 13000`."""
+        s = self._seed_qr_order_con_promo(delivery_fee=Decimal("5000"))
+        db, attempt = s["db"], s["attempt"]
+
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.confirm_cash_payment_attempt(
+                db, attempt.id, Decimal("12000"), self._shift(db).id, self._user(),
+            )
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("13000", str(ctx.exception.detail))
+
+        result = checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("13000"), self._shift(db).id, self._user(),
+        )
+        self.assertEqual(result.status, "confirmado")
+        sale = db.execute(
+            select(Sale).where(Sale.customer_order_id == s["order"].id)
+        ).scalar_one()
+        self.assertEqual(sale.total, Decimal("13000"))
+
+    def test_scenario6_instante_congelado_del_flujo_qr_conserva_el_descuento_tras_vencer_la_franja(self):
+        """Historia 7, Scenario 6: pedido QR creado 19:59 dentro de una
+        promoción vigente hasta las 20:00; el pago se confirma después (hora de
+        pared real del test), pero la vigencia se evalúa contra el instante
+        congelado → descuento aplicado, `Total $8.000` (T027 congela el instante
+        del flujo QR)."""
+        s = self._seed_qr_order_con_promo(
+            promo_evaluated_at=_utc_para_hora_local(2026, 9, 2, 19, 59),
+            start_time=time(18, 0), end_time=time(20, 0),
+        )
+        db, attempt = s["db"], s["attempt"]
+
+        result = checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("8000"), self._shift(db).id, self._user(),
+        )
+
+        self.assertEqual(result.status, "confirmado")
+        sale = db.execute(
+            select(Sale).where(Sale.customer_order_id == s["order"].id)
+        ).scalar_one()
+        self.assertEqual(sale.total, Decimal("8000"))
+        self.assertEqual(sale.discount, Decimal("8000"))
+
+    def test_scenario7_promocion_pausada_estado_vivo_total_sube_a_16000(self):
+        """Historia 7, Scenario 7 / FR-009a: la promoción se pausó entre el
+        pedido y el cobro → `compute_checkout_preview(...).total` devuelve
+        $16.000 (estado leído vivo, el instante congelado NO lo evita) y el
+        chequeo previo valida contra ese valor: $10.000 → 422 citando 16000,
+        $16.000 → confirma."""
+        s = self._seed_qr_order_con_promo(promo_status="paused")
+        db, attempt = s["db"], s["attempt"]
+
+        self.assertEqual(
+            checkout.compute_checkout_preview(db, s["order"].id).total, Decimal("16000"),
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.confirm_cash_payment_attempt(
+                db, attempt.id, Decimal("10000"), self._shift(db).id, self._user(),
+            )
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("16000", str(ctx.exception.detail))
+
+        result = checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("16000"), self._shift(db).id, self._user(),
+        )
+        self.assertEqual(result.status, "confirmado")
+        sale = db.execute(
+            select(Sale).where(Sale.customer_order_id == s["order"].id)
+        ).scalar_one()
+        self.assertEqual(sale.total, Decimal("16000"))
+        self.assertEqual(sale.discount, Decimal("0"))
+
+    def test_sin_promocion_el_chequeo_previo_sigue_igual_discount_cero(self):
+        """No regresión: un pedido QR sin ninguna promoción vigente confirma
+        exactamente como antes del cambio de `_order_total` (`discount = 0`)."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db)
+        ts = fx.make_table_session(db, table=table)
+        participant = fx.make_participant(db, table_session=ts)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=self.CONO)
+        insumo = fx.make_inventory_item(db, current_stock=Decimal("1000"))
+        fx.make_recipe_item(db, variant, insumo, quantity=Decimal("1"))
+        order = fx.make_customer_order(db, ts, participant=participant, status="recibida", channel="QR_MENU")
+        fx.make_order_item(db, order, variant, quantity=2, estado_cocina="pendiente")
+        efectivo = fx.make_payment_method(db, name="Efectivo", is_cash=True)
+        attempt = fx.make_payment_attempt(db, order, efectivo, status="pendiente")
+        db.commit()
+
+        with self.assertRaises(HTTPException) as ctx:
+            checkout.confirm_cash_payment_attempt(
+                db, attempt.id, Decimal("15000"), self._shift(db).id, self._user(),
+            )
+        self.assertEqual(ctx.exception.status_code, 422)
+
+        result = checkout.confirm_cash_payment_attempt(
+            db, attempt.id, Decimal("16000"), self._shift(db).id, self._user(),
+        )
+        self.assertEqual(result.status, "confirmado")
+        self.assertEqual(result.change_amount, Decimal("0"))
 
 
 if __name__ == "__main__":

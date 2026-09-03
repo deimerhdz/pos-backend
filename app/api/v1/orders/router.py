@@ -28,6 +28,7 @@ from app.api.v1.orders.schemas import (
     OrderCreate, OrderResponse, OrderItemIn,
     OrderItemResponse, KitchenTransitionIn, VoidItemIn,
     BlockIn, CancelIn, CheckoutAndSendIn, PayIn, BillResponse,
+    CheckoutPreviewResponse, DraftPreviewIn,
     TableStatusUpdate, MoveOrderIn, MergeOrdersIn, MergeResponse, GroupBillResponse,
     PaymentAttemptResponse, PaymentAttemptApproveIn, PaymentAttemptRejectIn,
     PaymentAttemptConfirmCashIn,
@@ -375,6 +376,40 @@ def void_item(
 )
 def table_bill(table_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     return checkout.compute_bill(db, table_id)
+
+
+@router.get(
+    "/{order_id}/checkout-preview",
+    response_model=CheckoutPreviewResponse,
+    summary="Desglose autoritativo del cobro de un pedido (spec 073)",
+)
+def checkout_preview(
+    order_id: UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """spec 073, FR-001/FR-004: `{subtotal, discount, delivery_fee, total,
+    promotion_evaluated_at}` calculado por la misma autoridad que emite la
+    venta. Solo lectura — no bloquea el pedido ni exige turno de caja. `409`
+    si el pedido ya está pagado o cancelado."""
+    return checkout.compute_checkout_preview(db, order_id)
+
+
+@router.post(
+    "/draft-preview",
+    response_model=CheckoutPreviewResponse,
+    summary="Desglose de un borrador de orden manual sin guardar (spec 073)",
+)
+def draft_preview(
+    body: DraftPreviewIn,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """spec 073, FR-013: mismo desglose para un borrador que todavía no existe
+    como pedido — el frontend manda las mismas líneas que usará para el
+    `POST /orders` real. `promotion_evaluated_at` es la hora de la llamada (sin
+    congelar). Sin `404`/`409`: no hay ningún recurso persistido."""
+    return checkout.compute_draft_preview(db, body)
 
 
 @router.post(

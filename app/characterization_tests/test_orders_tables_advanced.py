@@ -25,13 +25,15 @@ Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_orders_tables_advanced -v
 """
+from datetime import datetime, time, timezone
 from decimal import Decimal
 import unittest
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 
 from app.characterization_tests import orders_fixtures as fx
-from app.api.v1.orders import tables_advanced
+from app.api.v1.orders import checkout, tables_advanced
 from app.api.v1.table_sessions import service as table_sessions_service
 
 PRECIO = Decimal("10000")
@@ -374,6 +376,99 @@ class TestTablesAdvanced(unittest.TestCase):
         _, _, _, otra = self._seed_table_con_orden_activa(db, status="abierta")
         merged = tables_advanced.merge_orders(db, [order3.id, otra.id])
         self.assertIn(order3.id, merged["order_ids"])
+
+
+_BOGOTA = ZoneInfo("America/Bogota")
+
+
+def _utc_para_hora_local(y, mo, d, h, mi) -> datetime:
+    return datetime(y, mo, d, h, mi, tzinfo=_BOGOTA).astimezone(timezone.utc)
+
+
+class TestGroupBillVigenciaCongelada(unittest.TestCase):
+    """spec 073, FR-018a (A-70): en la cuenta consolidada de mesas fusionadas
+    cada pedido evalúa la vigencia contra SU PROPIO instante congelado, no el
+    MIN del grupo — porque esos pedidos se cobran individualmente y el desglose
+    consolidado debe coincidir con el cobro pedido-por-pedido."""
+
+    def _seed_grupo(self, db):
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=Decimal("8000"))
+        promo = fx.make_promotion(
+            db, status="active", start_time=time(18, 0), end_time=time(20, 0),
+        )
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=2, variants=[variant],
+        )
+        return variant
+
+    def test_cada_pedido_contra_su_propio_instante_no_el_min_del_grupo(self):
+        """Pedido A creado 19:59 (dentro de la franja 18:00–20:00), pedido B
+        creado 20:05 (fuera). `group_bill` → descuento de A aplicado, de B no.
+        El total consolidado == suma de los checkout-preview individuales."""
+        db = fx.new_session()
+        t_a = fx.make_dining_table(db, status="ocupada")
+        ts_a = fx.make_table_session(db, table=t_a)
+        t_b = fx.make_dining_table(db, status="ocupada")
+        ts_b = fx.make_table_session(db, table=t_b)
+        variant = self._seed_grupo(db)
+
+        order_a = fx.make_customer_order(
+            db, ts_a, status="abierta",
+            promotion_evaluated_at=_utc_para_hora_local(2026, 9, 2, 19, 59),
+        )
+        fx.make_order_item(db, order_a, variant, quantity=2, estado_cocina="listo")
+        order_b = fx.make_customer_order(
+            db, ts_b, status="abierta",
+            promotion_evaluated_at=_utc_para_hora_local(2026, 9, 2, 20, 5),
+        )
+        fx.make_order_item(db, order_b, variant, quantity=2, estado_cocina="listo")
+        db.commit()
+
+        group_id = tables_advanced.merge_orders(db, [order_a.id, order_b.id])["merged_group_id"]
+        bill = tables_advanced.group_bill(db, group_id)
+
+        por_pedido = {row["order_id"]: row["subtotal"] for row in bill["orders"]}
+        self.assertEqual(por_pedido[order_a.id], Decimal("8000"))   # 16000 - 8000 descuento
+        self.assertEqual(por_pedido[order_b.id], Decimal("16000"))  # sin descuento (fuera de franja)
+        self.assertEqual(bill["total"], Decimal("24000"))
+        # Coincide con el cobro pedido-por-pedido (checkout-preview de cada uno).
+        self.assertEqual(
+            checkout.compute_checkout_preview(db, order_a.id).total, Decimal("8000"),
+        )
+        self.assertEqual(
+            checkout.compute_checkout_preview(db, order_b.id).total, Decimal("16000"),
+        )
+
+    def test_pedido_del_grupo_anterior_a_la_spec_evalua_con_la_hora_del_cobro(self):
+        """Un pedido del grupo sin `promotion_evaluated_at` (anterior a esta
+        spec) evalúa con la hora del cobro — la promoción sin franja siempre
+        aplica, sin rama especial (FR-012)."""
+        db = fx.new_session()
+        t_a = fx.make_dining_table(db, status="ocupada")
+        ts_a = fx.make_table_session(db, table=t_a)
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=Decimal("8000"))
+        # promo sin franja: siempre válida
+        promo2 = fx.make_promotion(db, status="active")
+        fx.add_rule_to_promotion(
+            db, promo2, type="percent", value=Decimal("50"), min_qty=2, variants=[variant],
+        )
+
+        order = fx.make_customer_order(db, ts_a, status="abierta")  # sin instante
+        fx.make_order_item(db, order, variant, quantity=2, estado_cocina="listo")
+        t_b = fx.make_dining_table(db, status="ocupada")
+        ts_b = fx.make_table_session(db, table=t_b)
+        order_b = fx.make_customer_order(db, ts_b, status="abierta")
+        fx.make_order_item(db, order_b, variant, quantity=1, estado_cocina="listo")
+        db.commit()
+
+        group_id = tables_advanced.merge_orders(db, [order.id, order_b.id])["merged_group_id"]
+        bill = tables_advanced.group_bill(db, group_id)
+        por_pedido = {row["order_id"]: row["subtotal"] for row in bill["orders"]}
+        self.assertEqual(por_pedido[order.id], Decimal("8000"))
 
 
 if __name__ == "__main__":
