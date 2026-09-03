@@ -936,25 +936,6 @@ def release_table(
 # estas tres funciones solo resuelven el intento, nunca tocan `CustomerOrder.status`
 # ni descuentan inventario (contracts/cashier-payment-review.md).
 
-def _order_total(db: Session, order_id: UUID) -> Decimal:
-    """Total cobrable de la orden (líneas no anuladas), mismo criterio que
-    `compute_bill` — usado para validar FR-010a (monto recibido >= total).
-
-    Spec 056: incluye el valor del domicilio de la orden (0 si no es
-    DELIVERY o no tiene valor) — de lo contrario este chequeo previo
-    aceptaría un monto de efectivo que no alcanza a cubrir el domicilio,
-    aunque `build_sale` (con su propio total ya corregido) lo rechazaría
-    de todas formas más adelante."""
-    order = get_or_404(db, CustomerOrder, order_id, "Order not found")
-    items = db.execute(
-        select(OrderItem).where(
-            OrderItem.order_id == order_id, OrderItem.estado_cocina != "anulado"
-        )
-    ).scalars().all()
-    items_total = sum((Decimal(it.unit_price) * it.quantity for it in items), start=Decimal("0"))
-    return items_total + (order.delivery_fee or Decimal("0"))
-
-
 def _load_pending_attempt_for_update(db: Session, attempt_id: UUID) -> OrderPaymentAttempt:
     """Bloqueo pesimista sobre el intento, solo si sigue `pendiente` — mismo
     patrón que `confirm_order` usa sobre la orden (research.md spec 024,
@@ -1129,7 +1110,16 @@ def confirm_cash_payment_attempt(
     motivo que `approve_payment_attempt` — ver su docstring). El monto
     recibido en efectivo se manda tal cual a `build_sale`, que calcula
     `change_given` con el mismo criterio (`pagado - total`) que ya usa
-    `attempt.change_amount` — ambos coinciden por construcción."""
+    `attempt.change_amount` — ambos coinciden por construcción.
+
+    Spec 073, US7 (FR-021/FR-023, A-70, research.md D13): el chequeo previo del
+    "monto recibido" compara contra el `Total` autoritativo —subtotal menos
+    descuento por promoción (instante congelado) más domicilio— que devuelve
+    `compute_checkout_preview`, la misma función de solo lectura que muestra el
+    panel "Pagos por confirmar". Antes usaba `_order_total` (suma sin descuento),
+    que rechazaba con 422 un monto que sí cubría la venta con promoción.
+    `attempt.change_amount` sale de ese mismo `total` → coincide al peso con
+    `Sale.change_given` de `build_sale`."""
     try:
         attempt = _load_pending_attempt_for_update(db, attempt_id)
         method = get_or_404(db, PaymentMethod, attempt.payment_method_id, "Payment method not found")
@@ -1139,7 +1129,10 @@ def confirm_cash_payment_attempt(
                 "Un método de transferencia se aprueba/rechaza, no se confirma con confirm-cash",
             )
 
-        total = _order_total(db, attempt.order_id)
+        # spec 073, US7 (FR-023, research.md D13): el `Total` real con descuento
+        # por promoción (instante congelado) y domicilio — la misma cuenta
+        # autoritativa que el panel muestra y que `build_sale` registrará.
+        total = compute_checkout_preview(db, attempt.order_id).total
         if amount_received < total:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
