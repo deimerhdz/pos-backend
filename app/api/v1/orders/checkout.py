@@ -23,7 +23,7 @@ from app.models.table_session import TableSession
 from app.models.session_participant import SessionParticipant
 from app.models.cart import Cart
 from app.models.option import Option
-from app.catalog_engine import ChosenOption
+from app.catalog_engine import ChosenOption, compute_line_price, load_valid_options
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.cash_shift import CashShift
@@ -33,12 +33,13 @@ from app.models.order_item import EN_CURSO, OrderItem
 from app.models.order_cancel_log import OrderCancelLog
 from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.payment import PaymentMethod
-from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
+from app.api.v1.sales.builder import SaleLine, build_sale, compute_total, ensure_open_shift
 from app.api.v1.sales.schemas import PaymentIn
 from app.api.v1.orders.consumption import deduct_order_items, reverse_order_items
 from app.api.v1.orders.schemas import (
     BlockIn, CancelIn, CheckoutAndSendIn, PayIn,
     BillResponse, BillOrderLine, BillItemLine, BillSessionLine,
+    CheckoutPreviewResponse, DraftPreviewIn,
 )
 from app.api.v1.promotions import service as promotions
 from app.api.v1.orders.service import order_has_sale
@@ -276,6 +277,132 @@ def auto_discount(
     return r.total, r.single_promotion_id, promotions.applied_to_dicts(r.applied)
 
 
+def promotion_evaluation_instant(
+    orders: list[CustomerOrder], *, now: datetime,
+) -> datetime:
+    """spec 073 (FR-009/FR-012/FR-012a, A-70): el instante contra el que se
+    evalúa la vigencia **TEMPORAL** de las promociones. El más antiguo
+    `promotion_evaluated_at` no nulo de `orders` (FR-012a: rondas sucesivas de
+    una misma cuenta usan un único instante, el del pedido más antiguo
+    pendiente). Si ninguna orden lo tiene (todas anteriores a esta spec,
+    FR-012), cae a `now` — la hora del cobro, comportamiento actual sin cambios.
+
+    Todo aware UTC: la columna es `DateTime(timezone=True)` (D1) y `now` en cada
+    call site es `datetime.now(timezone.utc)` / `utc_now()`. `min()` y el retorno
+    son homogéneos; `local_now()` los convierte a hora local del tenant. El
+    guard defensivo normaliza cualquier naive por si un call site futuro lo
+    pasara.
+
+    Para `group_bill` (mesas fusionadas) se llama **por pedido**
+    (`promotion_evaluation_instant([o], now=now)` dentro del bucle), no sobre
+    todo el grupo (FR-018a): esos pedidos se cobran individualmente y el preview
+    consolidado debe coincidir con el cobro per-pedido."""
+    now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    frozen = [
+        (
+            o.promotion_evaluated_at
+            if o.promotion_evaluated_at.tzinfo is not None
+            else o.promotion_evaluated_at.replace(tzinfo=timezone.utc)
+        )
+        for o in orders
+        if o.promotion_evaluated_at is not None
+    ]
+    return min(frozen) if frozen else now
+
+
+def compute_checkout_preview(db: Session, order_id: UUID) -> CheckoutPreviewResponse:
+    """spec 073 (FR-001…FR-007a): desglose autoritativo de un pedido **ya
+    persistido** y aún no cobrado — mesa individual atendida por la Terminal,
+    para llevar o domicilio. Solo lectura: sin `db.commit()`, sin `build_sale`,
+    sin lock, sin turno de caja.
+
+    Reusa literalmente el mismo motor que el cobro real (`order_sale_lines` +
+    `auto_discount` + `compute_total`), evaluando la vigencia contra el instante
+    congelado del pedido (`promotion_evaluation_instant`, FR-009/FR-012) — el
+    monto que este preview muestra es el que `pay_order`/`checkout_and_send`
+    cobrará. Contrato: contracts/preview-cobro-pedido.md."""
+    order = get_or_404(db, CustomerOrder, order_id, "Order not found")
+    if order.status in TERMINAL:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"El pedido no está en un estado cobrable (status={order.status})",
+        )
+
+    lines = order_sale_lines(db, order.id)
+    raw_subtotal = sum((line.line_total for line in lines), start=Decimal("0"))
+
+    instant = promotion_evaluation_instant([order], now=datetime.now(timezone.utc))
+    promo_discount, _, _ = auto_discount(db, lines, instant)
+
+    delivery_fee = order.delivery_fee or Decimal("0")
+    total = max(
+        Decimal("0"),
+        compute_total(raw_subtotal, promo_discount, delivery_fee=delivery_fee),
+    )
+
+    return CheckoutPreviewResponse(
+        subtotal=raw_subtotal,
+        discount=promo_discount,
+        delivery_fee=delivery_fee,
+        total=total,
+        promotion_evaluated_at=instant,
+    )
+
+
+def compute_draft_preview(db: Session, data: DraftPreviewIn) -> CheckoutPreviewResponse:
+    """spec 073 (FR-013 a FR-015a): desglose de un pedido **hipotético** —
+    todavía sin `CustomerOrder` — mientras el cajero arma una orden manual.
+    Reusa el mismo motor que el cobro real (`auto_discount` + `compute_total`),
+    construyendo las líneas directamente desde `data.items` con el mismo precio
+    unitario que `create_order` pondría en `OrderItem.unit_price`
+    (`compute_line_price`), para que el subtotal coincida centavo a centavo con
+    el que tendrá el pedido una vez creado.
+
+    `promotion_evaluated_at` es siempre la hora de la llamada (sin congelar): el
+    borrador no tiene todavía un pedido cuyo instante congelar — el pedido
+    congela el suyo al crearse (FR-008). Contrato:
+    contracts/preview-borrador-orden-manual.md."""
+    lines: list[SaleLine] = []
+    for item in data.items:
+        variant = db.get(ProductVariant, item.product_variant_id)
+        if variant is None or not variant.active:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Variante inexistente o inactiva: {item.product_variant_id}",
+            )
+        options = load_valid_options(db, item.options, variant=variant)
+        product = db.get(Product, variant.product_id)
+        description = f"{product.name} - {variant.name}" if product else variant.name
+        lines.append(SaleLine(
+            product_variant_id=item.product_variant_id,
+            description=description,
+            options=[
+                {"option_id": str(chosen.option.id), "name": chosen.option.name,
+                 "extra_price": str(chosen.option.extra_price), "quantity": chosen.quantity}
+                for chosen in options
+            ],
+            quantity=item.quantity,
+            unit_price=compute_line_price(variant, options),
+        ))
+
+    raw_subtotal = sum((line.line_total for line in lines), start=Decimal("0"))
+    now = datetime.now(timezone.utc)  # sin congelar (FR-008)
+    promo_discount, _, _ = auto_discount(db, lines, now)
+    delivery_fee = data.delivery_fee or Decimal("0")
+    total = max(
+        Decimal("0"),
+        compute_total(raw_subtotal, promo_discount, delivery_fee=delivery_fee),
+    )
+
+    return CheckoutPreviewResponse(
+        subtotal=raw_subtotal,
+        discount=promo_discount,
+        delivery_fee=delivery_fee,
+        total=total,
+        promotion_evaluated_at=now,
+    )
+
+
 def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
     order = get_or_404(db, CustomerOrder, order_id, "Order not found")
     if order.status != "bloqueada":
@@ -286,11 +413,14 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
     shift = ensure_open_shift(db, data.cash_shift_id)
 
     try:
-        now = datetime.now(timezone.utc)
+        # spec 073 (FR-009, A-70): la vigencia temporal se evalúa contra el
+        # instante congelado del pedido (o la hora del cobro si es anterior a
+        # esta spec — FR-012).
+        instant = promotion_evaluation_instant([order], now=datetime.now(timezone.utc))
         lines = order_sale_lines(db, order.id)
 
         # Descuento automático (RF-012): motor por conjunto de variantes (spec 063).
-        promo_discount, final_promotion_id, applied = auto_discount(db, lines, now)
+        promo_discount, final_promotion_id, applied = auto_discount(db, lines, instant)
 
         sale = build_sale(
             db,
@@ -308,6 +438,7 @@ def pay_order(db: Session, order_id: UUID, data: PayIn, cashier: User) -> Sale:
             customer_order_id=order.id,
             promotion_id=final_promotion_id,
             applied_promotions=applied,
+            promotion_evaluated_at=instant,  # FR-011a
         )
         order.status = "pagada"
         # FR-021: el descuento agregado + la lista de promociones también en la orden.
@@ -478,12 +609,14 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
 
         shift = ensure_open_shift(db, data.cash_shift_id)
 
-        now = datetime.now(timezone.utc)
+        # spec 073 (FR-009, A-70): igual que `pay_order` — vigencia temporal
+        # contra el instante congelado del pedido.
+        instant = promotion_evaluation_instant([order], now=datetime.now(timezone.utc))
         lines = order_sale_lines(db, order.id)
 
         # Descuento automático (RF-012), igual que `pay_order`: motor por
         # conjunto de variantes (spec 063).
-        promo_discount, final_promotion_id, applied = auto_discount(db, lines, now)
+        promo_discount, final_promotion_id, applied = auto_discount(db, lines, instant)
 
         sale = build_sale(
             db,
@@ -501,6 +634,7 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
             customer_order_id=order.id,
             promotion_id=final_promotion_id,
             applied_promotions=applied,
+            promotion_evaluated_at=instant,  # FR-011a
         )
         order.discount = Decimal(data.discount) + promo_discount
         order.applied_promotions = applied
@@ -894,9 +1028,11 @@ def approve_payment_attempt(
         db.flush()
         order = _confirm_order_impl(db, attempt.order_id, user)
 
-        now = utc_now()
+        # spec 073 (FR-009/FR-018, A-70): vigencia temporal contra el instante
+        # congelado del pedido (el flujo QR también lo congela — research.md D2).
+        instant = promotion_evaluation_instant([order], now=utc_now())
         lines = order_sale_lines(db, order.id)
-        promo_discount, final_promotion_id, applied = auto_discount(db, lines, now)
+        promo_discount, final_promotion_id, applied = auto_discount(db, lines, instant)
         # Spec 056, research.md Decisión 5: el domicilio debe quedar incluido
         # en el ÚNICO pago que se autogenera aquí — de lo contrario queda
         # corto exactamente en ese valor y el propio chequeo `paid < total`
@@ -922,6 +1058,7 @@ def approve_payment_attempt(
             customer_order_id=order.id,
             promotion_id=final_promotion_id,
             applied_promotions=applied,
+            promotion_evaluated_at=instant,  # FR-011a
         )
         order.discount = promo_discount
         order.applied_promotions = applied
@@ -1023,9 +1160,11 @@ def confirm_cash_payment_attempt(
         db.flush()
         order = _confirm_order_impl(db, attempt.order_id, user)
 
-        now = utc_now()
+        # spec 073 (FR-009/FR-018, A-70): vigencia temporal contra el instante
+        # congelado del pedido.
+        instant = promotion_evaluation_instant([order], now=utc_now())
         lines = order_sale_lines(db, order.id)
-        promo_discount, final_promotion_id, applied = auto_discount(db, lines, now)
+        promo_discount, final_promotion_id, applied = auto_discount(db, lines, instant)
 
         build_sale(
             db,
@@ -1042,6 +1181,7 @@ def confirm_cash_payment_attempt(
             customer_order_id=order.id,
             promotion_id=final_promotion_id,
             applied_promotions=applied,
+            promotion_evaluated_at=instant,  # FR-011a
         )
         order.discount = promo_discount
         order.applied_promotions = applied

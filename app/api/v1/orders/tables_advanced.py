@@ -151,7 +151,14 @@ def group_bill(db: Session, group_id: UUID) -> dict:
         else:
             lines = checkout.order_sale_lines(db, o.id)
             raw = sum((l.line_total for l in lines), start=Decimal("0"))
-            promo_discount, _, _ = checkout.auto_discount(db, lines, now)
+            # spec 073 (FR-018a, A-70): cada pedido del grupo evalúa la vigencia
+            # contra SU PROPIO instante congelado (o la hora del cobro si es
+            # anterior a esta spec), NO un MIN del grupo — esos pedidos se
+            # cobran individualmente por `checkout_and_send`/`pay_order`, así
+            # que el desglose consolidado debe coincidir con el cobro
+            # pedido-por-pedido (research.md D3).
+            instant = checkout.promotion_evaluation_instant([o], now=now)
+            promo_discount, _, _ = checkout.auto_discount(db, lines, instant)
             sub = raw - promo_discount
             total += sub
         per_order.append({

@@ -221,6 +221,11 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
             delivery_address=data.delivery_address,
             delivery_phone=data.delivery_phone,
             delivery_fee=data.delivery_fee,
+            # spec 073 (FR-008, A-70): el instante de vigencia de promociones se
+            # congela una sola vez, aquí, al crear el pedido — aware UTC (la
+            # columna es DateTime(timezone=True); NO `.replace(tzinfo=None)`,
+            # ver data-model.md). Nunca se vuelve a tocar.
+            promotion_evaluated_at=datetime.now(timezone.utc),
             # T013: con hold_for_payment nace 'recibida', igual que un pedido
             # QR sin confirmar — no compromete stock ni es visible para cocina
             # hasta que se cobre (`checkout.checkout_and_send`).
