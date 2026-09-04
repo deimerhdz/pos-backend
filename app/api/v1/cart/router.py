@@ -150,7 +150,8 @@ async def submit_cart(
     coste (spec 025, contracts/submit-cart-with-payment.md)."""
     await rate_limit(request, "cart_submit", table_id=ctx.table_id)
     order = service.submit_cart(
-        ctx.db, ctx.participant, body.payment_method_id, body.receipt_file_url
+        ctx.db, ctx.participant, body.payment_method_id, body.receipt_file_url,
+        tenant_id=ctx.tenant.id,
     )
     # Después del COMMIT del servicio, nunca dentro: si la transacción fallara no
     # puede haber salido un evento anunciando un pedido que no existe.
@@ -190,7 +191,9 @@ def cancel_my_order(
     body: MyOrderCancelIn,
     ctx: SessionContext = Depends(get_session_context),
 ):
-    order = service.cancel_my_order(ctx.db, ctx.participant, order_id, body.motivo)
+    order = service.cancel_my_order(
+        ctx.db, ctx.participant, order_id, body.motivo, tenant_id=ctx.tenant.id
+    )
     events.order_cancelled(
         ctx.tenant.id,
         order_id=order.id,
@@ -237,7 +240,8 @@ def create_payment_attempt(
     ctx: SessionContext = Depends(get_session_context),
 ):
     return service.create_payment_attempt(
-        ctx.db, ctx.participant.id, order_id, body.payment_method_id
+        ctx.db, ctx.participant.id, order_id, body.payment_method_id,
+        tenant_id=ctx.tenant.id,
     )
 
 

@@ -494,7 +494,7 @@ def cancel_order(
 ):
     """El staff puede cancelar en cualquier estado no terminal. Solo vuelve al stock
     lo que cocina no llegó a preparar; lo ya consumido se registra como pérdida."""
-    order = checkout.cancel_order(db, order_id, body, user)
+    order = checkout.cancel_order(db, order_id, body, user, tenant_id=tenant.id)
     events.order_cancelled(
         tenant.id, order_id=order.id, table_session_id=order.table_session_id,
         motivo=body.motivo,
@@ -546,7 +546,7 @@ def create_order(
     Antes era anónima (solo header `x-tenant-host`, falsificable) y además no
     descontaba inventario, así que una comanda creada aquí y cobrada con
     `pay_order` nunca descontaba stock."""
-    order = service.create_order(db, body, user_id=user.id)
+    order = service.create_order(db, body, user_id=user.id, user=user)
     return _load_order(db, order.id)
 
 

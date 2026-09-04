@@ -8,6 +8,7 @@ de cada ítem: solo vuelve al stock lo que cocina no llegó a preparar. Ver
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -17,6 +18,13 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.audit import record_audit
 from app.core.crud import get_or_404
 from app.core.models import User
+from app.core.order_audit import (
+    ActorType,
+    OrderAuditActor,
+    OrderAuditEventType,
+    hash_sensitive_or_none,
+    record_order_audit_event,
+)
 from app.core.timezone import utc_now
 from app.models.dining_table import DiningTable
 from app.models.table_session import TableSession
@@ -56,6 +64,59 @@ _CONSUMED_KITCHEN = ("en_preparacion", "listo")
 # Estados de orden en los que el inventario todavía NO se descontó: el descuento
 # ocurre al confirmar. Cancelar desde aquí no genera ningún movimiento.
 _NOT_DEDUCTED = ("recibida",)
+
+
+# ------------------------------------------- Auditoría de orden (spec 074)
+# Cada emisión ocurre SIEMPRE después del `commit` de su transición (FR-010) y
+# nunca dentro del `try` que hace `rollback`: un evento no puede anunciar algo
+# que la base de datos no llegó a registrar.
+
+def _cajero_actor(user) -> OrderAuditActor:
+    """Actor `cajero` a partir del `User` que cada función de cobro ya recibe.
+
+    `getattr` para `role_name` porque la auditoría no puede romper a quien la
+    invoca (FR-011) si el llamador pasa un objeto de usuario más simple."""
+    return OrderAuditActor(
+        type=ActorType.CAJERO,
+        id=str(user.id) if user is not None else None,
+        role=getattr(user, "role_name", None),
+    )
+
+
+def _tenant_of(user) -> int | None:
+    """`Tenant.id` del usuario que ejecuta la acción (FR-004) — explícito,
+    nunca inferido dentro del helper de auditoría."""
+    return getattr(user, "tenant_id", None)
+
+
+def _record_order_confirmed(
+    order_id: UUID, user, trigger: Literal["manual", "automatic_payment"]
+) -> None:
+    """Emite `order.confirmed` — único punto de emisión para las dos rutas de
+    la transición `recibida → abierta` (research.md § 4).
+
+    Vive fuera de `_confirm_order_impl` a propósito: esa función no tiene
+    frontera transaccional propia (quien la llama decide el `commit`), así que
+    emitir desde dentro publicaría el evento antes del `commit`, justo lo que
+    FR-010 prohíbe. Cada llamador la invoca tras su propio `commit`, pasando el
+    `trigger` que corresponde a su ruta.
+
+    Con `trigger="automatic_payment"` (la confirmación es efecto colateral de
+    confirmar un pago) el actor es `sistema`, no el cajero: ese cajero queda
+    registrado en el evento de pago que la disparó, correlacionable por el
+    mismo `order_id` (spec 074, US2)."""
+    actor = (
+        OrderAuditActor(type=ActorType.SISTEMA)
+        if trigger == "automatic_payment"
+        else _cajero_actor(user)
+    )
+    record_order_audit_event(
+        event_type=OrderAuditEventType.ORDER_CONFIRMED,
+        order_id=order_id,
+        tenant_id=_tenant_of(user),
+        actor=actor,
+        details={"trigger": trigger},
+    )
 
 
 def _item_options(db: Session, item: OrderItem) -> list[ChosenOption]:
@@ -564,6 +625,10 @@ def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
         logger.exception("Error confirmando el pedido")
         raise
 
+    # spec 074: ruta manual (de recuperación) — el actor es el cajero que la
+    # ejecutó, no el sistema.
+    _record_order_confirmed(order_id, user, "manual")
+
     return _reload_order(db, order_id)
 
 
@@ -653,6 +718,9 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
         # preparar.
         order.status = "pagada"
 
+        # spec 074: copiado antes del `commit` (ver `approve_payment_attempt`).
+        order_id_for_audit = order.id
+
         db.commit()
     except HTTPException:
         db.rollback()
@@ -661,6 +729,30 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
         db.rollback()
         logger.exception("Error cobrando y enviando la orden a cocina")
         raise
+
+    # spec 074 (FR-014, adenda post-implementación): el cobro ya está
+    # comprometido —con su venta y su despacho a cocina— cuando salen estos
+    # dos eventos. `_deduct_and_open` aquí hace el mismo trabajo de apertura
+    # que `_confirm_order_impl`, así que este camino también cuenta como una
+    # confirmación, con actor `sistema` igual que los demás pagos que
+    # confirman la orden como efecto colateral (research.md § 4).
+    payment_method_types: list[str] = []
+    for payment in data.payments:
+        method = db.get(PaymentMethod, payment.payment_method_id)
+        if method is not None and method.type not in payment_method_types:
+            payment_method_types.append(method.type)
+    record_order_audit_event(
+        event_type=OrderAuditEventType.PAYMENT_CHECKOUT_AND_SEND,
+        order_id=order_id_for_audit,
+        tenant_id=_tenant_of(cashier),
+        actor=_cajero_actor(cashier),
+        details={
+            "payment_method_types": payment_method_types,
+            "total_amount": float(sum(p.amount for p in data.payments)),
+            "payment_count": len(data.payments),
+        },
+    )
+    _record_order_confirmed(order_id_for_audit, cashier, "automatic_payment")
 
     return db.execute(
         select(Sale)
@@ -677,6 +769,7 @@ def cancel_order(
     data: CancelIn,
     user: User | None,
     participant: SessionParticipant | None = None,
+    tenant_id: int | None = None,
 ) -> CustomerOrder:
     """Cancela un pedido y ajusta el inventario **según lo que se alcanzó a
     consumir**, no como una reversa simétrica:
@@ -695,6 +788,11 @@ def cancel_order(
     que no es un usuario del sistema). Quién puede cancelar en qué estado lo decide
     quien llama: aquí no hay restricción de estado más allá de los terminales,
     porque el staff sí puede cancelar en cualquier momento.
+
+    `tenant_id` (spec 074) es solo para el log de auditoría: en la ruta del
+    comensal no hay `User` del que leerlo, así que lo pasa quien llama (el
+    router ya lo tiene resuelto). Opcional para no cambiar el contrato de
+    ningún llamador existente.
     """
     order = db.execute(
         select(CustomerOrder)
@@ -802,6 +900,28 @@ def cancel_order(
         db.rollback()
         logger.exception("Error cancelando la orden")
         raise
+
+    # spec 074 (FR-009/FR-010): con la cancelación ya comprometida, el evento
+    # deja constancia de quién la inició y de si quedó pérdida de inventario
+    # (ítems ya consumidos que no volvieron al stock).
+    if user is not None:
+        cancel_actor, initiated_by = _cajero_actor(user), "staff"
+    elif participant is not None:
+        cancel_actor = OrderAuditActor(type=ActorType.COMENSAL, id=str(participant.id))
+        initiated_by = "comensal"
+    else:
+        cancel_actor, initiated_by = OrderAuditActor(type=ActorType.SISTEMA), None
+    record_order_audit_event(
+        event_type=OrderAuditEventType.ORDER_CANCELLED,
+        order_id=order_id,
+        tenant_id=tenant_id if tenant_id is not None else _tenant_of(user),
+        actor=cancel_actor,
+        details={
+            "initiated_by": initiated_by,
+            "reason": data.motivo,
+            "inventory_loss": bool(perdidos),
+        },
+    )
 
     return _reload_order(db, order_id)
 
@@ -997,6 +1117,11 @@ def approve_payment_attempt(
         if not attempt.receipt_file_url:
             raise HTTPException(status.HTTP_409_CONFLICT, "El intento no tiene comprobante todavía")
 
+        # spec 074: se copian antes del `commit` (que expira los atributos del
+        # intento) para auditarlos después, con la transición ya comprometida.
+        order_id = attempt.order_id
+        receipt_file_url = attempt.receipt_file_url
+
         shift = ensure_open_shift(db, cash_shift_id)
 
         attempt.status = "confirmado"
@@ -1059,6 +1184,19 @@ def approve_payment_attempt(
         logger.exception("Error aprobando comprobante de pago")
         raise
 
+    # spec 074: el comprobante viaja como hash (FR-005/FR-012) — el mismo que
+    # ya llevó `order.payment_attempt.created` para este intento.
+    record_order_audit_event(
+        event_type=OrderAuditEventType.PAYMENT_TRANSFER_APPROVED,
+        order_id=order_id,
+        tenant_id=_tenant_of(user),
+        actor=_cajero_actor(user),
+        details={"receipt_hash": hash_sensitive_or_none(receipt_file_url)},
+    )
+    # La aprobación disparó la confirmación de la orden dentro de la misma
+    # transacción: su actor es `sistema`, no este cajero (US2).
+    _record_order_confirmed(order_id, user, "automatic_payment")
+
     db.refresh(attempt)
     return attempt
 
@@ -1078,6 +1216,10 @@ def reject_payment_attempt(
                 "Un método en efectivo se confirma con confirm-cash, no se rechaza",
             )
 
+        # spec 074: copiados antes del `commit` (ver `approve_payment_attempt`).
+        order_id = attempt.order_id
+        receipt_file_url = attempt.receipt_file_url
+
         attempt.status = "rechazado"
         attempt.rejection_reason = reason
         attempt.resolved_by_user_id = user.id
@@ -1090,6 +1232,20 @@ def reject_payment_attempt(
         db.rollback()
         logger.exception("Error rechazando comprobante de pago")
         raise
+
+    # spec 074: mismo `receipt_hash` que el evento de creación del intento —
+    # reconoce el comprobante sin revelarlo (FR-012). El motivo del rechazo es
+    # texto operativo del cajero, no dato personal: viaja tal cual.
+    record_order_audit_event(
+        event_type=OrderAuditEventType.PAYMENT_TRANSFER_REJECTED,
+        order_id=order_id,
+        tenant_id=_tenant_of(user),
+        actor=_cajero_actor(user),
+        details={
+            "receipt_hash": hash_sensitive_or_none(receipt_file_url),
+            "rejection_reason": reason,
+        },
+    )
 
     db.refresh(attempt)
     return attempt
@@ -1140,6 +1296,9 @@ def confirm_cash_payment_attempt(
             )
 
         shift = ensure_open_shift(db, cash_shift_id)
+
+        # spec 074: copiado antes del `commit` (ver `approve_payment_attempt`).
+        order_id = attempt.order_id
 
         attempt.amount_received = amount_received
         attempt.change_amount = amount_received - total
@@ -1192,6 +1351,23 @@ def confirm_cash_payment_attempt(
         db.rollback()
         logger.exception("Error confirmando pago en efectivo")
         raise
+
+    # spec 074: el pago ya está comprometido (con su venta) cuando sale el
+    # evento. `float` porque Sentry Logs solo preserva escalares como atributo
+    # filtrable — un `Decimal` viajaría como el `repr()` de Python.
+    record_order_audit_event(
+        event_type=OrderAuditEventType.PAYMENT_CASH_CONFIRMED,
+        order_id=order_id,
+        tenant_id=_tenant_of(user),
+        actor=_cajero_actor(user),
+        details={
+            "amount_received": float(amount_received),
+            "change": float(amount_received - total),
+        },
+    )
+    # Confirmar el efectivo disparó la confirmación de la orden en la misma
+    # transacción: ese evento lleva actor `sistema`, no este cajero (US2).
+    _record_order_confirmed(order_id, user, "automatic_payment")
 
     db.refresh(attempt)
     return attempt

@@ -16,6 +16,13 @@ from sqlalchemy.orm import Session, selectinload
 from app.core import events
 from app.core.config import settings
 from app.core.crud import get_or_404
+from app.core.order_audit import (
+    ActorType,
+    OrderAuditActor,
+    OrderAuditEventType,
+    hash_sensitive_or_none,
+    record_order_audit_event,
+)
 from app.core.qr_context import close_participant
 from app.core.qr_token import mint_session_token
 from app.core.storage import (
@@ -417,7 +424,8 @@ def list_my_orders(db: Session, participant_id: UUID) -> list[CustomerOrder]:
 
 
 def cancel_my_order(
-    db: Session, participant: SessionParticipant, order_id: UUID, motivo: str
+    db: Session, participant: SessionParticipant, order_id: UUID, motivo: str,
+    tenant_id: int | None = None,
 ) -> CustomerOrder:
     """Cancelación por el propio comensal. Solo hasta que cocina empieza:
 
@@ -427,7 +435,9 @@ def cancel_my_order(
       se pierde es del staff, no del cliente.
 
     Delega la política de inventario en `checkout.cancel_order`, que ya sabe qué
-    revertir y qué contar como pérdida."""
+    revertir y qué contar como pérdida — y que emite el evento de auditoría
+    `order.cancelled` con actor `comensal` (spec 074), por lo que aquí solo se
+    le reenvía el `tenant_id` que el router ya resolvió."""
     from app.api.v1.orders import checkout
 
     order = db.execute(
@@ -454,7 +464,8 @@ def cancel_my_order(
             )
 
     result = checkout.cancel_order(
-        db, order_id, CancelIn(motivo=motivo), user=None, participant=participant
+        db, order_id, CancelIn(motivo=motivo), user=None, participant=participant,
+        tenant_id=tenant_id,
     )
 
     # Si era el último pedido y el comensal ya se había ido, la mesa queda vacía:
@@ -482,6 +493,7 @@ def submit_cart(
     participant: SessionParticipant,
     payment_method_id: UUID,
     receipt_file_url: str | None = None,
+    tenant_id: int | None = None,
 ) -> CustomerOrder:
     """Envía el carrito del comensal como pedido: crea una `CustomerOrder` en
     estado `recibida` con sus líneas **y** su primer `OrderPaymentAttempt`, en
@@ -497,7 +509,12 @@ def submit_cart(
 
     El comensal puede enviar varios pedidos en la misma sesión: al confirmar,
     este carrito se elimina físicamente y `_get_or_create_open_cart` le abre
-    otro, limpio, para la siguiente ronda (spec 038, FR-003/FR-004)."""
+    otro, limpio, para la siguiente ronda (spec 038, FR-003/FR-004).
+
+    `tenant_id` (spec 074) es solo para el log de auditoría: el comensal no es
+    un `User`, así que el tenant lo pasa el router, que ya lo tiene resuelto
+    por el token firmado. Opcional para no cambiar el contrato de ningún
+    llamador existente."""
     cart = _load_open_cart_or_none(db, participant.id)
 
     # spec 024, FR-005: no permitir una segunda orden activa del mismo
@@ -657,6 +674,38 @@ def submit_cart(
         logger.exception("Error enviando el pedido del comensal")
         raise
 
+    # spec 074 (FR-001/FR-010): el pedido ya está comprometido. El nombre del
+    # comensal nunca viaja en texto plano — solo su HMAC (FR-005).
+    audit_actor = OrderAuditActor(type=ActorType.COMENSAL, id=str(participant.id))
+    record_order_audit_event(
+        event_type=OrderAuditEventType.ORDER_CREATED,
+        order_id=order.id,
+        tenant_id=tenant_id,
+        actor=audit_actor,
+        details={
+            "channel": "QR_MENU",
+            "order_type": order.order_type,
+            "diner_name_hash": hash_sensitive_or_none(
+                participant.display_name or participant.display_label
+            ),
+        },
+    )
+    # El pedido nace con su primer intento de pago en esta misma transacción
+    # (spec 025), así que ese intento también se audita aquí: es el único
+    # punto donde se registra el del flujo QR — `create_payment_attempt` solo
+    # cubre los reintentos posteriores a un rechazo.
+    record_order_audit_event(
+        event_type=OrderAuditEventType.PAYMENT_ATTEMPT_CREATED,
+        order_id=order.id,
+        tenant_id=tenant_id,
+        actor=audit_actor,
+        details={
+            "payment_method_type": method.type,
+            "payment_method_name": method.name,
+            "receipt_hash": hash_sensitive_or_none(receipt_file_url),
+        },
+    )
+
     return db.execute(
         select(CustomerOrder)
         .options(
@@ -727,7 +776,8 @@ def _load_own_order(db: Session, participant_id: UUID, order_id: UUID) -> Custom
 
 
 def create_payment_attempt(
-    db: Session, participant_id: UUID, order_id: UUID, payment_method_id: UUID
+    db: Session, participant_id: UUID, order_id: UUID, payment_method_id: UUID,
+    tenant_id: int | None = None,
 ) -> OrderPaymentAttempt:
     """Crea un intento de pago nuevo para una orden propia (FR-008 efectivo,
     FR-012 transferencia). FR-015a: no se permite si ya hay uno `pendiente`
@@ -740,7 +790,7 @@ def create_payment_attempt(
             status.HTTP_409_CONFLICT,
             f"La orden no admite un nuevo intento de pago (status={order.status})",
         )
-    get_or_404(db, PaymentMethod, payment_method_id, "Método de pago no encontrado")
+    method = get_or_404(db, PaymentMethod, payment_method_id, "Método de pago no encontrado")
 
     existing_pending = db.execute(
         select(OrderPaymentAttempt.id).where(
@@ -764,6 +814,21 @@ def create_payment_attempt(
         raise
 
     db.refresh(attempt)
+
+    # spec 074 (FR-001/FR-010): el intento ya existe. El comprobante (que en
+    # este camino se adjunta después, vía `attach_receipt`) nunca viaja en
+    # texto plano — solo su HMAC, si ya estuviera presente (FR-005/FR-012).
+    record_order_audit_event(
+        event_type=OrderAuditEventType.PAYMENT_ATTEMPT_CREATED,
+        order_id=order_id,
+        tenant_id=tenant_id,
+        actor=OrderAuditActor(type=ActorType.COMENSAL, id=str(participant_id)),
+        details={
+            "payment_method_type": method.type,
+            "payment_method_name": method.name,
+            "receipt_hash": hash_sensitive_or_none(attempt.receipt_file_url),
+        },
+    )
     return attempt
 
 
