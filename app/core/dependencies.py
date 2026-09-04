@@ -129,6 +129,95 @@ def _reject_if_session_revoked(user: User, token_data: dict) -> None:
         )
 
 
+_API_PREFIX = "/api/v1"
+
+# Lista exhaustiva de (método HTTP, plantilla de ruta sin el prefijo `/api/v1`)
+# a la que puede llegar un usuario con rol MESERO (spec 075, research.md D2/D3;
+# lista autoritativa en specs/075-rol-mesero/contracts/backend-endpoint-access.md
+# del repo pos-specs). Default-deny: cualquier combinación que no esté aquí se
+# rechaza para MESERO, sin importar el router al que pertenezca — incluye
+# endpoints nuevos que se agreguen en el futuro y no se agreguen explícitamente
+# a esta lista.
+_MESERO_ALLOWED_ROUTES: frozenset[tuple[str, str]] = frozenset({
+    # Terminal de Mesas: table_sessions/router.py completo (sesiones de mesa,
+    # staff — se consulta, se cobra y se cierra).
+    ("GET", "/table-sessions"),
+    ("GET", "/table-sessions/{table_session_id}"),
+    ("POST", "/table-sessions/{table_session_id}/participants"),
+    ("DELETE", "/table-sessions/{table_session_id}/participants/{participant_id}"),
+    ("PUT", "/table-sessions/{table_session_id}/assignments"),
+    ("GET", "/table-sessions/{table_session_id}/bill"),
+    ("POST", "/table-sessions/{table_session_id}/close"),
+    ("POST", "/table-sessions/{table_session_id}/release"),
+    # Terminal de Mesas y Órdenes: subconjunto de orders/router.py (el resto
+    # de ese router, configuración de mesas/QR, ya exige `require_tenant_admin`
+    # y por lo tanto ya está bloqueado para MESERO sin necesidad de listarlo).
+    ("GET", "/orders/tables"),
+    ("PATCH", "/orders/tables/{table_id}/status"),
+    ("POST", "/orders/{order_id}/move"),
+    ("POST", "/orders/merge"),
+    ("GET", "/orders/group/{group_id}/bill"),
+    ("POST", "/orders/{order_id}/confirm"),
+    ("GET", "/orders/{order_id}/payment-attempts"),
+    ("POST", "/orders/payment-attempts/{attempt_id}/approve"),
+    ("POST", "/orders/payment-attempts/{attempt_id}/reject"),
+    ("POST", "/orders/payment-attempts/{attempt_id}/confirm-cash"),
+    ("POST", "/orders/tables/{table_id}/consolidate"),
+    ("POST", "/orders/tables/{table_id}/items"),
+    ("PATCH", "/orders/items/{item_id}/kitchen"),
+    ("POST", "/orders/{order_id}/ready"),
+    ("POST", "/orders/items/{item_id}/void"),
+    ("GET", "/orders/tables/{table_id}/bill"),
+    ("GET", "/orders/{order_id}/checkout-preview"),
+    ("POST", "/orders/draft-preview"),
+    ("POST", "/orders/{order_id}/block"),
+    ("POST", "/orders/{order_id}/pay"),
+    ("POST", "/orders/{order_id}/checkout-and-send"),
+    ("POST", "/orders/{order_id}/cancel"),
+    ("POST", "/orders/tables/{table_id}/release"),
+    ("POST", "/orders"),
+    ("GET", "/orders"),
+    ("GET", "/orders/{order_id}"),
+    # Solo lectura de apoyo: datos que la Terminal de Mesas necesita de
+    # routers que, por lo demás, quedan bloqueados para MESERO por completo.
+    ("GET", "/promotions"),
+    ("GET", "/sales/payment-methods"),
+    ("GET", "/sales/{sale_id}"),
+    ("GET", "/cash/shifts/current"),
+    ("GET", "/invoices"),
+    ("GET", "/invoices/{invoice_id}"),
+    ("GET", "/tenant"),
+    ("POST", "/realtime/ticket"),
+})
+
+
+def _enforce_mesero_scope(user: User, req: Request | None) -> None:
+    """Bloqueo real del lado del servidor para el rol Mesero (spec 075,
+    FR-007): default-deny contra `_MESERO_ALLOWED_ROUTES`. No hace nada para
+    ningún otro rol — Admin y Cajero no cambian de comportamiento (FR-008).
+
+    `req` puede ser `None` cuando esta función se invoca directamente sin
+    FastAPI de por medio (mismo caso ya documentado en `get_current_user`);
+    en ese caso no hay ruta que verificar y no se aplica ninguna restricción.
+    """
+    if req is None:
+        return
+    if not user.role or user.role.name != "MESERO":
+        return
+
+    route = req.scope.get("route")
+    path = getattr(route, "path_format", None) or getattr(route, "path", None)
+    if path is not None and path.startswith(_API_PREFIX):
+        path = path[len(_API_PREFIX):]
+    method = "GET" if req.method == "HEAD" else req.method
+
+    if (method, path) not in _MESERO_ALLOWED_ROUTES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Fuera del alcance del rol Mesero",
+        )
+
+
 def get_current_user(
     token_data: dict = Depends(get_valid_token_data),
     db: Session = Depends(get_db),
@@ -140,7 +229,8 @@ def get_current_user(
     `Depends` tenga que pasar. Tiene default `None` a propósito: hay código que
     invoca esta función directamente, sin FastAPI de por medio (p. ej.
     `app/characterization_tests/test_auth_session_revocation.py`), y ese
-    contrato no cambia. Solo se usa para el efecto colateral de abajo."""
+    contrato no cambia. Se usa para el efecto colateral de logging de abajo y,
+    desde spec 075, también para el bloqueo de alcance del rol Mesero."""
     user = db.execute(
         select(User).where(
             User.email == token_data["user"]["email"],
@@ -164,6 +254,11 @@ def get_current_user(
     if req is not None:
         req.state.actor_id = str(user.id)
         req.state.actor_type = "staff"
+
+    # spec 075 (research.md D2): se evalúa después del efecto de logging de
+    # arriba para que un intento bloqueado también quede en el log operativo
+    # con su actor ya resuelto, no antes.
+    _enforce_mesero_scope(user, req)
 
     return user
 
