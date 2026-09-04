@@ -133,7 +133,14 @@ def get_current_user(
     token_data: dict = Depends(get_valid_token_data),
     db: Session = Depends(get_db),
     tenant: Tenant = Depends(get_tenant),
+    req: Request = None,
 ) -> User:
+    """`req` (spec 074, extensión de logging operativo) lo inyecta FastAPI solo
+    por su anotación `Request` — no es un parámetro que ningún llamador vía
+    `Depends` tenga que pasar. Tiene default `None` a propósito: hay código que
+    invoca esta función directamente, sin FastAPI de por medio (p. ej.
+    `app/characterization_tests/test_auth_session_revocation.py`), y ese
+    contrato no cambia. Solo se usa para el efecto colateral de abajo."""
     user = db.execute(
         select(User).where(
             User.email == token_data["user"]["email"],
@@ -149,6 +156,14 @@ def get_current_user(
         )
 
     _reject_if_session_revoked(user, token_data)
+
+    # spec 074 (research.md § 8): efecto colateral puro para
+    # `OperationalLogMiddleware` — el actor ya está resuelto y validado aquí,
+    # así que el middleware no repite ninguna lógica de autenticación. No
+    # cambia qué devuelve esta función ni cuándo falla.
+    if req is not None:
+        req.state.actor_id = str(user.id)
+        req.state.actor_type = "staff"
 
     return user
 

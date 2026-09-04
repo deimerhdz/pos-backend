@@ -133,12 +133,20 @@ def list_orders(
 
 
 def create_order(
-    db: Session, data: OrderCreate, user_id: UUID | None, user=None
+    db: Session,
+    data: OrderCreate,
+    user_id: UUID | None,
+    user=None,
+    request_id: str | None = None,
 ) -> CustomerOrder:
     """`user` (spec 074) es solo para el log de auditoría: el `User` completo
     del cajero, del que salen su rol y su tenant — datos que `user_id` por sí
     solo no lleva. Opcional para no cambiar el contrato de ningún llamador
-    existente; el router sí lo pasa siempre."""
+    existente; el router sí lo pasa siempre.
+
+    `request_id` (spec 074, extensión de logging operativo — FR-021) es igual
+    de opcional y por el mismo motivo: correlaciona el evento de auditoría con
+    la entrada de log operativo de la misma petición HTTP."""
     # T013 (spec 028): 'hold_for_payment' es el modo "cobra primero, envía
     # después" del mostrador/mesero. El canal QR ya tiene su propio flujo
     # 'recibida' (vía /cart/submit, con OrderPaymentAttempt) — mezclarlo con
@@ -315,6 +323,7 @@ def create_order(
             "order_type": data.order_type.value,
             "hold_for_payment": bool(data.hold_for_payment),
         },
+        request_id=request_id,
     )
 
     return db.execute(

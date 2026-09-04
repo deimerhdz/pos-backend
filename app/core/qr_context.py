@@ -12,7 +12,7 @@ from datetime import timedelta
 from typing import Iterator
 from uuid import UUID
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -210,8 +210,21 @@ def open_session_context(token: str, *, touch: bool = True) -> Iterator[SessionC
 
 def get_session_context(
     x_session_token: str = Header(..., alias="x-session-token"),
+    req: Request = None,
 ) -> Iterator[SessionContext]:
     """Dependencia FastAPI para operaciones de carrito: autentica al comensal por
-    el token de sesión y entrega db tenant-scoped + sesión (deslizada)."""
+    el token de sesión y entrega db tenant-scoped + sesión (deslizada).
+
+    `req` (spec 074, extensión de logging operativo) lo inyecta FastAPI solo por
+    su anotación `Request`; su default `None` mantiene invocable esta función
+    fuera de FastAPI. Solo se usa para el efecto colateral de abajo — lo que
+    esta dependencia entrega a quien la usa es exactamente el mismo
+    `SessionContext` de siempre."""
     with open_session_context(x_session_token) as ctx:
+        # spec 074 (research.md § 8): el comensal ya está autenticado aquí;
+        # `OperationalLogMiddleware` lee esto de `request.state` al terminar la
+        # petición en vez de volver a validar el token de sesión.
+        if req is not None:
+            req.state.actor_id = str(ctx.participant.id)
+            req.state.actor_type = "comensal"
         yield ctx
