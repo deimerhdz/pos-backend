@@ -161,6 +161,12 @@ class SaleResponse(BaseModel):
     change_given: Decimal | None = None
     status: str
     sold_at: UtcDatetime
+    # spec 073 (FR-011a, A-70): el instante contra el que se evaluó la vigencia
+    # temporal de las promociones de esta venta — permite explicar, desde el
+    # detalle de la venta, un descuento de una promoción hoy vencida (SC-009).
+    # `null` en toda venta emitida antes de esta spec (sin backfill). Misma
+    # serialización que `sold_at`.
+    promotion_evaluated_at: UtcDatetime | None = None
     items: list[SaleItemResponse] = Field(default_factory=list)
     payments: list[PaymentResponse] = Field(default_factory=list)
     # Para reconstruir el ticket completo fuera del momento del cobro.

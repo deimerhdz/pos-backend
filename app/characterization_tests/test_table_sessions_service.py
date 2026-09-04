@@ -17,10 +17,12 @@ Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_table_sessions_service -v
 """
+from datetime import datetime, time, timezone
 from decimal import Decimal
 import unittest
 from unittest import mock
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -823,6 +825,80 @@ class TestTableSessionsService(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
         db.refresh(table)
         self.assertEqual(table.status, "libre")
+
+
+_BOGOTA = ZoneInfo("America/Bogota")
+
+
+def _utc_para_hora_local(y, mo, d, h, mi) -> datetime:
+    return datetime(y, mo, d, h, mi, tzinfo=_BOGOTA).astimezone(timezone.utc)
+
+
+class TestVigenciaCongeladaSesionMesa(unittest.TestCase):
+    """spec 073, US4 (FR-012a, A-70): en una cuenta de mesa con varias rondas,
+    la vigencia temporal se evalúa contra un único instante — el del pedido más
+    antiguo pendiente de cobro. La agrupación de líneas no cambia."""
+
+    def test_scenario5_dos_rondas_se_evaluan_juntas_contra_la_primera(self):
+        """Ronda 1 a las 19:59 (1 cono), ronda 2 a las 20:05 (1 cono), promo
+        del 50% llevando 2 vigente solo hasta las 20:00 → al cobrar la cuenta
+        completa, los dos conos completan el umbral de 2 y se evalúan contra las
+        19:59: el descuento se aplica."""
+        db, table, ts = TestTableSessionsService()._seed_bare_session()
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=Decimal("8000"))
+
+        promo = fx.make_promotion(
+            db, status="active", start_time=time(18, 0), end_time=time(20, 0),
+        )
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=2, variants=[variant],
+        )
+
+        ronda1 = fx.make_customer_order(
+            db, ts, status="abierta",
+            promotion_evaluated_at=_utc_para_hora_local(2026, 9, 2, 19, 59),
+        )
+        fx.make_order_item(db, ronda1, variant, estado_cocina="listo")
+        ronda2 = fx.make_customer_order(
+            db, ts, status="abierta",
+            promotion_evaluated_at=_utc_para_hora_local(2026, 9, 2, 20, 5),
+        )
+        fx.make_order_item(db, ronda2, variant, estado_cocina="listo")
+        db.commit()
+
+        resp = service.compute_bill(db, ts.id)
+        # 2 conos a 8000 = 16000, 50% del bloque de 2 = 8000 de descuento.
+        self.assertEqual(resp.total, Decimal("8000"))
+
+    def test_mezcla_congelado_y_anterior_manda_el_congelado_mas_antiguo(self):
+        """Cuenta que mezcla un pedido con instante congelado (19:59) y uno
+        anterior a la spec (`promotion_evaluated_at` NULL) → manda el instante
+        congelado más antiguo (FR-012a)."""
+        db, table, ts = TestTableSessionsService()._seed_bare_session()
+        category = fx.make_category(db)
+        product = fx.make_product(db, category=category)
+        variant = fx.make_variant(db, product=product, price=Decimal("8000"))
+        promo = fx.make_promotion(
+            db, status="active", start_time=time(18, 0), end_time=time(20, 0),
+        )
+        fx.add_rule_to_promotion(
+            db, promo, type="percent", value=Decimal("50"), min_qty=2, variants=[variant],
+        )
+
+        congelado = fx.make_customer_order(
+            db, ts, status="abierta",
+            promotion_evaluated_at=_utc_para_hora_local(2026, 9, 2, 19, 59),
+        )
+        fx.make_order_item(db, congelado, variant, estado_cocina="listo")
+        anterior = fx.make_customer_order(db, ts, status="abierta")  # sin instante
+        fx.make_order_item(db, anterior, variant, estado_cocina="listo")
+        db.commit()
+
+        resp = service.compute_bill(db, ts.id)
+        # Manda 19:59 (dentro de franja) → descuento del bloque de 2 aplicado.
+        self.assertEqual(resp.total, Decimal("8000"))
 
 
 if __name__ == "__main__":

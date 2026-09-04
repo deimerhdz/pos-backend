@@ -121,6 +121,14 @@ class Settings(BaseSettings):
     # entorno. Cuando está presente, solo se usa si además ENVIRONMENT == "prod"
     # (app/main.py) — nunca el DSN de producción en un entorno no productivo.
     SENTRY_DSN:Optional[str] = Field(default=None,env="SENTRY_DSN")
+    # Clave HMAC para el log de auditoría de órdenes (spec 074): transforma de forma
+    # no reversible el nombre del comensal y el comprobante de pago antes de
+    # enviarlos a Sentry Logs. Opcional aquí a propósito (nunca requerido, a
+    # diferencia de JWT_SECRET) para no romper el arranque de toda la app en un
+    # entorno que todavía no la tenga configurada; su ausencia se detecta y falla
+    # explícitamente en app/core/order_audit.py, no aquí. Dominio de seguridad
+    # propio: nunca cae a JWT_SECRET ni a ningún otro secreto existente.
+    AUDIT_HASH_SECRET:Optional[str] = Field(default=None,env="AUDIT_HASH_SECRET")
     REDIS_URL:str =  Field(env="REDIS_URL")
     # URL base del servicio de email; el envío hace POST a EMAIL_API_URL + /api/email/send.
     EMAIL_API_URL:str = Field(...,env="EMAIL_API_URL")

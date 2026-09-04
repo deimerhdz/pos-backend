@@ -174,7 +174,11 @@ def compute_bill(db: Session, table_session_id: UUID) -> SessionBillResponse:
             seen.add(it.participant_id)
             participant_ids.append(it.participant_id)
 
-    now = utc_now()
+    # spec 073 (FR-012a, A-70): un único instante para toda la cuenta de la
+    # mesa — el del pedido más antiguo pendiente de cobro (o la hora del cobro
+    # si ninguno lo tiene congelado). La agrupación de líneas por comensal no
+    # cambia.
+    instant = checkout.promotion_evaluation_instant(orders, now=utc_now())
     total = Decimal("0")
     split: list[SessionBillLine] = []
     for pid in participant_ids:
@@ -184,7 +188,7 @@ def compute_bill(db: Session, table_session_id: UUID) -> SessionBillResponse:
         raw_subtotal = sum((line.line_total for line in lines), Decimal("0"))
         # spec 063: el motor por conjunto agrupa el subconjunto de líneas
         # evaluadas juntas — aquí, por comensal (research.md D7).
-        promo_discount, _, _ = checkout.auto_discount(db, lines, now)
+        promo_discount, _, _ = checkout.auto_discount(db, lines, instant)
         subtotal = raw_subtotal - promo_discount
         total += subtotal
         split.append(SessionBillLine(
@@ -662,8 +666,11 @@ def _close_unified(
     for order in orders:
         lines.extend(checkout.order_sale_lines(db, order.id))
 
-    now = utc_now()
-    promo_discount, final_promotion_id, applied = checkout.auto_discount(db, lines, now)
+    # spec 073 (FR-012a, A-70): un único instante para la cuenta unificada — el
+    # del pedido más antiguo pendiente (o la hora del cobro si ninguno está
+    # congelado).
+    instant = checkout.promotion_evaluation_instant(orders, now=utc_now())
+    promo_discount, final_promotion_id, applied = checkout.auto_discount(db, lines, instant)
 
     sale = build_sale(
         db,
@@ -680,6 +687,7 @@ def _close_unified(
         customer_order_id=orders[0].id if len(orders) == 1 else None,
         promotion_id=final_promotion_id,
         applied_promotions=applied,
+        promotion_evaluated_at=instant,  # FR-011a
         invoice_prefix=invoice_prefix,
     )
     # FR-021: el agregado + la lista también en cada CustomerOrder de la sesión.
@@ -753,7 +761,10 @@ def _close_split(
     # con `_nombre_cuenta`; aquí faltaba el mismo cuidado.
     sin_asignar = f"Mesa {table.number}" if table is not None else "Sin asignar"
 
-    now = utc_now()
+    # spec 073 (FR-012a, A-70): un único instante para toda la cuenta dividida —
+    # el del pedido más antiguo pendiente (o la hora del cobro si ninguno está
+    # congelado). Cada comensal sigue evaluando sobre sus propias líneas.
+    instant = checkout.promotion_evaluation_instant(orders, now=utc_now())
     sales: list[Sale] = []
     for bloque in data.splits:
         lines = []
@@ -769,7 +780,7 @@ def _close_split(
         # snapshot de la Sale/Invoice (FR-021). El `CustomerOrder` no se toca en
         # split: una orden puede abarcar a varios comensales, su descuento por
         # orden no está definido — la Sale y la Invoice son las autoritativas.
-        _, final_promotion_id, applied = checkout.auto_discount(db, lines, now)
+        _, final_promotion_id, applied = checkout.auto_discount(db, lines, instant)
 
         sales.append(build_sale(
             db,
@@ -784,6 +795,7 @@ def _close_split(
             participant_id=bloque.participant_id,
             promotion_id=final_promotion_id,
             applied_promotions=applied,
+            promotion_evaluated_at=instant,  # FR-011a
             invoice_prefix=invoice_prefix,
         ))
     return sales

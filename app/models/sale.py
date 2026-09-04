@@ -81,6 +81,19 @@ class Sale(UUIDPrimaryKeyMixin, Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
 
+    # spec 073 (FR-011a, A-70): el instante que EFECTIVAMENTE se uso para evaluar
+    # la vigencia temporal de las promociones de esta venta -- la salida de
+    # `promotion_evaluation_instant(...)` al facturar (research.md D3/D7). No es
+    # necesariamente igual al `promotion_evaluated_at` del pedido: si la cuenta
+    # agrupo varias rondas, manda el instante del pedido mas antiguo (FR-012a).
+    # `NULL` en toda venta emitida antes de esta spec y en cualquier venta sin un
+    # pedido congelado detras (venta de mostrador directa) -- sin backfill,
+    # Principio VII / FR-011. Mismo criterio de `DateTime(timezone=True)` (aware
+    # UTC) que `customer_orders.promotion_evaluated_at` -- data-model.md.
+    promotion_evaluated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Efectivo recibido y cambio entregado (RF-029). Nullable: ventas antiguas
     # o sin desglose no lo registran.
     paid_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
