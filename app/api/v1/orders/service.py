@@ -24,6 +24,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.crud import get_or_404
+from app.core.order_audit import (
+    ActorType,
+    OrderAuditActor,
+    OrderAuditEventType,
+    record_order_audit_event,
+)
 from app.models.product_variant import ProductVariant
 from app.models.option import Option
 from app.catalog_engine import ChosenOption
@@ -126,7 +132,13 @@ def list_orders(
     return db.execute(q).scalars().all()
 
 
-def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> CustomerOrder:
+def create_order(
+    db: Session, data: OrderCreate, user_id: UUID | None, user=None
+) -> CustomerOrder:
+    """`user` (spec 074) es solo para el log de auditoría: el `User` completo
+    del cajero, del que salen su rol y su tenant — datos que `user_id` por sí
+    solo no lleva. Opcional para no cambiar el contrato de ningún llamador
+    existente; el router sí lo pasa siempre."""
     # T013 (spec 028): 'hold_for_payment' es el modo "cobra primero, envía
     # después" del mostrador/mesero. El canal QR ya tiene su propio flujo
     # 'recibida' (vía /cart/submit, con OrderPaymentAttempt) — mezclarlo con
@@ -286,6 +298,24 @@ def create_order(db: Session, data: OrderCreate, user_id: UUID | None) -> Custom
         db.rollback()
         logger.exception("Error creando comanda")
         raise
+
+    # spec 074 (FR-001/FR-010): la comanda manual ya está comprometida — el
+    # actor es el cajero/mesero que la creó, con su rol.
+    record_order_audit_event(
+        event_type=OrderAuditEventType.ORDER_CREATED,
+        order_id=order.id,
+        tenant_id=getattr(user, "tenant_id", None),
+        actor=OrderAuditActor(
+            type=ActorType.CAJERO,
+            id=str(user_id) if user_id is not None else None,
+            role=getattr(user, "role_name", None),
+        ),
+        details={
+            "channel": data.channel.value,
+            "order_type": data.order_type.value,
+            "hold_for_payment": bool(data.hold_for_payment),
+        },
+    )
 
     return db.execute(
         select(CustomerOrder).where(CustomerOrder.id == order.id)
