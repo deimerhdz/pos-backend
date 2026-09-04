@@ -426,6 +426,7 @@ def list_my_orders(db: Session, participant_id: UUID) -> list[CustomerOrder]:
 def cancel_my_order(
     db: Session, participant: SessionParticipant, order_id: UUID, motivo: str,
     tenant_id: int | None = None,
+    request_id: str | None = None,
 ) -> CustomerOrder:
     """Cancelación por el propio comensal. Solo hasta que cocina empieza:
 
@@ -437,7 +438,8 @@ def cancel_my_order(
     Delega la política de inventario en `checkout.cancel_order`, que ya sabe qué
     revertir y qué contar como pérdida — y que emite el evento de auditoría
     `order.cancelled` con actor `comensal` (spec 074), por lo que aquí solo se
-    le reenvía el `tenant_id` que el router ya resolvió."""
+    le reenvía el `tenant_id` que el router ya resolvió — y, desde la extensión
+    de logging operativo (FR-021), también el `request_id` de la petición."""
     from app.api.v1.orders import checkout
 
     order = db.execute(
@@ -465,7 +467,7 @@ def cancel_my_order(
 
     result = checkout.cancel_order(
         db, order_id, CancelIn(motivo=motivo), user=None, participant=participant,
-        tenant_id=tenant_id,
+        tenant_id=tenant_id, request_id=request_id,
     )
 
     # Si era el último pedido y el comensal ya se había ido, la mesa queda vacía:
@@ -494,6 +496,7 @@ def submit_cart(
     payment_method_id: UUID,
     receipt_file_url: str | None = None,
     tenant_id: int | None = None,
+    request_id: str | None = None,
 ) -> CustomerOrder:
     """Envía el carrito del comensal como pedido: crea una `CustomerOrder` en
     estado `recibida` con sus líneas **y** su primer `OrderPaymentAttempt`, en
@@ -689,6 +692,7 @@ def submit_cart(
                 participant.display_name or participant.display_label
             ),
         },
+        request_id=request_id,
     )
     # El pedido nace con su primer intento de pago en esta misma transacción
     # (spec 025), así que ese intento también se audita aquí: es el único
@@ -704,6 +708,7 @@ def submit_cart(
             "payment_method_name": method.name,
             "receipt_hash": hash_sensitive_or_none(receipt_file_url),
         },
+        request_id=request_id,
     )
 
     return db.execute(
@@ -778,6 +783,7 @@ def _load_own_order(db: Session, participant_id: UUID, order_id: UUID) -> Custom
 def create_payment_attempt(
     db: Session, participant_id: UUID, order_id: UUID, payment_method_id: UUID,
     tenant_id: int | None = None,
+    request_id: str | None = None,
 ) -> OrderPaymentAttempt:
     """Crea un intento de pago nuevo para una orden propia (FR-008 efectivo,
     FR-012 transferencia). FR-015a: no se permite si ya hay uno `pendiente`
@@ -828,6 +834,7 @@ def create_payment_attempt(
             "payment_method_name": method.name,
             "receipt_hash": hash_sensitive_or_none(attempt.receipt_file_url),
         },
+        request_id=request_id,
     )
     return attempt
 

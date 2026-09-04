@@ -90,7 +90,10 @@ def _tenant_of(user) -> int | None:
 
 
 def _record_order_confirmed(
-    order_id: UUID, user, trigger: Literal["manual", "automatic_payment"]
+    order_id: UUID,
+    user,
+    trigger: Literal["manual", "automatic_payment"],
+    request_id: str | None = None,
 ) -> None:
     """Emite `order.confirmed` — único punto de emisión para las dos rutas de
     la transición `recibida → abierta` (research.md § 4).
@@ -104,7 +107,11 @@ def _record_order_confirmed(
     Con `trigger="automatic_payment"` (la confirmación es efecto colateral de
     confirmar un pago) el actor es `sistema`, no el cajero: ese cajero queda
     registrado en el evento de pago que la disparó, correlacionable por el
-    mismo `order_id` (spec 074, US2)."""
+    mismo `order_id` (spec 074, US2).
+
+    `request_id` (extensión de logging operativo, FR-021) correlaciona este
+    evento con la entrada de log operativo de la misma petición HTTP; es
+    `None` cuando quien llama no lo tiene a mano."""
     actor = (
         OrderAuditActor(type=ActorType.SISTEMA)
         if trigger == "automatic_payment"
@@ -116,6 +123,7 @@ def _record_order_confirmed(
         tenant_id=_tenant_of(user),
         actor=actor,
         details={"trigger": trigger},
+        request_id=request_id,
     )
 
 
@@ -598,7 +606,9 @@ def _confirm_order_impl(db: Session, order_id: UUID, user: User) -> CustomerOrde
     return _deduct_and_open(db, order, user)
 
 
-def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
+def confirm_order(
+    db: Session, order_id: UUID, user: User, request_id: str | None = None
+) -> CustomerOrder:
     """`recibida` → `abierta`: el staff acepta el pedido que envió el comensal y
     **aquí es donde se compromete el inventario**.
 
@@ -627,14 +637,20 @@ def confirm_order(db: Session, order_id: UUID, user: User) -> CustomerOrder:
 
     # spec 074: ruta manual (de recuperación) — el actor es el cajero que la
     # ejecutó, no el sistema.
-    _record_order_confirmed(order_id, user, "manual")
+    _record_order_confirmed(order_id, user, "manual", request_id)
 
     return _reload_order(db, order_id)
 
 
 # ---------------------------------------------------------- Cobra y envía (T016)
 
-def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cashier: User) -> Sale:
+def checkout_and_send(
+    db: Session,
+    order_id: UUID,
+    data: CheckoutAndSendIn,
+    cashier: User,
+    request_id: str | None = None,
+) -> Sale:
     """Cobra y envía a cocina, en una sola transacción, una comanda creada con
     `hold_for_payment=True` (spec 028, T012/T013): el mostrador/mesero cobra
     **antes** de mandar el pedido a preparar, así que aquí se funden en un
@@ -751,8 +767,9 @@ def checkout_and_send(db: Session, order_id: UUID, data: CheckoutAndSendIn, cash
             "total_amount": float(sum(p.amount for p in data.payments)),
             "payment_count": len(data.payments),
         },
+        request_id=request_id,
     )
-    _record_order_confirmed(order_id_for_audit, cashier, "automatic_payment")
+    _record_order_confirmed(order_id_for_audit, cashier, "automatic_payment", request_id)
 
     return db.execute(
         select(Sale)
@@ -770,6 +787,7 @@ def cancel_order(
     user: User | None,
     participant: SessionParticipant | None = None,
     tenant_id: int | None = None,
+    request_id: str | None = None,
 ) -> CustomerOrder:
     """Cancela un pedido y ajusta el inventario **según lo que se alcanzó a
     consumir**, no como una reversa simétrica:
@@ -921,6 +939,7 @@ def cancel_order(
             "reason": data.motivo,
             "inventory_loss": bool(perdidos),
         },
+        request_id=request_id,
     )
 
     return _reload_order(db, order_id)
@@ -1089,7 +1108,11 @@ def list_payment_attempts(db: Session, order_id: UUID) -> list[OrderPaymentAttem
 
 
 def approve_payment_attempt(
-    db: Session, attempt_id: UUID, cash_shift_id: UUID, user: User
+    db: Session,
+    attempt_id: UUID,
+    cash_shift_id: UUID,
+    user: User,
+    request_id: str | None = None,
 ) -> OrderPaymentAttempt:
     """Aprueba un comprobante de transferencia (US2, Acceptance Scenario 4).
 
@@ -1192,17 +1215,22 @@ def approve_payment_attempt(
         tenant_id=_tenant_of(user),
         actor=_cajero_actor(user),
         details={"receipt_hash": hash_sensitive_or_none(receipt_file_url)},
+        request_id=request_id,
     )
     # La aprobación disparó la confirmación de la orden dentro de la misma
     # transacción: su actor es `sistema`, no este cajero (US2).
-    _record_order_confirmed(order_id, user, "automatic_payment")
+    _record_order_confirmed(order_id, user, "automatic_payment", request_id)
 
     db.refresh(attempt)
     return attempt
 
 
 def reject_payment_attempt(
-    db: Session, attempt_id: UUID, reason: str, user: User
+    db: Session,
+    attempt_id: UUID,
+    reason: str,
+    user: User,
+    request_id: str | None = None,
 ) -> OrderPaymentAttempt:
     """Rechaza un comprobante con motivo obligatorio (FR-014, US2 Acceptance
     Scenario 5-6). El motivo queda visible solo para cajero/back-office
@@ -1245,6 +1273,7 @@ def reject_payment_attempt(
             "receipt_hash": hash_sensitive_or_none(receipt_file_url),
             "rejection_reason": reason,
         },
+        request_id=request_id,
     )
 
     db.refresh(attempt)
@@ -1252,7 +1281,12 @@ def reject_payment_attempt(
 
 
 def confirm_cash_payment_attempt(
-    db: Session, attempt_id: UUID, amount_received: Decimal, cash_shift_id: UUID, user: User
+    db: Session,
+    attempt_id: UUID,
+    amount_received: Decimal,
+    cash_shift_id: UUID,
+    user: User,
+    request_id: str | None = None,
 ) -> OrderPaymentAttempt:
     """Confirma un pago en efectivo y calcula el cambio (FR-009/FR-010,
     US3). FR-010a: impide confirmar si `amount_received < total_orden`.
@@ -1364,10 +1398,11 @@ def confirm_cash_payment_attempt(
             "amount_received": float(amount_received),
             "change": float(amount_received - total),
         },
+        request_id=request_id,
     )
     # Confirmar el efectivo disparó la confirmación de la orden en la misma
     # transacción: ese evento lleva actor `sistema`, no este cajero (US2).
-    _record_order_confirmed(order_id, user, "automatic_payment")
+    _record_order_confirmed(order_id, user, "automatic_payment", request_id)
 
     db.refresh(attempt)
     return attempt
