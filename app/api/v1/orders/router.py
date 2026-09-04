@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core import events
 from app.core.db import get_db, get_tenant
 from app.core.crud import get_or_404
+from app.core.error_middleware import current_request_id
 from app.core.http_cache import json_or_304
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User, Tenant
@@ -185,13 +186,14 @@ def issue_table_qr_token(
 )
 def confirm_order(
     order_id: UUID,
+    request: Request = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     tenant: Tenant = Depends(get_tenant),
 ):
     """`recibida` → `abierta`. Es el único punto donde el pedido del comensal
     compromete stock; hasta aquí no había tocado inventario."""
-    checkout.confirm_order(db, order_id, user)
+    checkout.confirm_order(db, order_id, user, request_id=current_request_id(request))
     order = _load_order(db, order_id)
     events.order_confirmed(
         tenant.id, order_id=order.id, table_session_id=order.table_session_id
@@ -218,10 +220,13 @@ def list_payment_attempts(
     summary="Aprobar un comprobante de transferencia (cajero)",
 )
 def approve_payment_attempt(
-    attempt_id: UUID, body: PaymentAttemptApproveIn,
+    attempt_id: UUID, body: PaymentAttemptApproveIn, request: Request = None,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ):
-    return checkout.approve_payment_attempt(db, attempt_id, body.cash_shift_id, user)
+    return checkout.approve_payment_attempt(
+        db, attempt_id, body.cash_shift_id, user,
+        request_id=current_request_id(request),
+    )
 
 
 @router.post(
@@ -230,10 +235,12 @@ def approve_payment_attempt(
     summary="Rechazar un comprobante de transferencia con motivo (cajero)",
 )
 def reject_payment_attempt(
-    attempt_id: UUID, body: PaymentAttemptRejectIn,
+    attempt_id: UUID, body: PaymentAttemptRejectIn, request: Request = None,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ):
-    return checkout.reject_payment_attempt(db, attempt_id, body.reason, user)
+    return checkout.reject_payment_attempt(
+        db, attempt_id, body.reason, user, request_id=current_request_id(request)
+    )
 
 
 @router.post(
@@ -242,11 +249,12 @@ def reject_payment_attempt(
     summary="Confirmar un pago en efectivo y calcular el cambio (cajero)",
 )
 def confirm_cash_payment_attempt(
-    attempt_id: UUID, body: PaymentAttemptConfirmCashIn,
+    attempt_id: UUID, body: PaymentAttemptConfirmCashIn, request: Request = None,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ):
     return checkout.confirm_cash_payment_attempt(
-        db, attempt_id, body.amount_received, body.cash_shift_id, user
+        db, attempt_id, body.amount_received, body.cash_shift_id, user,
+        request_id=current_request_id(request),
     )
 
 
@@ -457,14 +465,16 @@ def pay_order(
     summary="Cobrar y enviar a cocina en un solo paso (comanda 'hold_for_payment')",
 )
 def checkout_and_send(
-    order_id: UUID, body: CheckoutAndSendIn,
+    order_id: UUID, body: CheckoutAndSendIn, request: Request = None,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
     tenant: Tenant = Depends(get_tenant),
 ):
     """Solo para comandas creadas con `hold_for_payment=True` (status
     'recibida'): cobra la orden y, en la misma transacción, la envía a cocina
     (descuenta inventario) — spec 028, T016."""
-    sale = checkout.checkout_and_send(db, order_id, body, user)
+    sale = checkout.checkout_and_send(
+        db, order_id, body, user, request_id=current_request_id(request)
+    )
     order = db.get(CustomerOrder, order_id)
     events.payment_completed(
         tenant.id,
@@ -488,13 +498,16 @@ def checkout_and_send(
     summary="Cancelar pedido (reversa parcial de inventario + auditoría)",
 )
 def cancel_order(
-    order_id: UUID, body: CancelIn,
+    order_id: UUID, body: CancelIn, request: Request = None,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
     tenant: Tenant = Depends(get_tenant),
 ):
     """El staff puede cancelar en cualquier estado no terminal. Solo vuelve al stock
     lo que cocina no llegó a preparar; lo ya consumido se registra como pérdida."""
-    order = checkout.cancel_order(db, order_id, body, user, tenant_id=tenant.id)
+    order = checkout.cancel_order(
+        db, order_id, body, user, tenant_id=tenant.id,
+        request_id=current_request_id(request),
+    )
     events.order_cancelled(
         tenant.id, order_id=order.id, table_session_id=order.table_session_id,
         motivo=body.motivo,
@@ -537,6 +550,7 @@ def release_table(
 @router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED, summary="Crear comanda (staff)")
 def create_order(
     body: OrderCreate,
+    request: Request = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -546,7 +560,9 @@ def create_order(
     Antes era anónima (solo header `x-tenant-host`, falsificable) y además no
     descontaba inventario, así que una comanda creada aquí y cobrada con
     `pay_order` nunca descontaba stock."""
-    order = service.create_order(db, body, user_id=user.id, user=user)
+    order = service.create_order(
+        db, body, user_id=user.id, user=user, request_id=current_request_id(request)
+    )
     return _load_order(db, order.id)
 
 

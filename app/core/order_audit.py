@@ -112,6 +112,7 @@ def record_order_audit_event(
     tenant_id: int,
     actor: OrderAuditActor,
     details: Optional[dict] = None,
+    request_id: Optional[str] = None,
 ) -> None:
     """Emite un evento de auditoría de orden hacia Sentry Logs.
 
@@ -120,6 +121,15 @@ def record_order_audit_event(
     ni revierte la transición de negocio que audita (FR-011): cualquier falla
     al construir o enviar el evento se captura aquí, nunca se propaga hacia
     quien llama.
+
+    `request_id` (spec 074, extensión de logging operativo — FR-021) es el
+    identificador de la petición HTTP que originó la transición, el mismo que
+    lleva la entrada de log operativo que emite `OperationalLogMiddleware`
+    (`app/core/error_middleware.py`) para esa misma petición. Correlaciona
+    ambas entidades en Sentry sin que ninguna reemplace a la otra (FR-020).
+    Opcional: es `None` cuando el evento no nace de una petición HTTP cubierta
+    por ese middleware (p. ej. una tarea de fondo), y en ese caso se omite del
+    payload en vez de viajar como `None`.
     """
     try:
         if settings.ENVIRONMENT != "prod":
@@ -136,6 +146,8 @@ def record_order_audit_event(
             attributes["actor_id"] = str(actor.id)
         if actor.role is not None:
             attributes["actor_role"] = actor.role
+        if request_id is not None:
+            attributes["request_id"] = str(request_id)
 
         for key, value in (details or {}).items():
             if value is not None:

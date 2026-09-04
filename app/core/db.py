@@ -202,6 +202,12 @@ def get_tenant(req: Request) -> Tenant:
     if tenant is None:
         raise HTTPException(status_code=404, detail=f"Tenant not found for host '{host_without_port}'")
 
+    # spec 074 (extensión de logging operativo, research.md § 8): efecto
+    # colateral puro para `OperationalLogMiddleware`, que lee `request.state`
+    # cuando la petición ya terminó en vez de repetir aquí la resolución del
+    # tenant. No cambia qué devuelve esta función, ni cuándo falla, ni su firma.
+    req.state.tenant_id = tenant.id
+
     return tenant
 
 def resolve_tenant_by_id(tenant_id: int) -> Tenant:

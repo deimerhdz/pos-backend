@@ -7,7 +7,11 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.core.error_middleware import RequestIdMiddleware, register_error_handlers
+from app.core.error_middleware import (
+    OperationalLogMiddleware,
+    RequestIdMiddleware,
+    register_error_handlers,
+)
 from app.core.redis import token_blocklist
 from app.core.event_bus import event_bus
 from app.core.scheduler import start_scheduler
@@ -115,6 +119,16 @@ def create_app()->FastAPI:
     )
     app.add_middleware(RequestIdMiddleware, path_prefix=SUPER_ADMIN_ERROR_PREFIX)
     register_error_handlers(app, path_prefix=SUPER_ADMIN_ERROR_PREFIX)
+    # spec 074 (FR-015–FR-021): log operativo de toda petición mutativa fuera
+    # de super-admin. Sin `path_prefix`: el filtrado de alcance (método y
+    # prefijo excluido) vive dentro de la clase. Se agrega de último a
+    # propósito — Starlette monta el último agregado como el más externo —, así
+    # la duración que mide cubre la petición completa (CORS incluido) y ninguna
+    # respuesta se le escapa, la produzca el router o un middleware interno.
+    # No colisiona con `RequestIdMiddleware`: sus alcances son mutuamente
+    # excluyentes por ruta (ese solo actúa dentro de super-admin, este solo
+    # fuera), así que ninguna petición recibe dos `request_id` distintos.
+    app.add_middleware(OperationalLogMiddleware)
 
     initialize_database()
 
