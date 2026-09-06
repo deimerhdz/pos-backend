@@ -14,7 +14,7 @@ class InvitationCreate(BaseModel):
     )
     role: RoleName = Field(
         ...,
-        description="Rol que tendrá la cuenta al consumir la invitación: ADMIN o CASHIER.",
+        description="Rol que tendrá la cuenta al consumir la invitación: ADMIN, CASHIER o MESERO.",
         examples=["CASHIER"],
     )
 

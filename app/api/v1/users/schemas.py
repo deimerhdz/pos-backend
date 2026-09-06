@@ -9,12 +9,13 @@ class RoleName(str, Enum):
     """Roles asignables por un admin de tenant (excluye SUPER_ADMIN)."""
     ADMIN = "ADMIN"
     CASHIER = "CASHIER"
+    MESERO = "MESERO"
 
 
 class UserRoleUpdate(BaseModel):
     role: RoleName = Field(
         ...,
-        description="Nuevo rol del usuario: ADMIN o CASHIER.",
+        description="Nuevo rol del usuario: ADMIN, CASHIER o MESERO.",
         examples=["ADMIN"],
     )
 

@@ -55,6 +55,10 @@ def _load_order(db: Session, order_id: UUID) -> CustomerOrder:
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
     order.paid = service.order_has_sale(db, order.id)  # spec 029, D2
+    if order.user_id is not None:
+        # spec 076, Historia 4
+        names = service.staff_user_names(db, [order.user_id])
+        order.staff_user_name = names.get(order.user_id)
     return order
 
 
@@ -585,8 +589,13 @@ def list_orders(
     orders = service.list_orders(db, status_filter, active_sessions_only)
     # spec 029, D2: una sola consulta para todo el listado, no una por pedido.
     paid_ids = service.paid_order_ids(db, [o.id for o in orders])
+    # spec 076, Historia 4: mismo patrón en bloque para el nombre del usuario
+    # de staff que creó cada pedido (Cajero o Mesero, sin distinción de rol).
+    staff_ids = [o.user_id for o in orders if o.user_id is not None]
+    staff_names = service.staff_user_names(db, staff_ids)
     for o in orders:
         o.paid = o.id in paid_ids
+        o.staff_user_name = staff_names.get(o.user_id) if o.user_id is not None else None
     return json_or_304(request, _ORDERS_ADAPTER, orders)
 
 

@@ -72,7 +72,7 @@ Levanta:
 - **redis** → `:6379`
 - **worker** → Celery
 
-En el **primer arranque**, la app crea el schema `shared`, siembra los roles (`SUPER_ADMIN`, `ADMIN`, `CASHIER`) y el super admin global (según las variables `SUPER_ADMIN_*`).
+En el **primer arranque**, la app crea el schema `shared`, siembra los roles (`SUPER_ADMIN`, `ADMIN`, `CASHIER`, `MESERO`) y el super admin global (según las variables `SUPER_ADMIN_*`).
 
 Ver logs:
 

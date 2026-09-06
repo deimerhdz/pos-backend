@@ -220,6 +220,14 @@ class OrderResponse(BaseModel):
     # "pagada" en los caminos QR/mostrador vigentes. El router lo asigna
     # antes de serializar (`orders.service.order_has_sale`/`paid_order_ids`).
     paid: bool = False
+    # Spec 076, Historia 4: nombre para mostrar del usuario de staff (Cajero o
+    # Mesero, sin distinción de rol) que creó este pedido — computado, no una
+    # columna nueva: resuelve `CustomerOrder.user_id` (ya existente) contra
+    # `shared.users`. `None` si el pedido lo envió el cliente por QR
+    # (`user_id` nulo) o si `user_id` no resuelve a ningún usuario. El router
+    # lo asigna antes de serializar (`orders.service.staff_user_names`), mismo
+    # patrón que `paid`.
+    staff_user_name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
