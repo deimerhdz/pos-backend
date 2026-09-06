@@ -40,6 +40,7 @@ from app.models.order_item import OrderItem, OrderItemOption
 from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.sale import Sale
 from app.models.table_session import TableSession
+from app.core.models import User
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.orders.consolidation import get_or_create_table_session_id
 from app.api.v1.orders.consumption import deduct_order_items
@@ -92,6 +93,21 @@ def paid_order_ids(db: Session, order_ids: list[UUID]) -> set[UUID]:
         select(Sale.customer_order_id).where(Sale.customer_order_id.in_(order_ids))
     ).scalars().all()
     return set(rows)
+
+
+def staff_user_names(db: Session, user_ids: list[UUID]) -> dict[UUID, str]:
+    """Nombre para mostrar de cada usuario de staff (Cajero o Mesero, sin
+    distinción de rol) que aparezca como `CustomerOrder.user_id` — spec 076,
+    Historia 4. Versión en bloque (mismo patrón que `paid_order_ids`, spec
+    029 D2) para no hacer N consultas al serializar un listado de pedidos.
+    No incluye ningún filtro por rol: el pedido de un Cajero se resuelve
+    exactamente igual que el de un Mesero (spec 076, Clarifications)."""
+    if not user_ids:
+        return {}
+    rows = db.execute(
+        select(User.id, User.name).where(User.id.in_(user_ids))
+    ).all()
+    return {row[0]: row[1] for row in rows}
 
 
 def list_orders(
