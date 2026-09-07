@@ -267,11 +267,22 @@ def payment_completed(
     tenant_id: int, *, sale_id, table_session_id, total, customer_name,
     billing_mode, invoice=None,
 ) -> str | None:
-    """Una venta emitida. En cobro dividido llega una por comensal."""
+    """Una venta emitida. En cobro dividido llega una por comensal.
+
+    Spec 077 (RF-005): además del canal `staff` de siempre, se agrega
+    `session_channel(table_session_id)` cuando hay mesa asociada — el
+    comensal anónimo con el menú QR abierto ya está suscrito a ese canal
+    (`connectDiner`), pero hasta ahora este evento nunca se lo enrutaba.
+    Ventas de mostrador sin mesa (`table_session_id is None`) siguen sin
+    llegar a ningún comensal — no aplica, no hay comensal QR involucrado.
+    """
+    channels = [CH_STAFF]
+    if table_session_id is not None:
+        channels.append(session_channel(table_session_id))
     return publish(
         tenant_id,
         type="payment.completed",
-        channels=[CH_STAFF],
+        channels=channels,
         payload={
             "sale_id": sale_id, "table_session_id": table_session_id, "total": total,
             "customer_name": customer_name, "billing_mode": billing_mode,

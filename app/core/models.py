@@ -90,6 +90,14 @@ class Tenant(Base,TimestampMixin):
         "timezone", String(255), nullable=False, server_default="America/Bogota"
     )
 
+    # Retención (días) de las notificaciones persistidas del tenant (spec 077,
+    # RNF-005). Sin pantalla de edición: mismo mecanismo manual que `timezone`.
+    # `purge_at` de cada `NotificationEvent` se calcula con el valor vigente al
+    # crearla, no se recalcula si esta columna cambia después.
+    notification_retention_days:Mapped[int] = mapped_column(
+        "notification_retention_days", Integer, nullable=False, server_default="90"
+    )
+
     users: Mapped[list["User"]] = relationship(
             back_populates="tenant",
             cascade="all, delete-orphan"

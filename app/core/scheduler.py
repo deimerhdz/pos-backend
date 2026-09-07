@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 _LOCK_KEY = "lock:sweep_table_sessions"
 _PROMO_LOCK_KEY = "lock:expire_promotions"
+_NOTIFICATIONS_PURGE_LOCK_KEY = "lock:purge_notifications"
 
 
 def _abandonadas_sin_pedir(db, now: datetime) -> list:
@@ -259,6 +260,22 @@ async def _run_expire_promotions_with_lock() -> None:
     await anyio.to_thread.run_sync(expire_promotions)
 
 
+async def _run_purge_notifications_with_lock() -> None:
+    """Igual patrón que `_run_expire_promotions_with_lock` (spec 077, RNF-005)."""
+    try:
+        got = await redis.set(_NOTIFICATIONS_PURGE_LOCK_KEY, "1", ex=3600, nx=True)
+    except Exception:
+        logger.warning("Redis no disponible; se omite la purga de notificaciones", exc_info=True)
+        return
+    if not got:
+        return  # otro worker lo está haciendo
+
+    import anyio
+    from app.core.notifications.purge import purge_expired_notifications
+
+    await anyio.to_thread.run_sync(purge_expired_notifications)
+
+
 async def _run_with_lock() -> None:
     """Un solo worker ejecuta el barrido por ciclo. El TTL del lock es la mitad
     del intervalo: si el proceso muere a medias, el siguiente ciclo lo retoma."""
@@ -305,10 +322,18 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
     )
+    scheduler.add_job(
+        _run_purge_notifications_with_lock,
+        CronTrigger(hour=0, minute=30),
+        id="purge_notifications",
+        replace_existing=True,
+        max_instances=1,
+    )
     scheduler.start()
     logger.info(
         "Barrido de sesiones activo: cada %d min, cierra las de más de %d h",
         settings.SESSION_SWEEP_INTERVAL_MINUTES, settings.TABLE_SESSION_MAX_HOURS,
     )
     logger.info("Expiración de promociones activa: a medianoche")
+    logger.info("Purga de notificaciones activa: a medianoche y media")
     return scheduler

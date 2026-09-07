@@ -51,3 +51,8 @@ from .invoice import Invoice, InvoiceCounter
 
 # Planes de suscripción (Super Admin)
 from .plan import Plan
+
+# Notificaciones en tiempo real (spec 077)
+from .notification_event import NotificationEvent
+from .push_subscription import PushSubscription
+from .notification_channel_pref import NotificationChannelPreference

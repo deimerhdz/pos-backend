@@ -86,3 +86,17 @@ vine==5.1.0
 watchfiles==1.2.0
 wcwidth==0.8.1
 websockets==16.0
+
+# Web Push (notificaciones en tiempo real, spec 077 — research.md §5)
+pywebpush==2.5.0
+py-vapid==1.9.4
+http_ece==1.2.1
+aiohttp==3.14.3
+aiohappyeyeballs==2.7.1
+aiosignal==1.4.0
+attrs==26.1.0
+frozenlist==1.8.0
+multidict==6.7.1
+propcache==0.5.2
+yarl==1.24.5
+uvloop==0.22.1
