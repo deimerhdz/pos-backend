@@ -14,6 +14,7 @@ from app.core.http_cache import json_or_304
 from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import User, Tenant
 from app.core.plan_limits import enforce_plan_limit
+from app.core.pagination import Page, paginate
 from app.core.qr_token import mint_qr_token
 from app.models.dining_table import DiningTable
 from app.models.customer_order import CustomerOrder
@@ -64,9 +65,28 @@ def _load_order(db: Session, order_id: UUID) -> CustomerOrder:
 
 
 # ============================ Mesas (staff) ============================
-@router.get("/tables", response_model=list[TableResponse], summary="Listar mesas")
-def list_tables(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    return db.execute(select(DiningTable).order_by(DiningTable.number)).scalars().all()
+@router.get(
+    "/tables",
+    response_model=list[TableResponse] | Page[TableResponse],
+    summary="Listar mesas",
+)
+def list_tables(
+    page: int | None = Query(None, ge=1),
+    size: int | None = Query(None, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Sin `page` ni `size`: array `ORDER BY number` idéntico a hoy (FR-023/
+    FR-025 — Terminal, Dashboard, detalle de orden y hoja de QR lo consumen
+    completo). Con `page` y/o `size`: `Page[TableResponse]` con el mismo orden
+    (`number` es `UNIQUE`, sin desempate) y el clamp de página fuera de rango
+    de spec 079 (contracts/tables-list-api.md)."""
+    if page is None and size is None:
+        return db.execute(select(DiningTable).order_by(DiningTable.number)).scalars().all()
+    stmt = select(DiningTable).order_by(DiningTable.number.asc())
+    effective_size = size or 20
+    effective_page = service.clamp_page(db, stmt, page or 1, effective_size)
+    return paginate(db, stmt, effective_page, effective_size)
 
 
 @router.post("/tables", response_model=TableResponse, status_code=status.HTTP_201_CREATED, summary="Crear mesa (genera qr_token)")
