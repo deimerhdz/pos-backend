@@ -28,7 +28,7 @@ from app.api.v1.orders import tables_advanced
 from app.api.v1.sales.schemas import SaleResponse
 from app.api.v1.orders.schemas import (
     TableCreate, TableUpdate, TableResponse, TableQrTokenResponse,
-    OrderCreate, OrderResponse, OrderItemIn,
+    OrderCreate, OrderResponse, OrderItemIn, OrderType,
     OrderItemResponse, KitchenTransitionIn, VoidItemIn,
     BlockIn, CancelIn, CheckoutAndSendIn, PayIn, BillResponse,
     CheckoutPreviewResponse, DraftPreviewIn,
@@ -607,33 +607,67 @@ def create_order(
     return _load_order(db, order.id)
 
 
-@router.get("", response_model=list[OrderResponse], summary="Listar comandas (staff)")
-def list_orders(
-    request: Request,
-    status_filter: str | None = Query(None, alias="status"),
-    active_sessions_only: bool = Query(False),
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
-    """La terminal sondea esto, así que responde con `ETag`: mientras nada
-    cambie el navegador revalida y recibe un 304, sin cuerpo ni re-render.
-
-    `active_sessions_only` (spec 029, hotfix): la Terminal de Mesas lo manda
-    siempre en `True` para no volver a mezclar pedidos ya cobrados de una
-    visita anterior con la sesión activa de la misma mesa física (ver
-    `service.list_orders`). Por defecto `False` conserva el comportamiento
-    actual exacto para cualquier otro consumidor de este endpoint."""
-    orders = service.list_orders(db, status_filter, active_sessions_only)
-    # spec 029, D2: una sola consulta para todo el listado, no una por pedido.
+def _decorate_orders(db: Session, orders: list[CustomerOrder]) -> None:
+    """Asigna `paid` y `staff_user_name` en bloque sobre `orders` (spec 029 D2,
+    spec 076 Historia 4) — una consulta para todo el lote, no una por pedido."""
     paid_ids = service.paid_order_ids(db, [o.id for o in orders])
-    # spec 076, Historia 4: mismo patrón en bloque para el nombre del usuario
-    # de staff que creó cada pedido (Cajero o Mesero, sin distinción de rol).
     staff_ids = [o.user_id for o in orders if o.user_id is not None]
     staff_names = service.staff_user_names(db, staff_ids)
     for o in orders:
         o.paid = o.id in paid_ids
         o.staff_user_name = staff_names.get(o.user_id) if o.user_id is not None else None
-    return json_or_304(request, _ORDERS_ADAPTER, orders)
+
+
+@router.get(
+    "",
+    response_model=list[OrderResponse] | Page[OrderResponse],
+    summary="Listar comandas (staff)",
+)
+def list_orders(
+    request: Request,
+    status_filter: str | None = Query(None, alias="status"),
+    order_type: OrderType | None = Query(None),
+    active_sessions_only: bool = Query(False),
+    page: int | None = Query(None, ge=1),
+    size: int | None = Query(None, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Dos ramas (spec 079, contracts/orders-list-api.md):
+
+    **Sin `page` ni `size`** — camino de hoy, byte a byte: `service.list_orders`
+    con `ORDER BY created_at DESC`, `status` **crudo**, `paid`/`staff_user_name`
+    en bloque, respuesta vía `json_or_304` (`ETag` + `304`). La terminal sondea
+    esto, así que el `ETag` le ahorra el re-render; `active_sessions_only` (spec
+    029) mantiene su semántica.
+
+    **Con `page` y/o `size`** — pantalla "Órdenes": `service.list_orders_query`
+    (orden `created_at DESC, id DESC`, `status` como "estado que ve la persona",
+    `order_type` opcional) paginado con `paginate` + `clamp_page`; `paid` y
+    `staff_user_name` solo sobre los `items` de la página; **sin `ETag`** (la
+    pantalla se recarga a mano); `active_sessions_only` se ignora (ningún
+    consumidor legítimo lo combina con paginación)."""
+    if page is None and size is None:
+        orders = service.list_orders(db, status_filter, active_sessions_only)
+        _decorate_orders(db, orders)
+        return json_or_304(request, _ORDERS_ADAPTER, orders)
+
+    # Rama paginada: `status` se valida contra el enum cerrado de 6 valores
+    # (5 + ausente) y se interpreta como "estado que ve la persona" (FR-016).
+    if status_filter is not None and status_filter not in service.ESTADOS_MOSTRADOS_ORDENES:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"status debe ser uno de {', '.join(service.ESTADOS_MOSTRADOS_ORDENES)}.",
+        )
+    stmt = service.list_orders_query(
+        status_mostrado=status_filter,
+        order_type=order_type.value if order_type is not None else None,
+    )
+    effective_size = size or 20
+    effective_page = service.clamp_page(db, stmt, page or 1, effective_size)
+    result = paginate(db, stmt, effective_page, effective_size)
+    _decorate_orders(db, result["items"])
+    return result
 
 
 @router.get("/{order_id}", response_model=OrderResponse, summary="Obtener una comanda")
