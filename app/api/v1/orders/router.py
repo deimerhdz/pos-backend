@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core import events
 from app.core.db import get_db, get_tenant
+from app.core.notifications.dispatch import notify_payment_completed
 from app.core.crud import get_or_404
 from app.core.error_middleware import current_request_id
 from app.core.http_cache import json_or_304
@@ -459,6 +460,14 @@ def pay_order(
         # Cobro pedido a pedido desde el mostrador, no cierre de sesión de mesa.
         billing_mode="counter",
     )
+    notify_payment_completed(
+        db, tenant.id,
+        sale_id=sale.id,
+        table_session_id=order.table_session_id if order else None,
+        total=sale.total,
+        customer_name=order.customer_name if order else None,
+        billing_mode="counter",
+    )
     return sale
 
 
@@ -482,6 +491,14 @@ def checkout_and_send(
     order = db.get(CustomerOrder, order_id)
     events.payment_completed(
         tenant.id,
+        sale_id=sale.id,
+        table_session_id=order.table_session_id if order else None,
+        total=sale.total,
+        customer_name=order.customer_name if order else None,
+        billing_mode="counter",
+    )
+    notify_payment_completed(
+        db, tenant.id,
         sale_id=sale.id,
         table_session_id=order.table_session_id if order else None,
         total=sale.total,

@@ -21,6 +21,7 @@ Ejecutar solo este módulo:
 """
 from decimal import Decimal
 import unittest
+from unittest import mock
 
 from fastapi import HTTPException
 
@@ -229,9 +230,13 @@ class TestTableSessionsRouter(unittest.TestCase):
             "payments": [self._pago(s["method"].id)],
         })
 
-        resp = ts_router.close_session(
-            s["ts"].id, data, db=s["db"], user=s["user"], tenant=s["tenant"],
-        )
+        # `notify_payment_completed` (spec 077) consulta `shared.tenants`,
+        # tabla que este fixture no incluye (fuera de su alcance) — se
+        # parchea para no interferir con lo que esta prueba congela.
+        with mock.patch.object(service, "notify_payment_completed"):
+            resp = ts_router.close_session(
+                s["ts"].id, data, db=s["db"], user=s["user"], tenant=s["tenant"],
+            )
 
         self.assertIsInstance(resp, CloseSessionResponse)
         self.assertEqual(resp.table_session.status, "closed")

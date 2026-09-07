@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core import events
 from app.core.crud import get_or_404
 from app.core.models import User
+from app.core.notifications.dispatch import notify_payment_completed
 from app.core.timezone import utc_now
 from app.models.customer_order import CustomerOrder
 from app.models.dining_table import DiningTable
@@ -308,6 +309,10 @@ def close_session(
     # aquí nada de esto era definitivo.
     if tenant_id is not None:
         for sale in sales:
+            invoice = (
+                {"prefix": sale.invoice.prefix, "number": sale.invoice.number}
+                if getattr(sale, "invoice", None) else None
+            )
             events.payment_completed(
                 tenant_id,
                 sale_id=sale.id,
@@ -315,10 +320,16 @@ def close_session(
                 total=sale.total,
                 customer_name=getattr(sale, "customer_name", None),
                 billing_mode=data.billing_mode.value,
-                invoice=(
-                    {"prefix": sale.invoice.prefix, "number": sale.invoice.number}
-                    if getattr(sale, "invoice", None) else None
-                ),
+                invoice=invoice,
+            )
+            notify_payment_completed(
+                db, tenant_id,
+                sale_id=sale.id,
+                table_session_id=ts.id,
+                total=sale.total,
+                customer_name=getattr(sale, "customer_name", None),
+                billing_mode=data.billing_mode.value,
+                invoice=invoice,
             )
         events.session_closed(
             tenant_id,
