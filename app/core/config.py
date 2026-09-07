@@ -110,6 +110,18 @@ class Settings(BaseSettings):
     # comprometida, así que se acota fuerte y se falla en abierto.
     REALTIME_PUBLISH_TIMEOUT_SECONDS:float = Field(default=0.25,env="REALTIME_PUBLISH_TIMEOUT_SECONDS")
 
+    # ------------- Notificaciones: canal push del navegador (spec 077) -------------
+    # Par de claves VAPID (RFC 8292) que identifican a esta aplicación ante los
+    # push services (FCM/Mozilla/etc.). Se generan una sola vez por despliegue
+    # (p. ej. `vapid --gen`, que ya trae `py-vapid`, dependencia de `pywebpush`)
+    # y son las mismas para todos los tenants — es una credencial de la
+    # aplicación, no del tenant (contracts/notifications-api.md).
+    VAPID_PUBLIC_KEY:Optional[str] = Field(default=None,env="VAPID_PUBLIC_KEY")
+    VAPID_PRIVATE_KEY:Optional[str] = Field(default=None,env="VAPID_PRIVATE_KEY")
+    # `sub` del claim VAPID (RFC 8292): un `mailto:` o URL de contacto que el
+    # push service puede usar si necesita alcanzar al emisor.
+    VAPID_SUBJECT:Optional[str] = Field(default=None,env="VAPID_SUBJECT")
+
     PROJECT_NAME:str ="pos"
     # Ambiente de ejecución: "prod" o "dev". Afecta, p. ej., la URL de login del correo.
     ENVIRONMENT:str = Field(default="dev",env="ENVIRONMENT")

@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.core import events
 from app.core.error_middleware import current_request_id
+from app.core.notifications.dispatch import notify_order_created
 from app.core.http_cache import json_or_304
 from app.core.qr_context import (
     open_qr_context,
@@ -156,6 +157,7 @@ async def submit_cart(
     )
     # Después del COMMIT del servicio, nunca dentro: si la transacción fallara no
     # puede haber salido un evento anunciando un pedido que no existe.
+    _total = sum((i.unit_price * i.quantity for i in order.items), start=Decimal(0))
     events.order_created(
         ctx.tenant.id,
         order_id=order.id,
@@ -164,7 +166,19 @@ async def submit_cart(
         table_number=_table_number(ctx.db, order.dining_table_id),
         customer_name=order.customer_name,
         items_count=len(order.items),
-        total=sum((i.unit_price * i.quantity for i in order.items), start=Decimal(0)),
+        total=_total,
+    )
+    # Spec 077 (RF-002): además del evento de sincronización de UI de arriba,
+    # una notificación persistente y multicanal para el staff.
+    notify_order_created(
+        ctx.db, ctx.tenant.id,
+        order_id=order.id,
+        table_session_id=order.table_session_id,
+        dining_table_id=order.dining_table_id,
+        table_number=_table_number(ctx.db, order.dining_table_id),
+        customer_name=order.customer_name,
+        items_count=len(order.items),
+        total=_total,
     )
     return order
 

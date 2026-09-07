@@ -247,7 +247,11 @@ class TestCartRouter(unittest.TestCase):
                 select(Cart.id).where(Cart.participant_id == participant.id)
             ).scalar_one_or_none()
 
+        # `notify_order_created` (spec 077) consulta `shared.tenants`, tabla
+        # que este fixture no incluye (fuera de su alcance) — se parchea para
+        # no interferir con lo que esta prueba congela.
         with mock.patch("app.core.events.order_created", side_effect=_spy) as spy, \
+             mock.patch.object(cart_router, "notify_order_created"), \
              mock.patch.object(settings, "RATE_LIMIT_ENABLED", False):
             result = asyncio.run(cart_router.submit_cart(body, _FakeRequest(), ctx))
 
