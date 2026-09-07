@@ -17,11 +17,13 @@ El pedido anónimo por QR **no** entra por aquí: llega como `recibida` vía
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
+from math import ceil
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql import Select
 
 from app.core.crud import get_or_404
 from app.core.order_audit import (
@@ -146,6 +148,90 @@ def list_orders(
             )
         )
     return db.execute(q).scalars().all()
+
+
+#: Los 6 valores exactos del filtro de estado de la pantalla "Órdenes" — el
+#: conjunto cerrado que acepta la rama paginada de `GET /orders` (spec 079,
+#: FR-008, data-model.md §3). `None` / ausente = "Todos" (sin predicado). El
+#: router valida contra este conjunto y responde 422 fuera de rango.
+ESTADOS_MOSTRADOS_ORDENES = ("recibida", "abierta", "bloqueada", "pagada", "cancelada")
+
+
+def list_orders_query(
+    status_mostrado: str | None = None, order_type: str | None = None,
+) -> Select:
+    """`Select` de comandas para la rama **paginada** de `GET /orders` (spec 079).
+
+    Orden determinista `created_at DESC, id DESC` (FR-003, SC-008): `created_at`
+    conserva el orden cronológico que la pantalla tiene hoy; `id` (uuid4, estable
+    pero no cronológico) desempata los `created_at` idénticos para que recorrer
+    las páginas cubra el conjunto sin huecos ni repeticiones.
+
+    `status_mostrado` traduce el "estado que ve la persona" a predicado — el port
+    fiel de `displayOrderStatus()` del frontend, movido al servidor (FR-016,
+    data-model.md §3): "cancelada" gana siempre; una orden se ve "Pagada" si
+    tiene `Sale` **o** si su `status` crudo ya es `'pagada'` y no está cancelada;
+    los estados no terminales conservan su `status` crudo solo si aún no tienen
+    venta. `order_type` filtra por la columna homónima; `order_type IS NULL`
+    (órdenes históricas sin clasificar) nunca satisface un `=` concreto, así que
+    queda fuera al filtrar por un tipo y dentro en "Todos" (FR-018), sin
+    `COALESCE` ni centinela.
+
+    `list_orders()` (Terminal/Dashboard) **no se toca**: conserva su firma y su
+    salida (plan.md, Constitution Check, Principio III).
+    """
+    stmt = (
+        select(CustomerOrder)
+        .options(
+            selectinload(CustomerOrder.items).selectinload(OrderItem.options),
+            selectinload(CustomerOrder.payment_attempts)
+            .selectinload(OrderPaymentAttempt.payment_method),
+        )
+        .order_by(CustomerOrder.created_at.desc(), CustomerOrder.id.desc())
+    )
+
+    tiene_venta = exists(
+        select(Sale.id).where(Sale.customer_order_id == CustomerOrder.id)
+    )
+
+    if status_mostrado in ("recibida", "abierta", "bloqueada"):
+        stmt = stmt.where(
+            CustomerOrder.status == status_mostrado, ~tiene_venta,
+        )
+    elif status_mostrado == "pagada":
+        stmt = stmt.where(
+            CustomerOrder.status != "cancelada",
+            or_(tiene_venta, CustomerOrder.status == "pagada"),
+        )
+    elif status_mostrado == "cancelada":
+        stmt = stmt.where(CustomerOrder.status == "cancelada")
+
+    if order_type is not None:
+        stmt = stmt.where(CustomerOrder.order_type == order_type)
+
+    return stmt
+
+
+def clamp_page(db: Session, stmt: Select, page: int, size: int) -> int:
+    """Página efectiva tras acotar `page` al rango válido del conjunto **ya
+    filtrado** de `stmt` (spec 079, FR-005, data-model.md §2, regla 3).
+
+    Cuenta el `total` con el mismo `COUNT(*)` envolvente que usa `paginate()`,
+    calcula `pages = ceil(total / size)` y devuelve `1` si el conjunto está
+    vacío, si no `min(max(page, 1), pages)`. El router llama
+    `paginate(db, stmt, clamp_page(db, stmt, page, size), size)`, de modo que
+    una página fuera de rango devuelve la última con resultados (o la 1 vacía) y
+    el frontend se recoloca sin `404`. Los dos `COUNT(*)` del camino paginado
+    (este + el de `paginate`) recaen sobre índices ya presentes, así que su
+    coste no crece de forma apreciable con el total (research.md §3).
+    """
+    total = db.execute(
+        select(func.count()).select_from(stmt.order_by(None).subquery())
+    ).scalar_one()
+    if total == 0:
+        return 1
+    pages = ceil(total / size)
+    return min(max(page, 1), pages)
 
 
 def create_order(
