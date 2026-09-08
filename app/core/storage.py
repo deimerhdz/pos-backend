@@ -59,16 +59,6 @@ def public_url_for(key: str) -> str:
     return f"{settings.R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
 
 
-def key_from_public_url(url: str) -> str | None:
-    """Extrae la key de un `public_url_for(...)` previamente emitido, o None si
-    la URL no pertenece al bucket público configurado (p.ej. una URL vieja de
-    Supabase u otra fuente externa)."""
-    base = f"{settings.R2_PUBLIC_BASE_URL.rstrip('/')}/"
-    if not url.startswith(base):
-        return None
-    return url[len(base):]
-
-
 # ---------------------------------------------------------------------------
 # Referencia de imagen key <-> URL (spec 080). Única fuente de la regla: la
 # escritura (normalize_asset_ref), la lectura (asset_display_url), la migración
