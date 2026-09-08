@@ -15,7 +15,7 @@ from sqlalchemy.sql import Select
 from app.core.crud import get_or_404
 from app.core.models import Tenant
 from app.core.plan_limits import ensure_module_access
-from app.core.storage import delete_object, key_from_public_url
+from app.core.storage import delete_object, object_key_for_deletion
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.category import Category
@@ -103,11 +103,16 @@ class ProductService:
         if data.preparation_type is not None:
             product.preparation_type = data.preparation_type.value
         old_key = None
+        # spec 080: `data.image_url` ya viene normalizada a key (AssetRefIn), así
+        # que la comparación es key vs key — un formulario reenviado sin tocar la
+        # imagen (que manda la URL de visualización) no se interpreta como cambio
+        # y no dispara el borrado del objeto en uso (US3, FR-011/FR-012).
         if data.image_url is not None and data.image_url != product.image_url:
-            old_image_url = product.image_url
+            # object_key_for_deletion acepta una key directa o una URL del bucket
+            # gestionado, y devuelve None para una referencia de otro origen
+            # (FR-013): en ese caso no se intenta borrar nada.
+            old_key = object_key_for_deletion(product.image_url)
             product.image_url = data.image_url
-            if old_image_url:
-                old_key = key_from_public_url(old_image_url)
         if data.active is not None:
             product.active = data.active
         if data.available is not None:

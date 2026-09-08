@@ -158,6 +158,15 @@ class Settings(BaseSettings):
     R2_ENDPOINT_URL:str = Field(...,env="R2_ENDPOINT_URL")
     R2_PUBLIC_BASE_URL:str = Field(...,env="R2_PUBLIC_BASE_URL")
     R2_PRESIGN_EXPIRE_SECONDS:int = Field(default=300,env="R2_PRESIGN_EXPIRE_SECONDS")
+    # Dominio personalizado de R2 con el que se sirven las imágenes de producto,
+    # logo del negocio e imagen de método de pago (spec 080). En base de datos
+    # vive solo la key relativa del objeto; esta base se antepone al responder
+    # para armar la URL de visualización. Obligatorio y sin default, como el
+    # resto de settings de R2 — un despliegue sin la variable falla al arrancar
+    # en vez de servir URLs rotas. NO reemplaza a R2_PUBLIC_BASE_URL, que sigue
+    # sirviendo los comprobantes del comensal (fuera de alcance, FR-014) y la
+    # reversión de la migración de datos.
+    ASSETS_BASE_URL:str = Field(...,env="ASSETS_BASE_URL")
 
     class Config:
         env_file='.env'

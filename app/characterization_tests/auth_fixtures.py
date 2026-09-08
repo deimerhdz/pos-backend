@@ -31,6 +31,7 @@ for _k, _v in {
     "R2_BUCKET_NAME": "x",
     "R2_ENDPOINT_URL": "https://example.invalid",
     "R2_PUBLIC_BASE_URL": "https://example.invalid",
+    "ASSETS_BASE_URL": "https://assets.example.invalid",
 }.items():
     os.environ.setdefault(_k, _v)
 

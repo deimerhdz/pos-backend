@@ -2,10 +2,22 @@ from enum import Enum
 from uuid import UUID
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.api.v1.catalog.schemas import OptionSelectionIn
+from app.core.storage import normalize_asset_ref
 from app.core.timezone import UtcDatetime
+
+
+def _normalize_payment_info_assets(info: dict[str, str] | None) -> dict[str, str] | None:
+    """spec 080 (FR-002/FR-004): normaliza a key todo valor de `payment_info`
+    que sea una URL absoluta del bucket gestionado (típ. la clave marcada
+    `format:"image"`, p. ej. `qr`). Los valores que no lo son —`celular`,
+    `cuenta`, `titular`— quedan **idénticos**: `normalize_asset_ref` solo toca
+    los que empiezan por un prefijo del bucket gestionado."""
+    if not info:
+        return info
+    return {k: (normalize_asset_ref(v) or v) for k, v in info.items()}
 
 
 # ---------- Métodos de pago ----------
@@ -28,10 +40,20 @@ class PaymentMethodCreate(BaseModel):
     # métodos sin campos (ej. Efectivo).
     payment_info: dict[str, str] | None = None
 
+    @field_validator("payment_info")
+    @classmethod
+    def _normalize_assets(cls, info: dict[str, str] | None) -> dict[str, str] | None:
+        return _normalize_payment_info_assets(info)
+
 
 class PaymentMethodUpdate(BaseModel):
     payment_info: dict[str, str] | None = None
     active: bool | None = None
+
+    @field_validator("payment_info")
+    @classmethod
+    def _normalize_assets(cls, info: dict[str, str] | None) -> dict[str, str] | None:
+        return _normalize_payment_info_assets(info)
 
 
 class PaymentMethodResponse(BaseModel):
