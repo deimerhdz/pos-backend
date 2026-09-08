@@ -15,6 +15,15 @@ class PresignRequest(BaseModel):
 
 class PresignResponse(BaseModel):
     upload_url: str = Field(..., description="URL PUT firmada; sube el archivo directo a R2.")
-    key: str = Field(..., description="Key del objeto dentro del bucket.")
-    public_url: str = Field(..., description="URL pública final para guardar en image_url.")
+    key: str = Field(..., description="Key del objeto dentro del bucket. Es lo que se persiste (spec 080).")
+    public_url: str = Field(
+        ...,
+        description=(
+            "URL de visualización lista para usar (contra el dominio de assets). "
+            "**No** es lo que se persiste: en base de datos vive la `key` (spec 080). "
+            "El servidor normaliza a key cualquier URL absoluta del bucket "
+            "gestionado que reciba (FR-004), así que reenviar esta `public_url` "
+            "también funciona."
+        ),
+    )
     expires_in: int = Field(..., description="Segundos de validez de upload_url.")
