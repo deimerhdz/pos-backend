@@ -102,7 +102,13 @@ class TestUpdateProductA44(unittest.TestCase):
         ):
             result = service.update_product(db, fx.make_tenant_stub(), product.id, ProductUpdate(image_url=NEW_URL))
 
-        self.assertEqual(result.image_url, NEW_URL)
+        # spec 080 (A-73): en base de datos vive la KEY, no la URL absoluta. Bajo
+        # la config de test `R2_PUBLIC_BASE_URL == https://example.invalid`, así que
+        # `NEW_URL` es una URL del bucket gestionado y se persiste su key. El
+        # comportamiento que este test congela —un fallo de `delete_object` no
+        # revierte el cambio ya persistido— se mantiene exactamente; solo cambia
+        # la forma del valor con el que se compara.
+        self.assertEqual(result.image_url, "tenant/products/new.jpg")  # key de NEW_URL
 
 
 class TestCreateProductWithVariantTree(unittest.TestCase):

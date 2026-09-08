@@ -4,6 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.schema_types import AssetRefIn, AssetUrl
 from app.api.v1.catalog.schemas import (
     VariantSaveIn,
     VariantResponse,
@@ -26,7 +27,10 @@ class ProductCreate(BaseModel):
         PreparationType.PREPARED,
         description="prepared (receta) o packaged (empacado).",
     )
-    image_url: str | None = Field(None, max_length=500)
+    # spec 080: en base de datos vive solo la key relativa. Si el cliente reenvía
+    # una URL absoluta del bucket gestionado (dominio viejo o nuevo) se normaliza
+    # a key antes de persistir (FR-004); una URL de otro origen se conserva.
+    image_url: AssetRefIn = Field(None, max_length=500)
     available: bool = True
     tracks_inventory: bool = Field(
         False, description="Si el producto exige y aplica descuento de inventario en sus presentaciones."
@@ -46,7 +50,7 @@ class ProductUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = Field(None, max_length=500)
     preparation_type: PreparationType | None = None
-    image_url: str | None = Field(None, max_length=500)
+    image_url: AssetRefIn = Field(None, max_length=500)
     active: bool | None = None
     available: bool | None = None
     tracks_inventory: bool | None = None
@@ -68,7 +72,9 @@ class ProductResponse(BaseModel):
     name: str
     description: str | None = None
     preparation_type: PreparationType
-    image_url: str | None = None
+    # spec 080: la columna guarda la key; se ensambla la URL de visualización
+    # contra ASSETS_BASE_URL al serializar (FR-005/FR-006).
+    image_url: AssetUrl = None
     active: bool
     available: bool
     tracks_inventory: bool

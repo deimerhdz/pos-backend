@@ -46,6 +46,7 @@ for _k, _v in {
     "R2_ACCOUNT_ID": "x", "R2_ACCESS_KEY_ID": "x", "R2_SECRET_ACCESS_KEY": "x",
     "R2_BUCKET_NAME": "x", "R2_ENDPOINT_URL": "https://example.invalid",
     "R2_PUBLIC_BASE_URL": "https://example.invalid",
+    "ASSETS_BASE_URL": "https://assets.example.invalid",
     "SUPER_ADMIN_NAME": "t", "SUPER_ADMIN_EMAIL": "t@example.invalid",
     "SUPER_ADMIN_PASSWORD": "t",
 }.items():

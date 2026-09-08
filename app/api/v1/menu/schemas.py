@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.schema_types import AssetUrl
 from app.api.v1.promotions.schemas import PromotionType
 
 
@@ -90,7 +91,10 @@ class MenuProductResponse(BaseModel):
     id: UUID
     name: str
     description: str | None = None
-    image_url: str | None = None
+    # spec 080: la columna guarda la key; se ensambla la URL contra
+    # ASSETS_BASE_URL al serializar (FR-005). Tolerancia de lectura de una fila
+    # aún no migrada incluida (FR-009b).
+    image_url: AssetUrl = None
     variants: list[MenuVariantResponse] = Field(default_factory=list)
     # Unión de los grupos de todas las presentaciones. **Solo sirve para resolver
     # nombres y precios de una opción** (tickets, comandas, carrito): su `min/max_select`
@@ -143,6 +147,8 @@ class MenuBusinessResponse(BaseModel):
     """
 
     name: str
-    logo_url: str | None = None
+    # spec 080: key en base de datos, URL ensamblada contra ASSETS_BASE_URL al
+    # serializar (FR-005/FR-006).
+    logo_url: AssetUrl = None
 
     model_config = ConfigDict(from_attributes=True)
