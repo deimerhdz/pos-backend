@@ -11,6 +11,7 @@ from app.core.dependencies import get_current_user, require_tenant_admin
 from app.core.models import Tenant, User
 from app.core.pagination import Page, paginate
 from app.core.plan_limits import enforce_plan_limit
+from app.core.storage import asset_display_url
 from app.models.payment import PaymentMethod
 from app.models.payment_method_catalog import PaymentMethodCatalog
 from app.models.sale import Sale
@@ -21,6 +22,28 @@ from app.api.v1.sales.schemas import (
 )
 
 router = APIRouter(prefix="/sales", tags=["sales"])
+
+
+def payment_method_response(method: PaymentMethod) -> PaymentMethodResponse:
+    """spec 080 (FR-005/FR-006/FR-007): respuesta admin de un método de pago
+    con las claves de `payment_info` marcadas `format:"image"` (según
+    `method.fields`, propiedad que lee del catálogo) entregadas como URL de
+    visualización contra ASSETS_BASE_URL. La columna `payment_info` no cambia
+    al serializar — la key sigue viviendo en base de datos.
+
+    `PaymentMethodResponse` no expone `fields` (decisión spec 032), por eso el
+    ensamblado se hace aquí en el router y no con un tipo `Annotated` ciego."""
+    resp = PaymentMethodResponse.model_validate(method)
+    if resp.payment_info:
+        image_keys = {
+            f.get("key") for f in method.fields if f.get("format") == "image"
+        }
+        if image_keys:
+            resp.payment_info = {
+                k: (asset_display_url(v) if k in image_keys else v)
+                for k, v in resp.payment_info.items()
+            }
+    return resp
 
 
 # ============================ Métodos de pago ============================
@@ -49,7 +72,14 @@ def list_payment_methods(
 ):
     if available:
         return service.list_available_payment_methods(db)
-    return db.execute(select(PaymentMethod).order_by(PaymentMethod.name)).scalars().all()
+    # spec 080: selectinload(catalog) para que `payment_method_response` lea
+    # `method.fields` sin disparar un N+1 al ensamblar las claves de imagen.
+    methods = db.execute(
+        select(PaymentMethod)
+        .options(selectinload(PaymentMethod.catalog))
+        .order_by(PaymentMethod.name)
+    ).scalars().all()
+    return [payment_method_response(m) for m in methods]
 
 
 @router.post(
@@ -64,7 +94,7 @@ def create_payment_method(
     _: User = Depends(require_tenant_admin),
 ):
     enforce_plan_limit(db, tenant, "metodos_pago_activos")  # spec 033, FR-005/FR-006
-    return service.create_payment_method(db, body)
+    return payment_method_response(service.create_payment_method(db, body))
 
 
 @router.patch(
@@ -76,7 +106,7 @@ def update_payment_method(
     payment_method_id: UUID, body: PaymentMethodUpdate,
     db: Session = Depends(get_db), _: User = Depends(require_tenant_admin),
 ):
-    return service.update_payment_method(db, payment_method_id, body)
+    return payment_method_response(service.update_payment_method(db, payment_method_id, body))
 
 
 # ============================ Ventas ============================

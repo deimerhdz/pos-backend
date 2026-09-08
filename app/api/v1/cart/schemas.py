@@ -2,9 +2,10 @@ from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.api.v1.catalog.schemas import OptionSelectionIn
+from app.core.storage import asset_display_url
 
 
 # ---------- Apertura de sesión (por QR token) ----------
@@ -120,6 +121,24 @@ class DinerPaymentMethod(BaseModel):
     fields: list[dict] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def _assemble_asset_urls(self):
+        """spec 080 (FR-005/FR-007): las claves de `payment_info` marcadas
+        `format:"image"` (según `fields`) se entregan al comensal como URL de
+        visualización contra ASSETS_BASE_URL. La columna en base de datos no
+        cambia (FR-006) — este validador corre sobre el modelo ya poblado desde
+        el ORM, sobre una copia del dict."""
+        if self.payment_info:
+            image_keys = {
+                f.get("key") for f in self.fields if f.get("format") == "image"
+            }
+            if image_keys:
+                self.payment_info = {
+                    k: (asset_display_url(v) if k in image_keys else v)
+                    for k, v in self.payment_info.items()
+                }
+        return self
 
 
 class PaymentAttemptCreateIn(BaseModel):
