@@ -313,18 +313,21 @@ def order_sale_lines(
 def promo_lines_for(db: Session, lines: list[SaleLine]) -> list[dict]:
     """`promo_lines` para `evaluate_variant_sets` (spec 063,
     contracts/motor-y-persistencia.md §1): un dict por línea con
-    `product_variant_id` (pertenencia al conjunto), `unit_price`, `quantity`,
-    `line_id` (desempate determinista), `_variant_active` (FR-011), `combo_id`
-    (filtro defensivo — histórico) y `description` (para `applied_promotions`).
+    `product_variant_id` (pertenencia al conjunto), `unit_price`,
+    `base_unit_price` (spec 083, FR-027: `unit_price` sin toppings — base del
+    descuento `percent`), `quantity`, `line_id` (desempate determinista),
+    `_variant_active` (FR-011), `combo_id` (filtro defensivo — histórico) y
+    `description` (para `applied_promotions`).
 
     Ya NO se traen `product_id` / `category_id` / `presentation_id` (targets y
-    presentación eliminados, FR-003 / FR-027)."""
+    presentación eliminados, spec 063 FR-003)."""
     promo_lines: list[dict] = []
     for line in lines:
         variant = db.get(ProductVariant, line.product_variant_id)
         promo_lines.append({
             "product_variant_id": line.product_variant_id,
             "unit_price": line.unit_price,
+            "base_unit_price": line.base_unit_price,
             "quantity": line.quantity,
             "line_id": getattr(line, "line_id", None),
             "combo_id": line.combo_id,

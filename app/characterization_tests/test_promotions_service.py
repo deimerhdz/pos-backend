@@ -19,10 +19,15 @@ from app.api.v1.promotions import service as promotions
 NOW = datetime(2026, 8, 5, 18, 0, tzinfo=timezone.utc)  # miércoles, 13:00 Bogotá
 
 
-def _line(variant, qty, *, active=True, combo_id=None):
+def _line(variant, qty, *, active=True, combo_id=None, base_unit_price=None):
+    unit_price = Decimal(variant.price)
     return {
         "product_variant_id": variant.id,
-        "unit_price": Decimal(variant.price),
+        "unit_price": unit_price,
+        # FR-027 (spec 083): la base del descuento `percent`, sin toppings.
+        # Por defecto igual a `unit_price` -- sin diferencia con el
+        # comportamiento anterior cuando la línea no lleva adicionales.
+        "base_unit_price": unit_price if base_unit_price is None else Decimal(base_unit_price),
         "quantity": qty,
         "line_id": variant.id,   # una fila por variante en estos escenarios
         "combo_id": combo_id,
@@ -252,6 +257,64 @@ class TestEvaluateVariantSets(unittest.TestCase):
         montos = {ap.rule_id: ap.amount for ap in r.applied}
         self.assertEqual(montos[regla_pequenos.id], Decimal("4000.00"))
         self.assertEqual(montos[regla_medianos.id], Decimal("5000.00"))
+
+    # ---- FR-027 (spec 083, sesión 2026-09-17): el % de una regla `percent`
+    # se aplica solo sobre el precio base de la variante, nunca sobre el
+    # precio de los toppings/adicionales elegidos (spec 064/065) ----
+    def test_15_percent_excluye_toppings_de_la_base_min_qty_1(self):
+        # $10.000 de línea = $8.000 de variante + $2.000 de toppings.
+        v = self._variant(8000, "malteada con toppings")
+        self._promo("percent", 10, 1, [v])
+
+        linea = {
+            "product_variant_id": v.id, "unit_price": Decimal("10000"),
+            "base_unit_price": Decimal("8000"), "quantity": 1,
+            "line_id": v.id, "combo_id": None, "_variant_active": True,
+            "description": v.name,
+        }
+        r = promotions.evaluate_variant_sets(self.db, [linea], NOW)
+        # 10% de $8.000 (la base) = $800 -- no 10% de $10.000 ($1.000).
+        self.assertEqual(r.total, Decimal("800.00"))
+
+    def test_16_percent_min_qty_2_reparte_por_precio_base_no_por_precio_total(self):
+        # Dos líneas de la misma variante, cantidades separadas para variar
+        # cuánto topping lleva cada unidad: ambas con la misma base ($1.000),
+        # una sin toppings y otra con $500 de toppings.
+        v = self._variant(1000, "cono")
+        self._promo("percent", 10, 2, [v])
+
+        sin_topping = {
+            "product_variant_id": v.id, "unit_price": Decimal("1000"),
+            "base_unit_price": Decimal("1000"), "quantity": 1,
+            "line_id": uuid4(), "combo_id": None, "_variant_active": True,
+            "description": "cono sin topping",
+        }
+        con_topping = {
+            "product_variant_id": v.id, "unit_price": Decimal("1500"),
+            "base_unit_price": Decimal("1000"), "quantity": 1,
+            "line_id": uuid4(), "combo_id": None, "_variant_active": True,
+            "description": "cono con topping",
+        }
+        r = promotions.evaluate_variant_sets(self.db, [sin_topping, con_topping], NOW)
+        # Base del grupo: 1000 + 1000 = 2000; 10% = 200, repartido por partes
+        # iguales (misma base) -- $100 cada línea, no proporcional a $1000/$1500.
+        self.assertEqual(r.total, Decimal("200.00"))
+        by_line = dict(r.by_line)
+        self.assertEqual(sorted(by_line.values()), [Decimal("100"), Decimal("100")])
+
+    def test_17_package_price_no_excluye_toppings_sin_cambio(self):
+        """FR-027 aplica únicamente a `percent` -- `package_price` sigue
+        descontando sobre el precio total de la línea (con toppings incluidos,
+        si los hubiera), exactamente como antes de esta spec."""
+        a = self._variant(8000, "a")
+        b = self._variant(8000, "b")
+        self._promo("package_price", 12000, 2, [a, b])
+
+        linea_a = _line(a, 1, base_unit_price=Decimal("6000"))  # toppings != base
+        linea_b = _line(b, 1, base_unit_price=Decimal("6000"))
+        r = promotions.evaluate_variant_sets(self.db, [linea_a, linea_b], NOW)
+        # 16000 (unit_price total, ignora base_unit_price) - 12000 = 4000.
+        self.assertEqual(r.total, Decimal("4000.00"))
 
 
 if __name__ == "__main__":

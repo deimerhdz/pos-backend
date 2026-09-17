@@ -62,6 +62,17 @@ class SaleLine:
         # `None` en la venta de mostrador (aún no hay fila persistida).
         self.line_id = line_id
 
+    @property
+    def base_unit_price(self) -> Decimal:
+        """FR-027 (spec 083): `unit_price` sin el precio de los toppings/
+        adicionales elegidos (`options`, spec 064/065) — la base sobre la que
+        una promoción de tipo `percent` debe aplicar su descuento."""
+        toppings = sum(
+            (Decimal(opt["extra_price"]) * opt.get("quantity", 1) for opt in self.options),
+            Decimal(0),
+        )
+        return self.unit_price - toppings
+
 
 def ensure_open_shift(db: Session, cash_shift_id: UUID) -> CashShift:
     shift = get_or_404(db, CashShift, cash_shift_id, "Shift not found")
