@@ -110,13 +110,61 @@ class TestUS1ArmarPromocion(unittest.TestCase):
                                 variant_ids=[self.variantes[0].id, barata.id]),
             )
         self.assertEqual(ctx.exception.status_code, 409)
-        self.assertEqual(ctx.exception.detail["cheapest_unit_price"], "6000.00")
+        # FR-026 (spec 083): el mensaje expone ambos montos explícitamente.
+        self.assertEqual(ctx.exception.detail["regular_price_sum"], "12000.00")
+        self.assertEqual(
+            ctx.exception.detail["error"],
+            "El precio promocional ($12.000) debe ser menor a la suma del "
+            "precio regular de los productos seleccionados ($12.000).",
+        )
         self.assertIn("rule_id", ctx.exception.detail)
 
-    # ---- FR-001: una promoción necesita al menos una regla ----
-    def test_fr001_promocion_sin_reglas_rechazada(self):
+    # ---- FR-025 (spec 083): precio de paquete exige min_qty >= 2 ----
+    def test_fr025_paquete_con_min_qty_1_rechazado(self):
         with self.assertRaises(ValidationError):
-            PromotionCreate(name="sin reglas", starts_at=STARTS, rules=[])
+            _create_payload(type="package_price", value=Decimal("12000"), min_qty=1,
+                            variant_ids=self._ids(1))
+
+    def test_fr025_paquete_con_min_qty_2_aceptado(self):
+        promo = service.create(
+            self.db,
+            _create_payload(type="package_price", value=Decimal("12000"), min_qty=2,
+                            variant_ids=self._ids(2)),
+        )
+        self.db.commit()
+        self.assertEqual(promo.rules[0].min_qty, 2)
+
+    def test_fr025_percent_con_min_qty_1_sigue_aceptado(self):
+        """FR-025 solo retira el patrón para `package_price` — `percent` con
+        `min_qty=1` (el caso más común, un descuento simple por unidad) no
+        cambia."""
+        promo = service.create(
+            self.db,
+            _create_payload(type="percent", value=Decimal("10"), min_qty=1,
+                            variant_ids=self._ids(1)),
+        )
+        self.db.commit()
+        self.assertEqual(promo.rules[0].min_qty, 1)
+
+    # ---- spec 083 (A-75): un Borrador puede crearse sin reglas todavía ----
+    def test_a75_borrador_sin_reglas_permitido(self):
+        promo = PromotionCreate(name="sin reglas", starts_at=STARTS, rules=[])
+        self.assertEqual(promo.status.value, "draft")
+        self.assertEqual(promo.rules, [])
+
+    def test_a75_service_create_persiste_borrador_sin_reglas(self):
+        promo = service.create(
+            self.db, PromotionCreate(name="sin reglas", starts_at=STARTS, rules=[]),
+        )
+        self.db.commit()
+        data = service.serialize_promotion(self.db, promo)
+        self.assertEqual(data["status"], "draft")
+        self.assertEqual(data["rules"], [])
+
+    # ---- FR-001/A-75: activar sigue exigiendo al menos una regla ----
+    def test_fr001_promocion_activa_sin_reglas_rechazada(self):
+        with self.assertRaises(ValidationError):
+            PromotionCreate(name="sin reglas", starts_at=STARTS, status="active", rules=[])
 
     # ---- FR-001a: variante repetida entre dos reglas del MISMO payload ----
     def test_fr001a_variante_repetida_entre_reglas_de_la_misma_promocion_bloquea(self):
@@ -408,8 +456,8 @@ class TestSpec071EdicionEnPausada(unittest.TestCase):
             )]))
         self.assertEqual(ctx.exception.status_code, 409)
         # No debe ser el 409 de "solo borrador/pausada" — debe llegar hasta la
-        # guarda de FR-016 y traer su detalle propio.
-        self.assertIn("cheapest_unit_price", ctx.exception.detail)
+        # guarda de FR-016/FR-026 y traer su detalle propio.
+        self.assertIn("regular_price_sum", ctx.exception.detail)
 
     def test_reactivar_tras_editar_en_pausada_usa_el_conjunto_corregido(self):
         service.update_shape(self.db, self.promo, PromotionShapeUpdate(rules=[_rule(

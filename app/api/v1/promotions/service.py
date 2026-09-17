@@ -617,9 +617,14 @@ def _guard_variant_overlap(db: Session, promo: Promotion) -> None:
 
 
 def _guard_package_is_discount(db: Session, rule: PromotionRule) -> None:
-    """FR-016 / SC-002 (research.md D16): `type == "package_price"` y
-    `value >= min_qty × (menor price entre las variantes del conjunto de
-    ESTA regla, activas o no)` -> **409**."""
+    """FR-016 / SC-002 (research.md D16) + FR-026 (spec 083, sesión
+    2026-09-17): `type == "package_price"` y `value >= min_qty × (menor
+    precio regular entre las variantes del conjunto de ESTA regla, activas o
+    no)` -> **409**. Cada regla que arma la pantalla de configuración de spec
+    083 tiene una sola variante (FR-013), así que ese "peor caso del
+    conjunto" coincide exactamente con `precio_regular_de_la_variante ×
+    unidades` que exige FR-026 — no es un motor de cálculo nuevo, solo el
+    mensaje que ahora expone explícitamente ambos montos."""
     if rule.type != "package_price":
         return
     variant_ids = [v.product_variant_id for v in rule.variants]
@@ -632,17 +637,20 @@ def _guard_package_is_discount(db: Session, rule: PromotionRule) -> None:
     if not rows:
         return
     cheapest_id, cheapest_price = min(rows, key=lambda r: Decimal(r[1]))
-    if Decimal(rule.value) >= rule.min_qty * Decimal(cheapest_price):
+    regular_price_sum = rule.min_qty * Decimal(cheapest_price)
+    if Decimal(rule.value) >= regular_price_sum:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={
                 "error": (
-                    "Con este precio de paquete la promoción no representa un descuento"
+                    f"El precio promocional ({_money(Decimal(rule.value))}) debe ser "
+                    f"menor a la suma del precio regular de los productos "
+                    f"seleccionados ({_money(regular_price_sum)})."
                 ),
                 "rule_id": str(rule.id),
                 "value": str(rule.value),
                 "min_qty": rule.min_qty,
-                "cheapest_unit_price": str(cheapest_price),
+                "regular_price_sum": str(regular_price_sum),
                 "variant_id": str(cheapest_id),
             },
         )
