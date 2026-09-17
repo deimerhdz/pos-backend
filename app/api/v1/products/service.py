@@ -1,8 +1,10 @@
 """Service de productos (catálogo simple para heladería).
 
 Un producto pertenece a una categoría y tiene 1..N variantes vendibles (precio +
-receta viven en la variante). Al crear un producto se le da una variante default
-'Single' para que sea vendible de inmediato; se agregan más desde el módulo catalog.
+receta viven en la variante). Al crear un producto sin variantes explícitas, hereda
+una por cada presentación activa asociada a su categoría (spec 083, FR-005) o, si no
+tiene ninguna, nace con la variante default 'Presentación única' (FR-006, A-74) para
+ser vendible de inmediato; se agregan más desde el módulo catalog.
 """
 import logging
 from uuid import UUID
@@ -19,6 +21,8 @@ from app.core.storage import delete_object, object_key_for_deletion
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.category import Category
+from app.models.category_presentation import CategoryPresentation
+from app.models.presentation import Presentation
 from app.api.v1.catalog.service import (
     ensure_default_variant,
     _save_variant_entry,
@@ -78,8 +82,11 @@ class ProductService:
                 # `ensure_default_variant` no aplica, ya hay al menos una presentación explícita.
                 self._save_variant_tree(db, product, data.variants)
             else:
-                # Todo vendible es una variante; el producto nace con su default 'Single'.
-                ensure_default_variant(db, product)
+                # spec 083 (FR-005/FR-006, research.md D6): sin variantes explícitas, el
+                # producto hereda una ProductVariant por cada presentación activa asociada
+                # a su categoría; sin ninguna asociada, sigue naciendo con el default único
+                # (ahora "Presentación única", A-74).
+                self._apply_inherited_or_default_variant(db, product)
             db.commit()
         except HTTPException:
             db.rollback()
@@ -153,6 +160,33 @@ class ProductService:
         return product
 
     # ===================== Guardado consolidado (spec 043) =====================
+
+    def _apply_inherited_or_default_variant(self, db: Session, product: Product) -> None:
+        """Rama `else` de `create_product` cuando no llegan `variants` explícitas
+        (spec 083, research.md D6). Resuelve las presentaciones activas asociadas a
+        `product.category_id`; con al menos una, crea una `ProductVariant` por cada una
+        (`price=0`, FR-005) reutilizando el guardado consolidado ya existente (spec 043).
+        Sin ninguna, sigue llamando `ensure_default_variant` sin cambios de firma (FR-006)."""
+        presentaciones: list[Presentation] = []
+        if product.category_id is not None:
+            presentaciones = db.execute(
+                select(Presentation)
+                .join(
+                    CategoryPresentation,
+                    CategoryPresentation.presentation_id == Presentation.id,
+                )
+                .where(
+                    CategoryPresentation.category_id == product.category_id,
+                    Presentation.active.is_(True),
+                )
+                .order_by(Presentation.name)
+            ).scalars().all()
+
+        if presentaciones:
+            entradas = [VariantSaveIn(name=p.name) for p in presentaciones]
+            self._save_variant_tree(db, product, entradas)
+        else:
+            ensure_default_variant(db, product)
 
     def _save_variant_tree(
         self, db: Session, product: Product, entries: list[VariantSaveIn]

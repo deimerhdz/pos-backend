@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Línea vendible: aquí viven el precio y la receta. Productos sin tamaños
-    obtienen una variante 'Single'."""
+    obtienen una variante 'Presentación única' (spec 083, A-74)."""
 
     __tablename__ = "product_variants"
 
@@ -22,7 +22,9 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     product: Mapped["Product"] = relationship(back_populates="variants")
 
-    name: Mapped[str] = mapped_column(String(255), nullable=False, server_default="Single")
+    name: Mapped[str] = mapped_column(
+        String(255), nullable=False, server_default="Presentación única"
+    )
 
     sku: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, unique=True)
 

@@ -35,6 +35,9 @@ _TABLE_NAMES = [
     "categories", "products", "product_variants",
     "option_groups", "options", "variant_option_groups",
     "recipe_items", "inventory_items", "inventory_movements", "unit_measures",
+    # spec 083: create_product consulta estas dos tablas incluso cuando la
+    # herencia no aplica (0 presentaciones asociadas a la categoría).
+    "presentations", "category_presentations",
 ]
 
 

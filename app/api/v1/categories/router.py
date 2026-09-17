@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 
@@ -10,7 +10,30 @@ from app.core.crud import get_or_404, ensure_unique
 from app.core.models import User
 from app.core.pagination import Page, paginate
 from app.models.category import Category
+from app.models.category_presentation import CategoryPresentation
+from app.models.presentation import Presentation
 from app.api.v1.categories.schemas import CategoryCreate, CategoryUpdate, CategoryResponse
+
+
+def _replace_category_presentations(
+    db: Session, category: Category, presentation_ids: list[UUID]
+) -> None:
+    """Reemplazo total de las presentaciones asociadas a `category` (spec 083,
+    research.md D5) -- mismo patrón que `_replace_option_groups`
+    (`app/api/v1/catalog/service.py:178`). 404 si algún id no existe en
+    `presentations` (no se exige `active=true`, FR-002)."""
+    db.execute(
+        CategoryPresentation.__table__.delete().where(
+            CategoryPresentation.category_id == category.id
+        )
+    )
+    for presentation_id in presentation_ids:
+        if db.get(Presentation, presentation_id) is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"Presentation {presentation_id} not found",
+            )
+        db.add(CategoryPresentation(category_id=category.id, presentation_id=presentation_id))
 
 router = APIRouter(prefix="/categories", tags=["categories"])
 acccess_token_bearer = AccessTokenBearer()
@@ -92,6 +115,9 @@ def create_category(
 
     category = Category(name=body.name, description=body.description, display_order=display_order)
     db.add(category)
+    db.flush()
+    if body.presentation_ids is not None:
+        _replace_category_presentations(db, category, body.presentation_ids)
     db.commit()
     db.refresh(category)
     return category
@@ -130,6 +156,9 @@ def update_category(
 
     if body.display_order is not None:
         category.display_order = body.display_order
+
+    if body.presentation_ids is not None:
+        _replace_category_presentations(db, category, body.presentation_ids)
 
     db.commit()
     db.refresh(category)
