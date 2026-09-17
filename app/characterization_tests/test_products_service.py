@@ -170,7 +170,10 @@ class TestCreateProductWithVariantTree(unittest.TestCase):
         self.assertEqual(groups[0].option_group_id, group.id)
 
     def test_sin_variants_sigue_creando_single_automatica_back_compat(self):
-        """RN-CAT-05: sin `variants` (u omitido), el comportamiento no cambia."""
+        """RN-CAT-05: sin `variants` (u omitido) y sin presentaciones asociadas a la
+        categoría, el comportamiento no cambia -- salvo el literal por defecto, que
+        pasa de "Single" a "Presentación única" (spec 083, A-74,
+        registro-de-anomalias.md)."""
         db = fx.new_session()
         category = fx.make_category(db)
         db.commit()
@@ -184,7 +187,7 @@ class TestCreateProductWithVariantTree(unittest.TestCase):
             select(ProductVariant).where(ProductVariant.product_id == product.id)
         ).scalars().all()
         self.assertEqual(len(variants), 1)
-        self.assertEqual(variants[0].name, "Single")
+        self.assertEqual(variants[0].name, "Presentación única")
         self.assertEqual(variants[0].price, Decimal("0"))
 
     def test_respuesta_incluye_variants_con_receta_y_grupos_resueltos(self):

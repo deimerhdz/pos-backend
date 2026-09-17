@@ -43,10 +43,12 @@ class EnsureDefaultVariantTests(unittest.TestCase):
     def setUp(self):
         self.db = f.new_session()
 
-    def test_rn_cat_05_producto_sin_variantes_recibe_single_precio_0(self):
+    def test_rn_cat_05_producto_sin_variantes_recibe_presentacion_unica_precio_0(self):
+        """spec 083, A-74 (registro-de-anomalias.md): el literal por defecto pasa
+        de "Single" a "Presentación única"."""
         product = f.make_product(self.db, name="Cono Waffle")
         variant = ensure_default_variant(self.db, product)
-        self.assertEqual(variant.name, "Single")
+        self.assertEqual(variant.name, "Presentación única")
         self.assertEqual(variant.price, 0)
         self.assertEqual(variant.sku, "CONO-DEF")
         self.assertTrue(variant.active)
