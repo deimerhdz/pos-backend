@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from .product import Product
     from .recipe_item import RecipeItem
     from .variant_option_group import VariantOptionGroup
+    from .presentation import Presentation
 
 
 class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -39,9 +40,18 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # una variante (fixtures de test incluidas) debe asignarlo explícitamente.
     display_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # spec 063 (A-63): `presentation_id` se elimina — la entidad `Presentation` y
-    # su modelo de datos (spec 040) se revierten. Las promociones referencian
-    # `product_variants` directamente vía `promotion_variants`.
+    # spec 063 (A-63) eliminó `presentation_id` (entidad `Presentation` de spec 040
+    # revertida) porque las promociones referencian `product_variants` directamente
+    # vía `promotion_variants` -- eso no cambia. spec 084 reintroduce la columna con
+    # un propósito distinto: asociar la variante con una `Presentation` del catálogo
+    # nuevo de spec 083 (mero catálogo de nombres, sin rol en el alcance de una
+    # promoción) para que su `name` quede sincronizado con esa presentación
+    # (FR-002/FR-003/FR-004). Nullable y no retroactivo: toda variante existente
+    # nace sin asociación (FR-007).
+    presentation_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("presentations.id", ondelete="SET NULL"), nullable=True
+    )
+    presentation: Mapped[Optional["Presentation"]] = relationship()
 
     recipe_items: Mapped[List["RecipeItem"]] = relationship(
         back_populates="product_variant", cascade="all, delete-orphan"
@@ -56,6 +66,10 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint("product_id", "name", name="uq__product_variants__product_id__name"),
         UniqueConstraint(
             "product_id", "display_order", name="uq__product_variants__product_id__display_order"
+        ),
+        UniqueConstraint(
+            "product_id", "presentation_id",
+            name="uq__product_variants__product_id__presentation_id",
         ),
         {"schema": "tenant"},
     )

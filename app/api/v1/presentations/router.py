@@ -1,8 +1,8 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.db import get_db
 from app.core.dependencies import AccessTokenBearer, get_current_user
@@ -10,6 +10,8 @@ from app.core.crud import get_or_404, ensure_unique
 from app.core.models import User
 from app.core.pagination import Page, paginate
 from app.models.presentation import Presentation
+from app.models.product import Product
+from app.models.product_variant import ProductVariant
 from app.api.v1.presentations.schemas import (
     PresentationCreate,
     PresentationUpdate,
@@ -95,16 +97,39 @@ def create_presentation(
     return presentation
 
 
+def _rename_conflict(
+    db: Session, presentation_id: UUID, new_name: str
+) -> tuple[Product, ProductVariant] | None:
+    """Producto y variante que ya usan `new_name` en un producto que también tiene una
+    variante asociada a `presentation_id` (spec 084, FR-004 -- edge case detectado en
+    `/speckit-analyze`). La cascada de renombre de abajo chocaría con
+    `uq__product_variants__product_id__name` si no se valida antes."""
+    affected_products = select(ProductVariant.product_id).where(
+        ProductVariant.presentation_id == presentation_id
+    )
+    stmt = (
+        select(ProductVariant, Product)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(
+            ProductVariant.name == new_name,
+            ProductVariant.presentation_id.is_distinct_from(presentation_id),
+            ProductVariant.product_id.in_(affected_products),
+        )
+    )
+    row = db.execute(stmt).first()
+    return (row[1], row[0]) if row is not None else None
+
+
 @router.patch(
     "/{id}",
     response_model=PresentationResponse,
     summary="Actualizar una presentación",
-    description="Actualiza parcialmente una presentación. Solo se modifican los campos enviados. Sin endpoint de borrado físico: el único ciclo de vida es renombrar y/o alternar `active` en cualquier sentido.",
+    description="Actualiza parcialmente una presentación. Solo se modifican los campos enviados. Sin endpoint de borrado físico: el único ciclo de vida es renombrar y/o alternar `active` en cualquier sentido. Al renombrar, el nombre de cada variante de producto asociada se actualiza también (spec 084, FR-004).",
     response_description="La presentación actualizada.",
     responses={
         401: {"description": "No autenticado o token inválido."},
         404: {"description": "La presentación no existe."},
-        409: {"description": "Ya existe una presentación con ese nombre."},
+        409: {"description": "Ya existe una presentación con ese nombre, o el renombre choca con el nombre de otra variante del mismo producto."},
         422: {"description": "Datos de entrada inválidos."},
     },
 )
@@ -120,6 +145,23 @@ def update_presentation(
         ensure_unique(
             db, Presentation, Presentation.name, body.name,
             "Presentation name already exists", exclude_id=id,
+        )
+        conflict = _rename_conflict(db, id, body.name)
+        if conflict is not None:
+            product, variant = conflict
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=(
+                    f"No se puede renombrar: el producto «{product.name}» ya tiene una "
+                    f"variante llamada «{body.name}»"
+                ),
+            )
+        # Cascada (FR-004): toda variante asociada a esta presentación toma el nombre
+        # nuevo, en la misma transacción que el UPDATE de la presentación misma.
+        db.execute(
+            update(ProductVariant)
+            .where(ProductVariant.presentation_id == id)
+            .values(name=body.name)
         )
         presentation.name = body.name
 

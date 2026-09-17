@@ -32,6 +32,9 @@ class VariantResponse(BaseModel):
     sku: str | None = None
     price: Decimal
     active: bool
+    # spec 084 FR-001: presentación del catálogo (spec 083) asociada a esta variante,
+    # o `None` si no tiene ninguna (comportamiento sin cambio, FR-007).
+    presentation_id: UUID | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -115,6 +118,12 @@ class VariantSaveIn(BaseModel):
     active: bool = True
     recipe: list[RecipeItemIn] = Field(default_factory=list)
     option_groups: list[VariantOptionGroupIn] = Field(default_factory=list)
+    # spec 084 FR-001: presentación del catálogo (spec 083) a asociar con esta
+    # variante, o `None` para "Sin presentación" (FR-005). Cuando no es `None`,
+    # el `name` de arriba se ignora y se reemplaza por el de la presentación
+    # (FR-002/003) -- sigue siendo obligatorio en el payload por compatibilidad
+    # con el resto del guardado consolidado, que siempre lo exige.
+    presentation_id: UUID | None = None
 
 
 # ---------- Grupos de opciones ----------

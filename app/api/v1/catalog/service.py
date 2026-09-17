@@ -16,6 +16,7 @@ from app.models.recipe_item import RecipeItem
 from app.models.inventory_item import InventoryItem
 from app.models.option_group import OptionGroup
 from app.models.variant_option_group import VariantOptionGroup
+from app.models.presentation import Presentation
 from app.api.v1.catalog.schemas import VariantSaveIn, RecipeItemIn, VariantOptionGroupIn
 
 
@@ -217,6 +218,49 @@ def _replace_option_groups(
         ))
 
 
+def _resolve_presentation(
+    db: Session,
+    product_id: UUID,
+    presentation_id: UUID | None,
+    index: int,
+    *,
+    exclude_variant_id: UUID | None = None,
+) -> Presentation | None:
+    """Resuelve la presentación del catálogo (spec 083) que una entrada de variante pide
+    asociar (spec 084, FR-001). `None` es "Sin presentación" (FR-005), sin validar nada.
+
+    `exclude_variant_id` es la propia variante que se está actualizando (si la hay): permite
+    guardar sin cambios una variante que ya tenía esta presentación asociada, sin que se
+    detecte a sí misma como el "otro" uso en conflicto (FR-006).
+    """
+    if presentation_id is None:
+        return None
+    presentation = db.get(Presentation, presentation_id)
+    if presentation is None or not presentation.active:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "La presentación seleccionada no existe o está inactiva",
+                "variant_index": index,
+            },
+        )
+    stmt = select(ProductVariant.id).where(
+        ProductVariant.product_id == product_id,
+        ProductVariant.presentation_id == presentation_id,
+    )
+    if exclude_variant_id is not None:
+        stmt = stmt.where(ProductVariant.id != exclude_variant_id)
+    if db.execute(stmt).first() is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "error": "Esta presentación ya está en uso por otra variante de este producto",
+                "variant_index": index,
+            },
+        )
+    return presentation
+
+
 def _save_variant_entry(
     db: Session,
     product: Product,
@@ -231,21 +275,32 @@ def _save_variant_entry(
 
     No asigna el `display_order` final (lo hace `_assign_display_orders` una vez resueltas todas
     las entradas) ni hace `commit()` -- el llamador controla la transacción completa.
+
+    spec 084 (FR-001 a FR-006): si `entry.presentation_id` no es `None`, el nombre efectivo de
+    la variante deja de ser `entry.name` y pasa a ser el de la presentación del catálogo
+    (`Presentation.name`) -- el frontend ya lo muestra como derivado/no editable mientras haya
+    una presentación elegida (FR-002/003), pero el backend es quien decide el valor final.
     """
+    presentation = _resolve_presentation(
+        db, product.id, entry.presentation_id, index, exclude_variant_id=entry.id
+    )
+    effective_name = presentation.name if presentation is not None else entry.name
+
     if entry.id is None:
-        dup = variante_duplicada(db, product.id, entry.name)
+        dup = variante_duplicada(db, product.id, effective_name)
         if dup is not None:
             _raise_name_conflict(dup, index)
         if entry.sku is not None:
             _ensure_sku_unique(db, entry.sku, index)
-        sku = entry.sku or _unique_sku(db, f"{_slug(product.name)}-{_slug(entry.name)}")
+        sku = entry.sku or _unique_sku(db, f"{_slug(product.name)}-{_slug(effective_name)}")
         variant = ProductVariant(
             product_id=product.id,
-            name=entry.name,
+            name=effective_name,
             price=entry.price,
             sku=sku,
             active=entry.active,
             display_order=_next_display_order(db, product.id),
+            presentation_id=presentation.id if presentation is not None else None,
         )
         db.add(variant)
         db.flush()
@@ -263,11 +318,12 @@ def _save_variant_entry(
         if entry.sku is not None and entry.sku != variant.sku:
             _ensure_sku_unique(db, entry.sku, index, exclude_id=variant.id)
             variant.sku = entry.sku
-        if entry.name != variant.name:
-            dup = variante_duplicada(db, product.id, entry.name, exclude_id=variant.id)
+        if effective_name != variant.name:
+            dup = variante_duplicada(db, product.id, effective_name, exclude_id=variant.id)
             if dup is not None:
                 _raise_name_conflict(dup, index)
-            variant.name = entry.name
+            variant.name = effective_name
+        variant.presentation_id = presentation.id if presentation is not None else None
         variant.price = entry.price
         variant.active = entry.active
         db.flush()
