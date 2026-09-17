@@ -39,8 +39,9 @@ class ProductCreate(BaseModel):
         default_factory=list,
         description=(
             "Presentaciones iniciales del producto, con su receta y grupos de opciones (spec "
-            "043). Si viene vacía, se preserva el comportamiento actual: se crea automáticamente "
-            "la presentación 'Single' a precio 0 (RN-CAT-05)."
+            "043). Si viene vacía, se hereda una presentación por cada una asociada a la "
+            "categoría (spec 083, FR-005), o se crea automáticamente 'Presentación única' a "
+            "precio 0 si la categoría no tiene ninguna asociada (FR-006, RN-CAT-05, A-74)."
         ),
     )
 

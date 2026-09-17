@@ -8,6 +8,8 @@ from .option_group import OptionGroup
 from .option import Option
 from .variant_option_group import VariantOptionGroup
 from .recipe_item import RecipeItem
+from .presentation import Presentation
+from .category_presentation import CategoryPresentation
 
 # Inventario (stock único, sin lotes)
 from .inventory_item import InventoryItem

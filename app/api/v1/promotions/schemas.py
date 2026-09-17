@@ -92,6 +92,17 @@ class _PromotionRules(BaseModel):
             raise ValueError("El precio de paquete debe ser mayor que 0")
         return self
 
+    @model_validator(mode="after")
+    def _package_price_min_qty(self):
+        # FR-025 (spec 083, sesión 2026-09-17): retira, para reglas nuevas o
+        # editadas, el patrón `min_qty = 1` ("precio unitario especial") de
+        # spec 063 — no retroactivo, una regla ya guardada con `min_qty = 1`
+        # sigue vigente hasta que se edite (create/update_shape comparten este
+        # mismo schema, así que ambos caminos quedan cubiertos a la vez).
+        if self.type == PromotionType.PACKAGE_PRICE and self.min_qty < 2:
+            raise ValueError("En promociones por paquete, el mínimo es de 2 unidades")
+        return self
+
 
 def _no_repeats(variant_ids: list[UUID] | None) -> list[UUID] | None:
     if variant_ids is None:
@@ -134,12 +145,19 @@ class PromotionCreate(_VigenciaMixin):
     end_time: time | None = None
     # FR-001: una promoción agrupa una o más reglas, capturadas en la misma
     # sesión del formulario (creación por lote, Clarifications 2026-09-01).
-    rules: list[PromotionRuleIn] = Field(..., min_length=1)
+    # spec 083 (FR-020, Clarifications 2026-09-16): una promoción `draft`
+    # puede crearse SIN reglas todavía -- la pantalla de creación la guarda
+    # de inmediato al presionar "Continuar", antes de configurar ninguna
+    # regla de precio. `status=active` sigue exigiendo al menos una regla
+    # (validado abajo, mismo mensaje que ya usa `change_status`).
+    rules: list[PromotionRuleIn] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _status_on_create(self):
         if self.status == PromotionStatus.FINISHED:
             raise ValueError("Una promoción no puede crearse finalizada")
+        if self.status == PromotionStatus.ACTIVE and not self.rules:
+            raise ValueError("Una promoción necesita al menos una regla")
         return self
 
 

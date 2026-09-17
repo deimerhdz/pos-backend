@@ -233,24 +233,40 @@ def _cart_consumption(
 def _cart_promo_lines(db: Session, cart: Cart) -> list[dict]:
     """`promo_lines` para `evaluate_variant_sets` (spec 063,
     contracts/motor-y-persistencia.md §6). Un dict por ítem del carrito, en el
-    mismo orden que `cart.items` — el índice es la clave de `by_line`."""
+    mismo orden que `cart.items` — el índice es la clave de `by_line`.
+
+    `base_unit_price` (spec 083, FR-027): `unit_price` sin el precio de los
+    toppings elegidos (`CartItemOption` -> `Option.extra_price`), la base
+    sobre la que un descuento `percent` debe aplicarse."""
     rows = db.execute(
         select(ProductVariant.id, ProductVariant.active)
         .where(ProductVariant.id.in_({it.product_variant_id for it in cart.items}))
     ).all()
     active = {r.id: bool(r.active) for r in rows}
-    return [
-        {
+
+    option_ids = {o.option_id for it in cart.items for o in it.options}
+    extra_prices = dict(db.execute(
+        select(Option.id, Option.extra_price).where(Option.id.in_(option_ids))
+    ).all()) if option_ids else {}
+
+    promo_lines: list[dict] = []
+    for it in cart.items:
+        unit_price = Decimal(it.unit_price)
+        toppings = sum(
+            (Decimal(extra_prices.get(o.option_id, 0)) * o.quantity for o in it.options),
+            Decimal(0),
+        )
+        promo_lines.append({
             "product_variant_id": it.product_variant_id,
-            "unit_price": Decimal(it.unit_price),
+            "unit_price": unit_price,
+            "base_unit_price": unit_price - toppings,
             "quantity": it.quantity,
             "line_id": it.id,
             "combo_id": it.combo_id,
             "_variant_active": active.get(it.product_variant_id, False),
             "description": "",
-        }
-        for it in cart.items
-    ]
+        })
+    return promo_lines
 
 
 def _cart_line_discount(result, index: int, line_total: Decimal, quantity: int):

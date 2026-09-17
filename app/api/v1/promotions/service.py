@@ -225,7 +225,15 @@ def evaluate_variant_sets(db: Session, promo_lines: list, now: datetime) -> SetD
     """Algoritmo normativo de contracts/motor-y-persistencia.md §3. spec 063
     (revisión 2026-09-01): agrupa por **regla** (antes: por promoción) — la
     vigencia se resuelve una vez por promoción (`active_variant_set_rules`) y
-    se aplica a todas sus reglas; el cálculo por bloque no cambia de fórmula."""
+    se aplica a todas sus reglas; el cálculo por bloque no cambia de fórmula.
+
+    FR-027 (spec 083, sesión 2026-09-17): para `type == "percent"`, el `%` se
+    aplica solo sobre `base_unit_price` (precio de la variante sin toppings),
+    nunca sobre `unit_price` (que incluye los adicionales elegidos, spec
+    064/065) — el precio de cada topping se cobra íntegro. `package_price` no
+    cambia: sigue descontando sobre `unit_price` completo. Una línea sin
+    `base_unit_price` (o sin toppings) trae `base_unit_price == unit_price`,
+    así que esta rama no cambia nada para ese caso."""
     result = SetDiscountResult()
     rules = active_variant_set_rules(db, now)
     if not rules:
@@ -240,6 +248,7 @@ def evaluate_variant_sets(db: Session, promo_lines: list, now: datetime) -> SetD
             continue
 
         units: list = []
+        base_price_by_line: dict = {}
         for idx, line in enumerate(promo_lines):
             pv_id = _line_get(line, "product_variant_id")
             if pv_id not in conjunto:
@@ -249,22 +258,29 @@ def evaluate_variant_sets(db: Session, promo_lines: list, now: datetime) -> SetD
             if _line_get(line, "combo_id") is not None:       # defensivo
                 continue
             unit_price = Decimal(_line_get(line, "unit_price", 0))
+            base_price_by_line[idx] = Decimal(_line_get(line, "base_unit_price", unit_price))
             line_id = _line_get(line, "line_id")
             for _ in range(int(_line_get(line, "quantity", 0))):
                 units.append((idx, unit_price, pv_id, line_id))
 
         rule_amount = Decimal(0)
         for block in _greedy_units(units, r.min_qty):
-            normal_g = sum((u[1] for u in block), Decimal(0))
             if r.type == "package_price":
+                normal_g = sum((u[1] for u in block), Decimal(0))
                 descuento_g = max(Decimal(0), normal_g - Decimal(r.value))
-            else:  # percent
+                dist_block = block
+            else:  # percent (FR-027: solo sobre el precio base de la variante)
+                base_g = sum((base_price_by_line[u[0]] for u in block), Decimal(0))
                 descuento_g = (
-                    normal_g * Decimal(r.value) / Decimal(100)
+                    base_g * Decimal(r.value) / Decimal(100)
                 ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+                dist_block = [
+                    (idx, base_price_by_line[idx], pv_id, line_id)
+                    for idx, _price, pv_id, line_id in block
+                ]
             if descuento_g <= 0:
                 continue
-            for line_index, d in _distribute_group_discount(block, descuento_g).items():
+            for line_index, d in _distribute_group_discount(dist_block, descuento_g).items():
                 by_line[line_index] = by_line.get(line_index, Decimal(0)) + d
                 rule_amount += d
 
@@ -617,9 +633,14 @@ def _guard_variant_overlap(db: Session, promo: Promotion) -> None:
 
 
 def _guard_package_is_discount(db: Session, rule: PromotionRule) -> None:
-    """FR-016 / SC-002 (research.md D16): `type == "package_price"` y
-    `value >= min_qty × (menor price entre las variantes del conjunto de
-    ESTA regla, activas o no)` -> **409**."""
+    """FR-016 / SC-002 (research.md D16) + FR-026 (spec 083, sesión
+    2026-09-17): `type == "package_price"` y `value >= min_qty × (menor
+    precio regular entre las variantes del conjunto de ESTA regla, activas o
+    no)` -> **409**. Cada regla que arma la pantalla de configuración de spec
+    083 tiene una sola variante (FR-013), así que ese "peor caso del
+    conjunto" coincide exactamente con `precio_regular_de_la_variante ×
+    unidades` que exige FR-026 — no es un motor de cálculo nuevo, solo el
+    mensaje que ahora expone explícitamente ambos montos."""
     if rule.type != "package_price":
         return
     variant_ids = [v.product_variant_id for v in rule.variants]
@@ -632,17 +653,20 @@ def _guard_package_is_discount(db: Session, rule: PromotionRule) -> None:
     if not rows:
         return
     cheapest_id, cheapest_price = min(rows, key=lambda r: Decimal(r[1]))
-    if Decimal(rule.value) >= rule.min_qty * Decimal(cheapest_price):
+    regular_price_sum = rule.min_qty * Decimal(cheapest_price)
+    if Decimal(rule.value) >= regular_price_sum:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={
                 "error": (
-                    "Con este precio de paquete la promoción no representa un descuento"
+                    f"El precio promocional ({_money(Decimal(rule.value))}) debe ser "
+                    f"menor a la suma del precio regular de los productos "
+                    f"seleccionados ({_money(regular_price_sum)})."
                 ),
                 "rule_id": str(rule.id),
                 "value": str(rule.value),
                 "min_qty": rule.min_qty,
-                "cheapest_unit_price": str(cheapest_price),
+                "regular_price_sum": str(regular_price_sum),
                 "variant_id": str(cheapest_id),
             },
         )

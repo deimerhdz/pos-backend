@@ -3,6 +3,15 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class PresentationSummary(BaseModel):
+    """Presentación asociada a una categoría, solo lectura (spec 083, FR-004)."""
+
+    id: UUID = Field(..., description="Identificador único de la presentación.")
+    name: str = Field(..., description="Nombre de la presentación.", examples=["Pequeño"])
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class CategoryCreate(BaseModel):
     name: str = Field(
         ..., min_length=1, max_length=255,
@@ -18,6 +27,10 @@ class CategoryCreate(BaseModel):
         None, ge=0,
         description="Posición en el filtro del menú QR; si se omite, se asigna automáticamente al final de la lista actual.",
         examples=[10],
+    )
+    presentation_ids: list[UUID] | None = Field(
+        None,
+        description="Presentaciones del catálogo global asociadas a esta categoría (spec 083, FR-004). Ausente o vacía: sin ninguna asociada.",
     )
 
 
@@ -42,6 +55,10 @@ class CategoryUpdate(BaseModel):
         description="Posición en el filtro del menú QR; si se omite, se asigna automáticamente al final de la lista actual.",
         examples=[10],
     )
+    presentation_ids: list[UUID] | None = Field(
+        None,
+        description="Reemplazo total de las presentaciones asociadas (spec 083, FR-004). Ausente (`None`) no toca la asociación existente; `[]` desasocia todas.",
+    )
 
 
 class CategoryResponse(BaseModel):
@@ -55,5 +72,9 @@ class CategoryResponse(BaseModel):
     display_order: int = Field(..., description="Posición en el filtro del menú QR.", examples=[10])
     created_at: datetime = Field(..., description="Fecha de creación del registro.")
     updated_at: datetime | None = Field(None, description="Fecha de la última actualización.")
+    presentations: list[PresentationSummary] = Field(
+        default_factory=list,
+        description="Presentaciones del catálogo global asociadas actualmente a esta categoría (spec 083, FR-004).",
+    )
 
     model_config = ConfigDict(from_attributes=True)

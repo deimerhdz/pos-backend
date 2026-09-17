@@ -60,6 +60,8 @@ from app.models.variant_option_group import VariantOptionGroup
 from app.models.recipe_item import RecipeItem
 from app.models.inventory_item import InventoryItem
 from app.models.unit_measure import UnitMeasure
+from app.models.presentation import Presentation
+from app.models.category_presentation import CategoryPresentation
 
 _TABLE_NAMES = [
     "categories",
@@ -72,6 +74,9 @@ _TABLE_NAMES = [
     "inventory_items",
     "inventory_movements",
     "unit_measures",
+    # spec 083: catálogo de presentaciones + asociación categoría<->presentación.
+    "presentations",
+    "category_presentations",
 ]
 
 
@@ -225,6 +230,28 @@ def link_variant_group(
     kw.setdefault("max_select", 1)
     kw.setdefault("quantity_per_option", Decimal("0"))
     obj = VariantOptionGroup(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def make_presentation(db: Session, **kw) -> Presentation:
+    kw.setdefault("id", _uid())
+    kw.setdefault("name", f"presentacion-{kw['id']}")
+    kw.setdefault("active", True)
+    obj = Presentation(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def link_category_presentation(
+    db: Session, category: Category, presentation: Presentation, **kw
+) -> CategoryPresentation:
+    kw.setdefault("id", _uid())
+    kw.setdefault("category_id", category.id)
+    kw.setdefault("presentation_id", presentation.id)
+    obj = CategoryPresentation(**kw)
     db.add(obj)
     db.flush()
     return obj
