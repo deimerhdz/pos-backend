@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from app.characterization_tests import cart_fixtures as fx
 from app.api.v1.promotions import service
+from app.models.promotion import Promotion
 from app.api.v1.promotions.schemas import (
     PromotionCreate, PromotionShapeUpdate, PromotionUpdate,
 )
@@ -242,11 +243,45 @@ class TestUS3SolapeReal(unittest.TestCase):
         self.assertIn(str(self.v.id), conflicto["variant_ids"])
         self.assertIn("rule_id", conflicto)
 
-    def test_ca3_ventanas_horarias_disjuntas_permitido(self):
-        # quickstart §US3: "00:00–14:59" vs "15:00–cierre" → no se cruzan.
+    def test_ca3_ventanas_horarias_disjuntas_ya_no_alcanza__spec084_bloquea_por_producto(self):
+        """spec 084 (FR-021, A-78) cambia el resultado de este caso histórico:
+        `_guard_variant_overlap` (FR-014, sin cambio) SIGUE tolerando ventanas
+        horarias disjuntas sobre la misma variante -- lo que se ve abajo, en
+        `test_ca3b`, activando solo una de las dos. Pero `_guard_product_overlap`
+        (nuevo) no evalúa vigencia horaria en absoluto: dos promociones `active`
+        que comparten un producto chocan siempre, sin importar el horario -- por
+        eso la segunda activación de este caso (antes permitida) ahora se
+        rechaza."""
         self._activa("mañana", start_time=time(0, 0), end_time=time(14, 59))
-        self._activa("tarde", start_time=time(15, 0), end_time=time(23, 0))  # no debe lanzar
-        self.assertTrue(True)
+        with self.assertRaises(HTTPException) as ctx:
+            self._activa("tarde", start_time=time(15, 0), end_time=time(23, 0))
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("mañana", ctx.exception.detail)
+
+    def test_ca3b_guard_variant_overlap_solo_sigue_tolerando_ventanas_disjuntas(self):
+        """Confirma que `_guard_variant_overlap` en sí (FR-014) no cambió: sobre
+        la MISMA variante que ya cubre "mañana" (activa) pero con una ventana
+        horaria disjunta, esta guarda sola no lanza -- el 409 de `test_ca3` de
+        arriba viene de `_guard_product_overlap` (A-78, que sí evalúa esto),
+        no de una regresión en FR-014. Arma la promoción a mano (sin pasar por
+        `service.create()`, que ya encadena las dos guardas) para aislar
+        `_guard_variant_overlap` sola."""
+        self._activa("mañana", start_time=time(0, 0), end_time=time(14, 59))
+
+        tarde = Promotion(
+            name="tarde (aislada)", status="draft",
+            start_time=time(15, 0), end_time=time(23, 0),
+        )
+        self.db.add(tarde)
+        self.db.flush()
+        shape = PromotionShapeUpdate(rules=[_rule(
+            type="percent", value=Decimal("10"), min_qty=1, variant_ids=[self.v.id],
+        )])
+        service._add_rules(self.db, tarde, shape.rules)
+        self.db.flush()
+        self.db.refresh(tarde)
+
+        service._guard_variant_overlap(self.db, tarde)  # no debe lanzar
 
     def test_ca5_dimension_abierta_se_cruza_con_franja(self):
         self._activa("sin franja")  # cubre todas las horas
@@ -269,6 +304,10 @@ class TestUS5DuplicarEditarEstados(unittest.TestCase):
         prod = fx.make_product(self.db)
         self.v = fx.make_variant(self.db, product=prod, price=Decimal("10000"), name="v")
         self.v2 = fx.make_variant(self.db, product=prod, price=Decimal("9000"), name="v2")
+        # spec 084 (FR-021, A-78): variante de OTRO producto -- v2 comparte producto
+        # con self.v y ya no sirve para probar una edición que NO choque (ver
+        # test_ca4 abajo, ahora que la exclusividad es por producto completo).
+        self.v_otro_producto = fx.make_variant(self.db, price=Decimal("7000"), name="otro")
         self.db.commit()
         self.activa = service.create(self.db, _create_payload(
             name="activa", type="percent", value=Decimal("10"), min_qty=1,
@@ -329,17 +368,38 @@ class TestUS5DuplicarEditarEstados(unittest.TestCase):
             {pv.product_variant_id for pv in copia.rules[0].variants},
             {pv.product_variant_id for pv in self.activa.rules[0].variants},
         )
-        # Cambiar el valor y el conjunto de una regla en la copia (draft) sí
-        # se permite — con `self.v2` (no `self.v`, que sigue en uso por
-        # `self.activa`, todavía `Activa`: reusar la misma variante sí
-        # dispararía FR-014, correctamente, porque ambas promociones
-        # coexistirían sobre ella sin ninguna ventana que las separe).
+        # Cambiar el valor y el conjunto de una regla en la copia (draft) sí se
+        # permite — con `self.v_otro_producto` (de un producto sin ninguna
+        # relación con `self.activa`, todavía `Activa`). Antes de spec 084 se
+        # usaba `self.v2` (variante DISTINTA pero del MISMO producto que
+        # `self.v`): eso ya no sirve para probar una edición sin conflicto,
+        # porque `_guard_product_overlap` (FR-021, A-78) ahora bloquea
+        # cualquier variante de un producto que ya cubre otra promoción
+        # `active`, sin importar si es la misma variante u otra distinta — ver
+        # test_ca4b abajo, que prueba exactamente ese bloqueo nuevo.
         service.update_shape(self.db, copia, PromotionShapeUpdate(rules=[_rule(
             type="percent", value=Decimal("15"), min_qty=1,
-            variant_ids=[self.v2.id],
+            variant_ids=[self.v_otro_producto.id],
         )]))
         self.db.commit()
         self.assertEqual(copia.rules[0].value, Decimal("15"))
+
+    def test_ca4b_editar_la_copia_con_otra_variante_del_mismo_producto_bloquea(self):
+        """spec 084 (FR-021/FR-024, A-78): a diferencia de antes (test_ca4 arriba,
+        histórico), reusar una variante DISTINTA pero del MISMO producto que ya
+        cubre `self.activa` (todavía `Activa`) ahora se bloquea -- la exclusividad
+        es de producto completo, no de variante exacta (esa la sigue cubriendo
+        `_guard_variant_overlap`/FR-014, sin cambio, que no habría bloqueado esto)."""
+        copia = service.duplicate(self.db, self.activa, "activa (copia)")
+        self.db.commit()
+
+        with self.assertRaises(HTTPException) as ctx:
+            service.update_shape(self.db, copia, PromotionShapeUpdate(rules=[_rule(
+                type="percent", value=Decimal("15"), min_qty=1,
+                variant_ids=[self.v2.id],
+            )]))
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("activa", ctx.exception.detail)
 
     def test_ca6_cajero_no_puede_gestionar_promociones(self):
         """FR-019: solo el administrador del tenant gestiona promociones. El
