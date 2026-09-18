@@ -762,7 +762,19 @@ def create(db: Session, data) -> Promotion:
 def update(db: Session, promo: Promotion, data) -> Promotion:
     """Campos escalares de la **promoción** (FR-018): `type`/`value`/
     `min_qty`/conjunto ya no están en `PromotionUpdate` — viven en cada
-    regla y solo se editan por `update_shape`, y solo en `draft`."""
+    regla y solo se editan por `update_shape`, y solo en `draft`.
+
+    spec 084 (FR-008/FR-011, A-76): una promoción `active` deja de poder editarse por
+    esta vía -- antes no tenía ninguna guarda de estado, a diferencia de `update_shape`.
+    Deliberadamente NO se reutiliza la condición de `update_shape`
+    (`status not in ("draft", "paused")`): esa también bloquearía `finished`, y FR-009
+    exige que estos campos sigan editables en `Borrador`, `Pausada` y `Finalizada` --
+    solo `active` se bloquea aquí."""
+    if promo.status == "active":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Pausa la promoción antes de modificarla",
+        )
     provided = data.model_fields_set
     for field_name in ("name", "description", "ends_at",
                        "days_of_week", "start_time", "end_time"):

@@ -277,14 +277,29 @@ class TestUS5DuplicarEditarEstados(unittest.TestCase):
         service.change_status(self.db, self.activa, "active")
         self.db.commit()
 
-    def test_ca1_editar_escalares_de_una_activa(self):
-        service.update(self.db, self.activa, PromotionUpdate(
-            name="activa renombrada", ends_at=datetime(2026, 12, 31, tzinfo=timezone.utc),
-            days_of_week="0,1,2", start_time=time(9, 0), end_time=time(18, 0),
-        ))
+    def test_ca1_editar_escalares_de_una_activa_bloqueado(self):
+        """spec 084 (FR-008/FR-011, A-76): antes de esta spec, `service.update()` no
+        tenía ninguna guarda de `status` y esto se aplicaba con éxito -- ahora una
+        promoción `active` rechaza cualquier edición por esta vía con 409, sin importar
+        qué campos escalares se manden."""
+        with self.assertRaises(HTTPException) as ctx:
+            service.update(self.db, self.activa, PromotionUpdate(
+                name="activa renombrada", ends_at=datetime(2026, 12, 31, tzinfo=timezone.utc),
+                days_of_week="0,1,2", start_time=time(9, 0), end_time=time(18, 0),
+            ))
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.db.rollback()
+
+    def test_ca1b_editar_escalares_de_una_pausada_sigue_permitido(self):
+        """spec 084 FR-009: la guarda nueva de A-76 es específica de `active` -- en
+        `paused` (y en `draft`/`finished`, sin caso propio aquí) `service.update()`
+        sigue sin restricción, como ya lo estaba antes de esta spec."""
+        service.change_status(self.db, self.activa, "paused")
         self.db.commit()
-        self.assertEqual(self.activa.name, "activa renombrada")
-        self.assertEqual(self.activa.days_of_week, "0,1,2")
+
+        service.update(self.db, self.activa, PromotionUpdate(name="pausada renombrada"))
+        self.db.commit()
+        self.assertEqual(self.activa.name, "pausada renombrada")
 
     def test_ca2_cambiar_reglas_de_una_activa_bloquea(self):
         """spec 063 (revisión 2026-09-01, FR-018): `PromotionUpdate` ya no
@@ -361,6 +376,14 @@ class TestUS5MantenimientoPorLote(unittest.TestCase):
         self.db.commit()
 
     def test_editar_vigencia_de_promocion_multi_regla_afecta_a_todas_con_una_accion(self):
+        """spec 084 (FR-008/FR-011, A-76): `service.update()` ya no acepta editar una
+        promoción `active` (ver `TestUS5DuplicarEditarEstados.test_ca1_*` arriba) -- para
+        extender la vigencia hay que pausarla primero. Pausar sigue siendo una sola acción
+        que no toca las reglas, así que el resto de esta prueba (una sola llamada de
+        `update()` afecta a las 6 reglas) no cambia de fondo."""
+        service.change_status(self.db, self.promo, "paused")
+        self.db.commit()
+
         nueva_fecha = datetime(2026, 12, 31, tzinfo=timezone.utc)
         service.update(self.db, self.promo, PromotionUpdate(ends_at=nueva_fecha))
         self.db.commit()
