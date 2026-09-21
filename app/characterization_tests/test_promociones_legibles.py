@@ -57,7 +57,8 @@ class TestUS1TextoPorNombres(unittest.TestCase):
         db = fx.new_session()
         self._promo_paquete(db, ["Pequeño 8oz"] * 8)
 
-        self.assertEqual(_cartel(db), ["Llevando 2 Pequeño 8oz pagas $12.000"])
+        # spec 084 (A-82): con un solo nombre la cantidad va después.
+        self.assertEqual(_cartel(db), ["Llevando Pequeño 8oz x 2 pagas $12.000"])
 
     def test_ca2_conjunto_de_una_variante_nunca_dice_de_estas_1_variantes(self):
         """CA2: **el defecto reportado**. Un conjunto de una sola variante se
@@ -66,7 +67,7 @@ class TestUS1TextoPorNombres(unittest.TestCase):
         self._promo_paquete(db, ["Pequeño 8oz"])
 
         texto = _cartel(db)[0]
-        self.assertEqual(texto, "Llevando 2 Pequeño 8oz pagas $12.000")
+        self.assertEqual(texto, "Llevando Pequeño 8oz x 2 pagas $12.000")  # spec 084, A-82
         self.assertNotIn("de estas 1 variantes", texto)
 
     def test_ca3_tres_nombres_en_orden_alfabetico_no_en_el_de_seleccion(self):

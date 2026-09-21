@@ -76,7 +76,7 @@ def _case_linea_simple_sin_opciones() -> dict[str, Any]:
 
     return {
         "descripcion": "RN-CAT-01/RN-CAT-17: variante sin opciones, receta fija simple.",
-        "entrada": {"variante": variant.name, "precio_variante": _dec(variant.price), "cantidad": qty, "opciones": []},
+        "entrada": {"variante": variant.presentation_name, "precio_variante": _dec(variant.price), "cantidad": qty, "opciones": []},
         "precio_linea": _dec(price),
         "validacion_opciones": v_status if v_status == "ok" else v_val,
         "plan_consumo": [
@@ -106,7 +106,7 @@ def _case_opciones_extra_price_decimales() -> dict[str, Any]:
         "descripcion": "RN-CAT-01/RN-CAT-02: extras con decimales de 2 cifras, sin quantize; "
         "RN-CAT-34 sin_receta: el grupo elegido no descuenta inventario y no hay receta fija.",
         "entrada": {
-            "variante": variant.name, "precio_variante": _dec(variant.price), "cantidad": qty,
+            "variante": variant.presentation_name, "precio_variante": _dec(variant.price), "cantidad": qty,
             "opciones": [{"nombre": chispas.name, "extra_price": _dec(chispas.extra_price)},
                          {"nombre": cereza.name, "extra_price": _dec(cereza.extra_price)}],
         },
@@ -141,7 +141,7 @@ def _case_a02_tamano_manda_sobre_opcion() -> dict[str, Any]:
         "descripcion": "A-02 [PROTEGIDA] / RN-CAT-18: el tamaño (120g) manda sobre la opción "
         "(80g); nunca se suman (no da 200g).",
         "entrada": {
-            "variante": variant.name, "cantidad": qty,
+            "variante": variant.presentation_name, "cantidad": qty,
             "opciones": [o.name for o in opciones],
             "quantity_per_option_grupo": "120", "item_quantity_por_opcion": "80",
         },
@@ -173,7 +173,7 @@ def _case_opcion_manda_cuando_tamano_no_define() -> dict[str, Any]:
     return {
         "descripcion": "RN-CAT-18 (rama respaldo): el grupo no define quantity_per_option "
         "(0) -> manda item_quantity de la opción (15), multiplicado por cantidad vendida (3).",
-        "entrada": {"variante": variant.name, "cantidad": qty, "opciones": [chispas.name]},
+        "entrada": {"variante": variant.presentation_name, "cantidad": qty, "opciones": [chispas.name]},
         "precio_linea": _dec(price),
         "validacion_opciones": v_status if v_status == "ok" else v_val,
         "plan_consumo": [
@@ -203,7 +203,7 @@ def _case_dos_opciones_mismo_insumo() -> dict[str, Any]:
     return {
         "descripcion": "RN-CAT-21: dos opciones distintas apuntando al mismo insumo generan "
         "DOS líneas de consumo separadas, nunca una fusionada.",
-        "entrada": {"variante": variant.name, "cantidad": qty, "opciones": [o.name for o in opciones]},
+        "entrada": {"variante": variant.presentation_name, "cantidad": qty, "opciones": [o.name for o in opciones]},
         "precio_linea": _dec(price),
         "validacion_opciones": v_status if v_status == "ok" else v_val,
         "plan_consumo": [
@@ -229,7 +229,7 @@ def _case_opcion_sin_insumo_ligado() -> dict[str, Any]:
     return {
         "descripcion": "RN-CAT-22: opción sin `inventory_item_id` (aunque tenga item_quantity=50 "
         "mal cargado) no genera consumo -> plan vacío -> RN-CAT-34 sin_receta.",
-        "entrada": {"variante": variant.name, "cantidad": qty, "opciones": [sin_hielo.name]},
+        "entrada": {"variante": variant.presentation_name, "cantidad": qty, "opciones": [sin_hielo.name]},
         "precio_linea": _dec(price),
         "validacion_opciones": v_status if v_status == "ok" else v_val,
         "plan_consumo": [],
@@ -251,7 +251,7 @@ def _case_per_unit_cero_no_genera_linea() -> dict[str, Any]:
     return {
         "descripcion": "RN-CAT-23: insumo ligado pero cantidad resultante <=0 "
         "(quantity_per_option=0 Y item_quantity=0) -> no genera línea de consumo.",
-        "entrada": {"variante": variant.name, "cantidad": qty, "opciones": [opt.name]},
+        "entrada": {"variante": variant.presentation_name, "cantidad": qty, "opciones": [opt.name]},
         "precio_linea": _dec(compute_line_price(variant, _chosen(opt))),
         "validacion_opciones": "ok",
         "plan_consumo": [
@@ -275,7 +275,7 @@ def _case_grupo_obligatorio_seleccion_invalida() -> dict[str, Any]:
     return {
         "descripcion": "RN-CAT-28/RN-CAT-30: grupo obligatorio que descuenta exige EXACTAMENTE "
         "el máximo (2); elegir 1 se rechaza con 422 siempre, sin importar STRICT_OPTION_SELECTION.",
-        "entrada": {"variante": variant.name, "cantidad": qty, "opciones": [mango.name]},
+        "entrada": {"variante": variant.presentation_name, "cantidad": qty, "opciones": [mango.name]},
         "precio_linea": _dec(compute_line_price(variant, _chosen(mango))),
         "validacion_opciones": v_status if v_status == "ok" else v_val,
         "plan_consumo": "no_evaluado_en_este_caso",
@@ -292,7 +292,7 @@ def _case_variante_sin_receta_ni_grupo() -> dict[str, Any]:
 
     return {
         "descripcion": "RN-CAT-34: variante sin receta ni grupo configurado -> 409 sin_receta.",
-        "entrada": {"variante": variant.name, "cantidad": qty, "opciones": []},
+        "entrada": {"variante": variant.presentation_name, "cantidad": qty, "opciones": []},
         "precio_linea": _dec(compute_line_price(variant, [])),
         "validacion_opciones": "ok",
         "plan_consumo": [],
@@ -318,7 +318,7 @@ def _case_grupo_opcional_unica_fuente_sin_elegir() -> dict[str, Any]:
         "SÍ permite no elegir nada (grupo opcional), pero ensure_lines_consume_inventory "
         "bloquea igual con 409 sin_eleccion — contradice el propio comentario del código "
         "('una decisión legítima del comensal').",
-        "entrada": {"variante": variant.name, "cantidad": qty, "opciones": []},
+        "entrada": {"variante": variant.presentation_name, "cantidad": qty, "opciones": []},
         "precio_linea": _dec(compute_line_price(variant, [])),
         "validacion_opciones": v_status if v_status == "ok" else v_val,
         "plan_consumo": [],
@@ -347,7 +347,7 @@ def _case_a06_opcion_de_grupo_ajeno_tolerada() -> dict[str, Any]:
         "STRICT_OPTION_SELECTION=False (default), una opción de un grupo que la variante NO "
         "ofrece en absoluto pasa la validación sin error, sigue sumando su extra_price al "
         "cobro y sigue generando su propio consumo de inventario ajeno a la variante vendida.",
-        "entrada": {"variante": variant.name, "cantidad": qty, "opciones": [opcion_ajena.name]},
+        "entrada": {"variante": variant.presentation_name, "cantidad": qty, "opciones": [opcion_ajena.name]},
         "precio_linea": _dec(price),
         "validacion_opciones": v_status if v_status == "ok" else v_val,
         "plan_consumo": [

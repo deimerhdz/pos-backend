@@ -183,7 +183,7 @@ class ProductService:
             ).scalars().all()
 
         if presentaciones:
-            entradas = [VariantSaveIn(name=p.name) for p in presentaciones]
+            entradas = [VariantSaveIn(presentation_id=p.id) for p in presentaciones]
             self._save_variant_tree(db, product, entradas)
         else:
             ensure_default_variant(db, product)
@@ -238,7 +238,8 @@ class ProductService:
                 VariantSaveOut(
                     id=v.id,
                     product_id=v.product_id,
-                    name=v.name,
+                    presentation_id=v.presentation_id,
+                    presentation_name=v.presentation_name,
                     sku=v.sku,
                     price=v.price,
                     active=v.active,

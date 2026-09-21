@@ -46,7 +46,7 @@ class InheritPresentationsOnCreateTests(unittest.TestCase):
         )
         variants = self._variants(product.id)
         self.assertEqual(
-            {v.name for v in variants}, {"Pequeña", "Mediana", "Grande"}
+            {v.presentation_name for v in variants}, {"Pequeña", "Mediana", "Grande"}
         )
         self.assertTrue(all(v.price == Decimal("0") for v in variants))
         self.assertTrue(all(v.active for v in variants))
@@ -62,7 +62,7 @@ class InheritPresentationsOnCreateTests(unittest.TestCase):
         )
         variants = self._variants(product.id)
         self.assertEqual(len(variants), 1)
-        self.assertEqual(variants[0].name, "Presentación única")
+        self.assertEqual(variants[0].presentation_name, "Presentación única")
         self.assertEqual(variants[0].price, Decimal("0"))
 
     def test_presentacion_inactiva_asociada_no_se_hereda(self):
@@ -78,7 +78,7 @@ class InheritPresentationsOnCreateTests(unittest.TestCase):
             ProductCreate(category_id=cat.id, name="Ensalada", preparation_type="prepared"),
         )
         variants = self._variants(product.id)
-        self.assertEqual({v.name for v in variants}, {"Pequeña"})
+        self.assertEqual({v.presentation_name for v in variants}, {"Pequeña"})
 
     def test_presentacion_inactiva_unica_asociada_deja_categoria_efectivamente_sin_ninguna(self):
         """Si la única presentación asociada está inactiva, el producto cae en el
@@ -94,7 +94,7 @@ class InheritPresentationsOnCreateTests(unittest.TestCase):
         )
         variants = self._variants(product.id)
         self.assertEqual(len(variants), 1)
-        self.assertEqual(variants[0].name, "Presentación única")
+        self.assertEqual(variants[0].presentation_name, "Presentación única")
 
     def test_variants_explicitas_ignoran_las_presentaciones_de_categoria(self):
         """Si el cliente ya manda `variants`, la herencia automática no aplica."""
@@ -109,11 +109,14 @@ class InheritPresentationsOnCreateTests(unittest.TestCase):
             self.db, fx.make_tenant_stub(),
             ProductCreate(
                 category_id=cat.id, name="Ensalada", preparation_type="prepared",
-                variants=[VariantSaveIn(name="Familiar", price=Decimal("15000"))],
+                variants=[VariantSaveIn(
+                    presentation_id=fx._presentation_named(self.db, "Familiar").id,
+                    price=Decimal("15000"),
+                )],
             ),
         )
         variants = self._variants(product.id)
-        self.assertEqual([v.name for v in variants], ["Familiar"])
+        self.assertEqual([v.presentation_name for v in variants], ["Familiar"])
 
 
 if __name__ == "__main__":

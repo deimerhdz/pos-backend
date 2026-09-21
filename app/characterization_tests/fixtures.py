@@ -131,12 +131,34 @@ def make_product(db: Session, category: Category | None = None, **kw) -> Product
     return obj
 
 
+def _presentation_named(db: Session, name: str) -> Presentation:
+    """Get-or-create por nombre (`presentations.name` es UNIQUE): varias variantes de
+    tests distintos, o de productos distintos, comparten la fila de catálogo."""
+    existing = db.execute(
+        select(Presentation).where(Presentation.name == name)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    obj = Presentation(id=_uid(), name=name, active=True)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
 def make_variant(db: Session, product: Product | None = None, **kw) -> ProductVariant:
     if product is None:
         product = make_product(db)
     kw.setdefault("id", _uid())
     kw.setdefault("product_id", product.id)
-    kw.setdefault("name", f"variante-{kw['id']}")
+    # spec 084 (A-79): la variante ya no tiene columna `name`; su nombre es el de su
+    # presentación. `name=` sigue aceptándose aquí como atajo de los tests: se traduce a
+    # la presentación del catálogo con ese nombre (se crea si no existe).
+    if "presentation_id" not in kw:
+        kw["presentation_id"] = _presentation_named(
+            db, kw.pop("name", f"variante-{kw['id']}")
+        ).id
+    else:
+        kw.pop("name", None)
     kw.setdefault("price", Decimal("0"))
     kw.setdefault("active", True)
     if "display_order" not in kw:
