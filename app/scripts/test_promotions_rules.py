@@ -250,10 +250,10 @@ def _regla_texto(tipo, value, min_qty, nombres):
 # lenguajes, las superficies se separaron (SC-005).
 check("1. paquete, 8 variantes con el mismo nombre -> un solo nombre, sin 'entre'",
       _regla_texto("package_price", 12000, 2, ["Pequeño 8oz"] * 8)
-      == "Llevando 2 Pequeño 8oz pagas $12.000")
+      == "Llevando Pequeño 8oz x 2 pagas $12.000")  # spec 084, A-82
 check("2. paquete, conjunto de UNA variante -> nunca 'de estas 1 variantes'",
       _regla_texto("package_price", 12000, 2, ["Pequeño 8oz"])
-      == "Llevando 2 Pequeño 8oz pagas $12.000")
+      == "Llevando Pequeño 8oz x 2 pagas $12.000")  # spec 084, A-82
 check("3. paquete, 3 nombres -> orden alfabético (Grande primero), con 'entre'",
       _regla_texto("package_price", 15000, 2, ["Pequeño 8oz", "Mediano 12oz", "Grande 16oz"])
       == "Llevando 2 entre Grande 16oz, Mediano 12oz y Pequeño 8oz pagas $15.000")

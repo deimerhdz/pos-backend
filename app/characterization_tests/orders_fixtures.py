@@ -87,6 +87,7 @@ _CATALOG_TABLE_NAMES = [
     "categories",
     "products",
     "product_variants",
+    "presentations",  # spec 084 (A-79): la variante depende de su presentación
     "option_groups",
     "options",
     "variant_option_groups",

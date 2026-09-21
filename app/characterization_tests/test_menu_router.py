@@ -136,5 +136,61 @@ class TestMenuPromotionsAnnouncementUS5(unittest.TestCase):
         self.assertEqual(len(anuncios), 1)
 
 
+class TestAnunciosPorPresentacionSinDuplicar(unittest.TestCase):
+    """spec 084 (A-81): la regla «por presentación» se guarda como una regla de backend por
+    producto; el menú QR debe anunciarla UNA sola vez, no una por producto."""
+
+    NOW = datetime(2026, 8, 5, 18, 0, tzinfo=timezone.utc)
+
+    def _seed(self, db):
+        promo = fx.make_promotion(db, name="promo lunes a jueves", status="active")
+        # Dos productos con las mismas dos presentaciones; una regla de backend por producto
+        # y presentación (una variante cada una), como las genera el formulario.
+        for producto in ("Ojo de diablo", "Perla negra"):
+            prod = fx.make_product(db, name=producto)
+            for presentacion, precio in (("8 onzas", "12000"), ("12 onzas", "17000")):
+                v = fx.make_variant(db, product=prod, name=presentacion, price=Decimal("20000"))
+                fx.add_rule_to_promotion(
+                    db, promo, type="package_price", value=Decimal(precio), min_qty=2,
+                    variants=[v],
+                )
+        db.commit()
+        return promo
+
+    def test_una_linea_por_presentacion_aunque_haya_una_regla_por_producto(self):
+        db = fx.new_session()
+        self._seed(db)
+
+        (anuncio,) = _build_menu_promotions(db, self.NOW)
+
+        self.assertEqual(
+            sorted(r.text for r in anuncio.rules),
+            ["Llevando 12 onzas x 2 pagas $17.000", "Llevando 8 onzas x 2 pagas $12.000"],
+        )
+
+    def test_variant_count_suma_las_variantes_de_las_reglas_fusionadas(self):
+        db = fx.new_session()
+        self._seed(db)
+
+        (anuncio,) = _build_menu_promotions(db, self.NOW)
+
+        self.assertEqual([r.variant_count for r in anuncio.rules], [2, 2])
+
+    def test_reglas_con_texto_distinto_no_se_fusionan(self):
+        db = fx.new_session()
+        promo = fx.make_promotion(db, name="p", status="active")
+        prod = fx.make_product(db)
+        for nombre, valor in (("8 onzas", "12000"), ("12 onzas", "17000")):
+            v = fx.make_variant(db, product=prod, name=nombre, price=Decimal("20000"))
+            fx.add_rule_to_promotion(
+                db, promo, type="package_price", value=Decimal(valor), min_qty=2, variants=[v],
+            )
+        db.commit()
+
+        (anuncio,) = _build_menu_promotions(db, self.NOW)
+
+        self.assertEqual(len(anuncio.rules), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

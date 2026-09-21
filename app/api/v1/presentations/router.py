@@ -99,7 +99,7 @@ def create_presentation(
     "/{id}",
     response_model=PresentationResponse,
     summary="Actualizar una presentación",
-    description="Actualiza parcialmente una presentación. Solo se modifican los campos enviados. Sin endpoint de borrado físico: el único ciclo de vida es renombrar y/o alternar `active` en cualquier sentido.",
+    description="Actualiza parcialmente una presentación. Solo se modifican los campos enviados. Sin endpoint de borrado físico: el único ciclo de vida es renombrar y/o alternar `active` en cualquier sentido. Las variantes de producto no guardan el nombre: al renombrar, todas las que usan esta presentación lo reflejan de inmediato (spec 084, A-79).",
     response_description="La presentación actualizada.",
     responses={
         401: {"description": "No autenticado o token inválido."},
@@ -121,6 +121,9 @@ def update_presentation(
             db, Presentation, Presentation.name, body.name,
             "Presentation name already exists", exclude_id=id,
         )
+        # spec 084 (A-79): las variantes no guardan el nombre, lo leen de esta fila, así
+        # que el renombre les llega solo -- sin cascada y sin choque posible con otras
+        # variantes. Solo aplica la unicidad del catálogo (arriba).
         presentation.name = body.name
 
     if body.active is not None:

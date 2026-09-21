@@ -28,6 +28,12 @@ from app.characterization_tests import fixtures as fx
 from app.api.v1.products.service import ProductService
 from app.api.v1.products.schemas import ProductCreate, ProductUpdate
 from app.api.v1.catalog.schemas import VariantSaveIn, RecipeItemIn, VariantOptionGroupIn
+
+
+def _vs(db, presentation_name, **kw):
+    """`VariantSaveIn` de la presentación del catálogo con ese nombre (spec 084, A-79: la
+    variante ya no tiene `name`; el nombre lo da la presentación, que se crea si no existe)."""
+    return VariantSaveIn(presentation_id=fx._presentation_named(db, presentation_name).id, **kw)
 from app.models.product_variant import ProductVariant
 from app.models.recipe_item import RecipeItem
 from app.models.variant_option_group import VariantOptionGroup
@@ -128,15 +134,15 @@ class TestCreateProductWithVariantTree(unittest.TestCase):
             name="Cono Waffle",
             preparation_type="prepared",
             variants=[
-                VariantSaveIn(
-                    name="Pequeño",
+                _vs(
+                    db, "Pequeño",
                     price=Decimal("8000"),
                     recipe=[RecipeItemIn(inventory_item_id=item.id, quantity=Decimal("0.2"))],
                     option_groups=[
                         VariantOptionGroupIn(option_group_id=group.id, min_select=1, max_select=1)
                     ],
                 ),
-                VariantSaveIn(name="Grande", price=Decimal("12000")),
+                _vs(db, "Grande", price=Decimal("12000")),
             ],
         )
         product = service.create_product(db, fx.make_tenant_stub(), data)
@@ -146,14 +152,14 @@ class TestCreateProductWithVariantTree(unittest.TestCase):
             .where(ProductVariant.product_id == product.id)
             .order_by(ProductVariant.display_order)
         ).scalars().all()
-        self.assertEqual([v.name for v in variants], ["Pequeño", "Grande"])
+        self.assertEqual([v.presentation_name for v in variants], ["Pequeño", "Grande"])
         self.assertEqual([v.display_order for v in variants], [1, 2])
 
         # `Product.variants` (spec 042, `order_by=ProductVariant.display_order`) es la misma
         # relación que recorre el Menú QR (menu/router.py) -- confirma que el orden asignado por
         # el guardado consolidado también se ve por ese camino, no solo por query directa.
         db.expire(product)
-        self.assertEqual([v.name for v in product.variants], ["Pequeño", "Grande"])
+        self.assertEqual([v.presentation_name for v in product.variants], ["Pequeño", "Grande"])
 
         recipe = db.execute(
             select(RecipeItem).where(RecipeItem.product_variant_id == variants[0].id)
@@ -187,7 +193,7 @@ class TestCreateProductWithVariantTree(unittest.TestCase):
             select(ProductVariant).where(ProductVariant.product_id == product.id)
         ).scalars().all()
         self.assertEqual(len(variants), 1)
-        self.assertEqual(variants[0].name, "Presentación única")
+        self.assertEqual(variants[0].presentation_name, "Presentación única")
         self.assertEqual(variants[0].price, Decimal("0"))
 
     def test_respuesta_incluye_variants_con_receta_y_grupos_resueltos(self):
@@ -203,8 +209,8 @@ class TestCreateProductWithVariantTree(unittest.TestCase):
             name="Cono Waffle",
             preparation_type="prepared",
             variants=[
-                VariantSaveIn(
-                    name="Único",
+                _vs(
+                    db, "Único",
                     price=Decimal("5000"),
                     recipe=[RecipeItemIn(inventory_item_id=item.id, quantity=Decimal("0.1"))],
                 )
@@ -214,7 +220,7 @@ class TestCreateProductWithVariantTree(unittest.TestCase):
         response = service.to_save_response(product)
 
         self.assertEqual(len(response.variants), 1)
-        self.assertEqual(response.variants[0].name, "Único")
+        self.assertEqual(response.variants[0].presentation_name, "Único")
         self.assertEqual(len(response.variants[0].recipe), 1)
         self.assertEqual(response.variants[0].recipe[0].inventory_item_id, item.id)
 
@@ -233,8 +239,8 @@ class TestUpdateProductWithVariantTree(unittest.TestCase):
 
         data = ProductUpdate(
             variants=[
-                VariantSaveIn(id=v1.id, name="Pequeña", price=Decimal("1500")),  # editar
-                VariantSaveIn(name="Grande", price=Decimal("3000")),  # crear
+                _vs(db, "Pequeña", id=v1.id, price=Decimal("1500")),  # editar
+                _vs(db, "Grande", price=Decimal("3000")),  # crear
                 # v2 ("Mediana") no aparece -> se desactiva
             ]
         )
@@ -252,7 +258,7 @@ class TestUpdateProductWithVariantTree(unittest.TestCase):
             .where(ProductVariant.product_id == product.id, ProductVariant.active.is_(True))
             .order_by(ProductVariant.display_order)
         ).scalars().all()
-        self.assertEqual([v.name for v in active], ["Pequeña", "Grande"])
+        self.assertEqual([v.presentation_name for v in active], ["Pequeña", "Grande"])
         self.assertEqual([v.display_order for v in active], [1, 2])
 
     def test_reactivar_una_desactivada_conserva_la_receta_reenviada(self):
@@ -268,9 +274,9 @@ class TestUpdateProductWithVariantTree(unittest.TestCase):
 
         data = ProductUpdate(
             variants=[
-                VariantSaveIn(
+                _vs(
+                    db, "Pequeña",
                     id=v1.id,
-                    name="Pequeña",
                     price=v1.price,
                     recipe=[RecipeItemIn(inventory_item_id=item.id, quantity=Decimal("0.5"))],
                 )
@@ -300,7 +306,7 @@ class TestUpdateProductWithVariantTree(unittest.TestCase):
 
         v1_db = db.get(ProductVariant, v1.id)
         self.assertTrue(v1_db.active)
-        self.assertEqual(v1_db.name, "Pequeña")
+        self.assertEqual(v1_db.presentation_name, "Pequeña")
         self.assertEqual(v1_db.price, Decimal("1000.00"))
 
 
@@ -317,10 +323,10 @@ class TestConsolidatedSaveAtomicity(unittest.TestCase):
 
         data = ProductUpdate(
             variants=[
-                VariantSaveIn(id=existente.id, name="Pequeña", price=Decimal("1000")),
-                VariantSaveIn(name="Mediana", price=Decimal("2000")),
-                VariantSaveIn(name="Grande", price=Decimal("3000")),
-                VariantSaveIn(name="Pequeña", price=Decimal("4000")),  # choca con `existente`
+                _vs(db, "Pequeña", id=existente.id, price=Decimal("1000")),
+                _vs(db, "Mediana", price=Decimal("2000")),
+                _vs(db, "Grande", price=Decimal("3000")),
+                _vs(db, "Pequeña", price=Decimal("4000")),  # choca con `existente`
             ]
         )
         with self.assertRaises(HTTPException) as ctx:
@@ -348,7 +354,7 @@ class TestConsolidatedSaveAtomicity(unittest.TestCase):
             name="Producto con receta inválida",
             preparation_type="prepared",
             variants=[
-                VariantSaveIn(name="Única", price=Decimal("1000"), recipe=[
+                _vs(db, "Única", price=Decimal("1000"), recipe=[
                     RecipeItemIn(inventory_item_id=item.id, quantity=Decimal("1")),
                     RecipeItemIn(inventory_item_id=item.id, quantity=Decimal("2")),
                 ])
@@ -374,9 +380,9 @@ class TestConsolidatedSaveAtomicity(unittest.TestCase):
 
         data = ProductUpdate(
             variants=[
-                VariantSaveIn(
+                _vs(
+                    db, "Pequeña",
                     id=v1.id,
-                    name="Pequeña",
                     price=Decimal("9999"),
                     option_groups=[VariantOptionGroupIn(option_group_id=group.id)],
                 )

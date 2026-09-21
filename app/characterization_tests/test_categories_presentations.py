@@ -134,7 +134,7 @@ class NoRetroactivityTests(unittest.TestCase):
             ProductCreate(category_id=cat.id, name="Ensalada César", preparation_type="prepared"),
         )
         antes = {
-            v.name for v in self.db.execute(
+            v.presentation_name for v in self.db.execute(
                 sa_select(ProductVariant).where(ProductVariant.product_id == product.id)
             ).scalars()
         }
@@ -143,7 +143,7 @@ class NoRetroactivityTests(unittest.TestCase):
         update_category(cat.id, CategoryUpdate(presentation_ids=[]), self.db, None)
 
         despues = {
-            v.name for v in self.db.execute(
+            v.presentation_name for v in self.db.execute(
                 sa_select(ProductVariant).where(ProductVariant.product_id == product.id)
             ).scalars()
         }

@@ -291,8 +291,8 @@ def order_sale_lines(
         variant = db.get(ProductVariant, it.product_variant_id)
         product = db.get(Product, variant.product_id) if variant else None
         description = (
-            f"{product.name} - {variant.name}" if product
-            else (variant.name if variant else "")
+            f"{product.name} - {variant.presentation_name}" if product
+            else (variant.presentation_name if variant else "")
         )
         lines.append(SaleLine(
             product_variant_id=it.product_variant_id,
@@ -444,7 +444,10 @@ def compute_draft_preview(db: Session, data: DraftPreviewIn) -> CheckoutPreviewR
             )
         options = load_valid_options(db, item.options, variant=variant)
         product = db.get(Product, variant.product_id)
-        description = f"{product.name} - {variant.name}" if product else variant.name
+        description = (
+            f"{product.name} - {variant.presentation_name}" if product
+            else variant.presentation_name
+        )
         lines.append(SaleLine(
             product_variant_id=item.product_variant_id,
             description=description,

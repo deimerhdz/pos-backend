@@ -48,7 +48,7 @@ class EnsureDefaultVariantTests(unittest.TestCase):
         de "Single" a "Presentación única"."""
         product = f.make_product(self.db, name="Cono Waffle")
         variant = ensure_default_variant(self.db, product)
-        self.assertEqual(variant.name, "Presentación única")
+        self.assertEqual(variant.presentation_name, "Presentación única")
         self.assertEqual(variant.price, 0)
         self.assertEqual(variant.sku, "CONO-DEF")
         self.assertTrue(variant.active)
@@ -61,32 +61,46 @@ class EnsureDefaultVariantTests(unittest.TestCase):
 
 
 class VarianteDuplicadaTests(unittest.TestCase):
+    """spec 084 (A-79, registro-de-anomalias.md): la variante ya no tiene nombre; la
+    duplicidad dentro de un producto se detecta por `presentation_id`. RN-CAT-08
+    (comparación case-insensitive/con espacios recortados sobre el nombre de la variante)
+    deja de existir aquí: `Presentation.name` es UNIQUE en el catálogo y es ahí donde se
+    decide qué nombres son "el mismo". RN-CAT-09 (detecta incluso la desactivada) sigue."""
+
     def setUp(self):
         self.db = f.new_session()
 
-    def test_rn_cat_08_case_insensitive_y_espacios_recortados(self):
+    def test_rn_cat_08_detecta_la_misma_presentacion_en_el_producto(self):
         product = f.make_product(self.db)
-        f.make_variant(self.db, product=product, name="Pequeña")
-        found = variante_duplicada(self.db, product.id, "  pequeña  ")
+        v = f.make_variant(self.db, product=product, name="Pequeña")
+        found = variante_duplicada(self.db, product.id, v.presentation_id)
         self.assertIsNotNone(found)
-        self.assertEqual(found.name, "Pequeña")
+        self.assertEqual(found.presentation_name, "Pequeña")
 
     def test_rn_cat_09_detecta_incluso_variante_desactivada(self):
         product = f.make_product(self.db)
-        f.make_variant(self.db, product=product, name="Grande", active=False)
-        found = variante_duplicada(self.db, product.id, "Grande")
+        v = f.make_variant(self.db, product=product, name="Grande", active=False)
+        found = variante_duplicada(self.db, product.id, v.presentation_id)
         self.assertIsNotNone(found)
         self.assertFalse(found.active)
 
-    def test_variante_duplicada_no_encuentra_nombre_distinto(self):
+    def test_variante_duplicada_no_encuentra_otra_presentacion(self):
         product = f.make_product(self.db)
         f.make_variant(self.db, product=product, name="Grande")
-        self.assertIsNone(variante_duplicada(self.db, product.id, "Mediana"))
+        otra = f.make_presentation(self.db, name="Mediana")
+        self.assertIsNone(variante_duplicada(self.db, product.id, otra.id))
+
+    def test_variante_duplicada_no_cruza_productos(self):
+        v = f.make_variant(self.db, name="Grande")
+        otro_producto = f.make_product(self.db)
+        self.assertIsNone(variante_duplicada(self.db, otro_producto.id, v.presentation_id))
 
     def test_variante_duplicada_respeta_exclude_id(self):
         product = f.make_product(self.db)
         v = f.make_variant(self.db, product=product, name="Grande")
-        self.assertIsNone(variante_duplicada(self.db, product.id, "Grande", exclude_id=v.id))
+        self.assertIsNone(
+            variante_duplicada(self.db, product.id, v.presentation_id, exclude_id=v.id)
+        )
 
 
 if __name__ == "__main__":

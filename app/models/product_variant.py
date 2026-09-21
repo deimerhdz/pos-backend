@@ -9,11 +9,14 @@ if TYPE_CHECKING:
     from .product import Product
     from .recipe_item import RecipeItem
     from .variant_option_group import VariantOptionGroup
+    from .presentation import Presentation
 
 
 class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Línea vendible: aquí viven el precio y la receta. Productos sin tamaños
-    obtienen una variante 'Presentación única' (spec 083, A-74)."""
+    """Línea vendible: aquí viven el precio y la receta. Su nombre es el de su
+    `Presentation` (spec 084, A-79): no hay columna `name`. Productos sin tamaños
+    obtienen una variante asociada a la presentación 'Presentación única'
+    (spec 083, A-74)."""
 
     __tablename__ = "product_variants"
 
@@ -21,10 +24,6 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
     )
     product: Mapped["Product"] = relationship(back_populates="variants")
-
-    name: Mapped[str] = mapped_column(
-        String(255), nullable=False, server_default="Presentación única"
-    )
 
     sku: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, unique=True)
 
@@ -39,9 +38,19 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # una variante (fixtures de test incluidas) debe asignarlo explícitamente.
     display_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # spec 063 (A-63): `presentation_id` se elimina — la entidad `Presentation` y
-    # su modelo de datos (spec 040) se revierten. Las promociones referencian
-    # `product_variants` directamente vía `promotion_variants`.
+    # spec 084 (A-79): la presentación del catálogo (spec 083) es obligatoria y es la única
+    # fuente del nombre de la variante (`presentation_name`). RESTRICT y no SET NULL/CASCADE:
+    # no hay endpoint de borrado de `Presentation`, pero si alguien la borra a mano no debe
+    # arrastrar variantes (ni recetas ni historial) ni dejarlas sin nombre. `lazy="joined"`
+    # porque toda lectura de una variante necesita su nombre (evita N+1 en el menú público).
+    presentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentations.id", ondelete="RESTRICT"), nullable=False
+    )
+    presentation: Mapped["Presentation"] = relationship(lazy="joined")
+
+    @property
+    def presentation_name(self) -> str:
+        return self.presentation.name
 
     recipe_items: Mapped[List["RecipeItem"]] = relationship(
         back_populates="product_variant", cascade="all, delete-orphan"
@@ -53,9 +62,12 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __table_args__ = (
         CheckConstraint("price >= 0", name="ck_product_variant_price_positive"),
-        UniqueConstraint("product_id", "name", name="uq__product_variants__product_id__name"),
         UniqueConstraint(
             "product_id", "display_order", name="uq__product_variants__product_id__display_order"
+        ),
+        UniqueConstraint(
+            "product_id", "presentation_id",
+            name="uq__product_variants__product_id__presentation_id",
         ),
         {"schema": "tenant"},
     )
