@@ -88,13 +88,16 @@ class DeleteReactivateOrderTests(unittest.TestCase):
     def setUp(self):
         self.db = f.new_session()
 
-    def test_editar_nombre_o_precio_no_cambia_el_orden(self):
+    def test_editar_presentacion_o_precio_no_cambia_el_orden(self):
         product = f.make_product(self.db)
         variant = f.make_variant(self.db, product, name="Pequeña", display_order=1)
-        update_variant(variant.id, VariantUpdate(name="Chica", price=5000), self.db, None)
+        chica = f.make_presentation(self.db, name="Chica")
+        update_variant(
+            variant.id, VariantUpdate(presentation_id=chica.id, price=5000), self.db, None
+        )
         self.db.refresh(variant)
         self.assertEqual(variant.display_order, 1)
-        self.assertEqual(variant.name, "Chica")
+        self.assertEqual(variant.presentation_name, "Chica")
 
     def test_eliminar_no_deja_huecos_ni_toca_las_demas(self):
         product = f.make_product(self.db)

@@ -184,7 +184,8 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
                     promotion = menu_variant_promotion(rules, v.id, v.price, promo_names)
 
                 variants.append(MenuVariantResponse(
-                    id=v.id, name=v.name, price=v.price, discounted_price=discounted_price,
+                    id=v.id, presentation_id=v.presentation_id,
+                    presentation_name=v.presentation_name, price=v.price, discounted_price=discounted_price,
                     discount_kind=discount_kind, option_groups=groups, available=v_pedible,
                     promotion=promotion,
                 ))
@@ -239,6 +240,14 @@ def _build_menu_promotions(db: Session, now: datetime) -> list[MenuPromotionAnno
                 promotion_id=promo.id, promotion_name=promo.name, rules=[],
             )
             by_promotion[promo.id] = anuncio
+        # spec 084 (A-81): la configuración por presentación se guarda como una regla por
+        # producto (una variante cada una), así que varias reglas de una misma promoción
+        # producen el MISMO texto («Llevando 8 onzas x 2 pagas $12.000»). Se anuncia una sola
+        # vez y `variant_count` suma las variantes de todas las reglas fusionadas.
+        existente = next((r for r in anuncio.rules if r.text == text), None)
+        if existente is not None:
+            existente.variant_count += len(rule.variants)
+            continue
         anuncio.rules.append(MenuPromotionRule(
             text=text,
             variant_count=len(rule.variants),

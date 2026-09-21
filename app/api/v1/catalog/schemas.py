@@ -7,11 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ---------- Variantes ----------
 class VariantCreate(BaseModel):
-    # Se recortan los espacios antes de validar: «Pequeña » no es una presentación
-    # distinta de «Pequeña», y un nombre de solo espacios queda en 422 por min_length.
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    name: str = Field(..., min_length=1, max_length=255, examples=["1 bola", "2 bolas"])
+    # spec 084 (A-79): la variante no tiene nombre propio; lo da su presentación del
+    # catálogo. `None` = "Presentación única".
+    presentation_id: UUID | None = None
     price: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
     sku: str | None = Field(None, max_length=100)
 
@@ -19,7 +19,8 @@ class VariantCreate(BaseModel):
 class VariantUpdate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    name: str | None = Field(None, min_length=1, max_length=255)
+    # Ausente o `None` = sin cambio de presentación.
+    presentation_id: UUID | None = None
     price: Decimal | None = Field(None, ge=0, max_digits=12, decimal_places=2)
     sku: str | None = Field(None, max_length=100)
     active: bool | None = None
@@ -28,13 +29,12 @@ class VariantUpdate(BaseModel):
 class VariantResponse(BaseModel):
     id: UUID
     product_id: UUID
-    name: str
     sku: str | None = None
     price: Decimal
     active: bool
-    # spec 084 FR-001: presentación del catálogo (spec 083) asociada a esta variante,
-    # o `None` si no tiene ninguna (comportamiento sin cambio, FR-007).
-    presentation_id: UUID | None = None
+    # spec 084 (A-79): el nombre de la variante es el de su presentación.
+    presentation_id: UUID
+    presentation_name: str
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -112,17 +112,13 @@ class VariantSaveIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     id: UUID | None = None
-    name: str = Field(..., min_length=1, max_length=255, examples=["1 bola", "2 bolas"])
     price: Decimal = Field(0, ge=0, max_digits=12, decimal_places=2)
     sku: str | None = Field(None, max_length=100)
     active: bool = True
     recipe: list[RecipeItemIn] = Field(default_factory=list)
     option_groups: list[VariantOptionGroupIn] = Field(default_factory=list)
-    # spec 084 FR-001: presentación del catálogo (spec 083) a asociar con esta
-    # variante, o `None` para "Sin presentación" (FR-005). Cuando no es `None`,
-    # el `name` de arriba se ignora y se reemplaza por el de la presentación
-    # (FR-002/003) -- sigue siendo obligatorio en el payload por compatibilidad
-    # con el resto del guardado consolidado, que siempre lo exige.
+    # spec 084 (A-79): presentación del catálogo (spec 083) que nombra a esta variante.
+    # `None` = "Presentación única" (productos sin tamaños). No hay campo `name`.
     presentation_id: UUID | None = None
 
 

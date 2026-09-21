@@ -225,7 +225,10 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
         for line in data.items:
             variant = get_or_404(db, ProductVariant, line.product_variant_id, "Variant not found")
             product = db.get(Product, variant.product_id)
-            description = f"{product.name} - {variant.name}" if product else variant.name
+            description = (
+                f"{product.name} - {variant.presentation_name}" if product
+                else variant.presentation_name
+            )
 
             # Deduplica, exige que estén activas y valida la selección contra los
             # grupos del producto. Antes este bucle cargaba las opciones a mano y se

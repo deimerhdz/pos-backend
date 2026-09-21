@@ -23,7 +23,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
@@ -35,6 +35,7 @@ from app.core.config import settings
 from app.core.models import Tenant
 from app.core.timezone import resolve_timezone
 from app.models.product import Product
+from app.models.presentation import Presentation
 from app.models.product_variant import ProductVariant
 from app.models.promotion import (
     PROMOTION_TRANSITIONS, Promotion, PromotionRule, PromotionVariant,
@@ -461,8 +462,9 @@ def variant_display_names(db: Session, variant_ids: Iterable[UUID]) -> dict[UUID
     if not ids:
         return {}
     rows = db.execute(
-        select(ProductVariant.id, ProductVariant.name, Product.name)
+        select(ProductVariant.id, Presentation.name, Product.name)
         .join(Product, Product.id == ProductVariant.product_id)
+        .join(Presentation, Presentation.id == ProductVariant.presentation_id)
         .where(ProductVariant.id.in_(ids))
     ).all()
     names: dict[UUID, str] = {}
@@ -498,10 +500,16 @@ def variant_set_condition_text(rule: PromotionRule, names: Mapping[UUID, str]) -
     # Sin ningún nombre utilizable se conserva el respaldo por conteo (FR-006).
     d = descriptor[0] if descriptor else f"estas {n} variantes"
     e = "entre " if descriptor and descriptor[1] else ""
+    # spec 084 (A-82): cuando el conjunto se nombra con UN solo nombre (una presentación),
+    # la cantidad va después: «Llevando 8 onzas x 2 pagas $12.000». Los conjuntos con varios
+    # nombres conservan «Llevando 2 entre A, B y C pagas $X» (aquí `x` no diría "cualquiera de").
+    single = descriptor is not None and not descriptor[1]
     if rule.type == "package_price":
         if rule.min_qty > 1:
             if descriptor is None:
                 return f"Llevando {rule.min_qty} de {d} pagas {_money(value)}"
+            if single:
+                return f"Llevando {d} x {rule.min_qty} pagas {_money(value)}"
             return f"Llevando {rule.min_qty} {e}{d} pagas {_money(value)}"
         if descriptor is None:
             return f"Cada una de {d} a {_money(value)}"
@@ -517,6 +525,8 @@ def variant_set_condition_text(rule: PromotionRule, names: Mapping[UUID, str]) -
         return f"{pct}% en {d}"
     if descriptor is None:
         return f"{pct}% llevando {rule.min_qty} de {d}"
+    if single:
+        return f"{pct}% llevando {d} x {rule.min_qty}"
     return f"{pct}% llevando {rule.min_qty} {e}{d}"
 
 
@@ -933,6 +943,32 @@ def duplicate(db: Session, promo: Promotion, new_name: str) -> Promotion:
     return copy
 
 
+def duplicate_replacing(
+    db: Session, promo: Promotion, new_name: str, existing: Promotion
+) -> Promotion:
+    """spec 084 (A-83): duplica `promo` con `new_name` **reemplazando** a `existing`, la
+    promoción que ya usa ese nombre (que puede ser la propia `promo`).
+
+    Todo en la misma transacción del llamador: la copia se crea primero con un nombre
+    temporal (así también funciona cuando `existing` es la fuente y se lee antes de
+    borrarla), luego se elimina `existing` con todas sus reglas (cascada) y por último la
+    copia toma el nombre. Una promoción `active` nunca se reemplaza: hay que pausarla antes.
+    """
+    if existing.status == "active":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"La promoción «{existing.name}» está activa y no se puede reemplazar. "
+            "Pausa la promoción antes de duplicarla con ese nombre.",
+        )
+    temp_name = f"{new_name[:200]} · copia {uuid4().hex[:8]}"
+    copy = duplicate(db, promo, temp_name)
+    db.delete(existing)
+    db.flush()
+    copy.name = new_name
+    db.flush()
+    return copy
+
+
 # --------------------------- Serialización ---------------------------
 
 def _serialize_rule(rule: PromotionRule, by_id: dict) -> dict:
@@ -946,14 +982,14 @@ def _serialize_rule(rule: PromotionRule, by_id: dict) -> dict:
         v, p = by_id.get(pv.product_variant_id, (None, None))
         if v is None:
             continue
-        usable = (v.name or "").strip()
+        usable = (v.presentation_name or "").strip()
         if not usable and p:
             usable = (p.name or "").strip()
         if usable:
             names[pv.product_variant_id] = usable
         variants.append({
             "product_variant_id": pv.product_variant_id,
-            "description": f"{p.name} - {v.name}" if p else v.name,
+            "description": f"{p.name} - {v.presentation_name}" if p else v.presentation_name,
             "unit_price": Decimal(v.price),
         })
     return {

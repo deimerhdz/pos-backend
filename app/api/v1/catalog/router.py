@@ -16,10 +16,11 @@ from app.models.recipe_item import RecipeItem
 from app.models.inventory_item import InventoryItem
 from app.models.option_group import OptionGroup
 from app.models.option import Option
+from app.models.presentation import Presentation
 from app.models.variant_option_group import VariantOptionGroup
 from app.api.v1.catalog.service import (
     ensure_default_variant,
-    variante_duplicada,
+    _resolve_presentation,
     _unique_sku,
     _slug,
     _next_display_order,
@@ -42,31 +43,6 @@ router = APIRouter(tags=["catalog"])
 
 
 # ============================ Variantes ============================
-def _bloquear_nombre_duplicado(
-    db: Session, product_id: UUID, name: str, *, exclude_id: UUID | None = None
-) -> None:
-    """409 si otra variante del producto ya ocupa ese nombre.
-
-    Devuelve `variant_id` y `active` en el detalle para que el editor pueda ofrecer
-    «reactivar esta presentación» (un `PATCH {active: true}`) cuando la que estorba es
-    una desactivada, que el frontend no lista y por eso el usuario intenta recrear.
-    """
-    dup = variante_duplicada(db, product_id, name, exclude_id=exclude_id)
-    if dup is None:
-        return
-    if dup.active:
-        mensaje = f"Ya existe una variante «{dup.name}» en este producto"
-    else:
-        mensaje = (
-            f"Ya existe una variante «{dup.name}» desactivada en este producto. "
-            "Reactívala en vez de crear otra."
-        )
-    raise HTTPException(
-        status.HTTP_409_CONFLICT,
-        detail={"error": mensaje, "variant_id": str(dup.id), "active": dup.active},
-    )
-
-
 def _commit_variante(db: Session, variant: ProductVariant) -> ProductVariant:
     """Commit + refresh traduciendo el choque de la constraint única a 409.
 
@@ -78,7 +54,7 @@ def _commit_variante(db: Session, variant: ProductVariant) -> ProductVariant:
         db.rollback()
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "Ya existe una variante con ese nombre o SKU",
+            "Ya existe una variante con esa presentación o SKU",
         )
     db.refresh(variant)
     return variant
@@ -112,7 +88,8 @@ def list_variants(
     summary="Crear una variante para un producto",
     responses={
         404: {"description": "El producto no existe."},
-        409: {"description": "Ya existe una variante con ese nombre (activa o desactivada) o con ese SKU."},
+        409: {"description": "Ya existe una variante con esa presentación (activa o desactivada) o con ese SKU."},
+        422: {"description": "La presentación no existe o está inactiva."},
     },
 )
 def create_variant(
@@ -122,14 +99,14 @@ def create_variant(
     _: User = Depends(require_tenant_admin),
 ):
     product = get_or_404(db, Product, product_id, "Product not found")
-    name = body.name  # ya viene recortado por el schema
-    _bloquear_nombre_duplicado(db, product_id, name)
+    # spec 084 (A-79): sin nombre propio; `presentation_id` nulo = "Presentación única".
+    presentation = _resolve_presentation(db, product_id, body.presentation_id)
     if body.sku is not None:
         ensure_unique(db, ProductVariant, ProductVariant.sku, body.sku, "SKU already exists")
-    sku = body.sku or _unique_sku(db, f"{_slug(product.name)}-{_slug(name)}")
+    sku = body.sku or _unique_sku(db, f"{_slug(product.name)}-{_slug(presentation.name)}")
     variant = ProductVariant(
         product_id=product_id,
-        name=name,
+        presentation_id=presentation.id,
         price=body.price,
         sku=sku,
         active=True,
@@ -142,10 +119,11 @@ def create_variant(
 @router.patch(
     "/variants/{variant_id}",
     response_model=VariantResponse,
-    summary="Actualizar una variante (nombre, precio, sku, activa)",
+    summary="Actualizar una variante (presentación, precio, sku, activa)",
     responses={
         404: {"description": "La variante no existe."},
-        409: {"description": "Otra variante del producto ya usa ese nombre, o el SKU está tomado."},
+        409: {"description": "Otra variante del producto ya usa esa presentación, o el SKU está tomado."},
+        422: {"description": "La presentación no existe o está inactiva."},
     },
 )
 def update_variant(
@@ -158,11 +136,11 @@ def update_variant(
     if body.sku is not None and body.sku != variant.sku:
         ensure_unique(db, ProductVariant, ProductVariant.sku, body.sku, "SKU already exists")
         variant.sku = body.sku
-    if body.name is not None and body.name != variant.name:
-        _bloquear_nombre_duplicado(
-            db, variant.product_id, body.name, exclude_id=variant_id
+    if body.presentation_id is not None and body.presentation_id != variant.presentation_id:
+        presentation = _resolve_presentation(
+            db, variant.product_id, body.presentation_id, current=variant
         )
-        variant.name = body.name
+        variant.presentation_id = presentation.id
     if body.price is not None:
         variant.price = body.price
     if body.active is not None:
@@ -232,8 +210,9 @@ def _variantes_que_lo_usan(db: Session, group_id: UUID) -> list[str]:
     vendiendo sin descontar. Se bloquea en vez de borrar en cascada, que es exactamente
     el tipo de fallo silencioso que costó caro antes."""
     stmt = (
-        select(Product.name, ProductVariant.name)
+        select(Product.name, Presentation.name)
         .join(ProductVariant, ProductVariant.product_id == Product.id)
+        .join(Presentation, Presentation.id == ProductVariant.presentation_id)
         .join(VariantOptionGroup, VariantOptionGroup.product_variant_id == ProductVariant.id)
         .where(VariantOptionGroup.option_group_id == group_id)
     )

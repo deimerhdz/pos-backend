@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.product import Product
@@ -49,51 +50,76 @@ def _next_display_order(db: Session, product_id: UUID) -> int:
     return (current_max or 0) + 1
 
 
+DEFAULT_PRESENTATION_NAME = "Presentación única"
+
+
+def default_presentation(db: Session) -> Presentation:
+    """Presentación del catálogo que nombra la variante de un producto sin tamaños
+    (spec 084, A-79/A-74). Get-or-create por nombre exacto, sin filtrar `active`: una
+    presentación desactivada por el administrador solo deja de ofrecerse en el selector,
+    no deja de nombrar las variantes que ya la usan. Sin marca de "presentación del
+    sistema": si el administrador la renombró, se crea otra con el literal (research.md D11).
+    """
+    existing = db.execute(
+        select(Presentation).where(Presentation.name == DEFAULT_PRESENTATION_NAME).limit(1)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    presentation = Presentation(name=DEFAULT_PRESENTATION_NAME, active=True)
+    try:
+        # SAVEPOINT: si otra petición la creó a la vez (`presentations.name` es UNIQUE),
+        # se descarta solo este INSERT y se reutiliza la ganadora, sin perder el resto de
+        # la transacción del guardado consolidado.
+        with db.begin_nested():
+            db.add(presentation)
+    except IntegrityError:
+        return db.execute(
+            select(Presentation).where(Presentation.name == DEFAULT_PRESENTATION_NAME).limit(1)
+        ).scalar_one()
+    return presentation
+
+
 def variante_duplicada(
     db: Session,
     product_id: UUID,
-    name: str,
+    presentation_id: UUID,
     *,
     exclude_id: UUID | None = None,
 ) -> ProductVariant | None:
-    """Variante del mismo producto que ya ocupa ese nombre, esté activa o no.
+    """Variante del mismo producto que ya ocupa esa presentación, esté activa o no.
 
     Existe porque `DELETE /variants/{id}` es un soft-delete: la fila desactivada sigue
-    ocupando el nombre en `uq__product_variants__product_id__name`, así que recrear una
-    presentación borrada choca con la constraint. Sin esta comprobación el conflicto
-    llegaba al `commit()` y salía como 500 en vez de un 409 accionable.
-
-    La búsqueda es case-insensitive aunque la constraint no lo sea: en una carta
-    «Pequeña» y «pequeña» son la misma presentación y dos filas confundirían al cajero.
+    ocupando la presentación en `uq__product_variants__product_id__presentation_id`, así que
+    volver a crear un tamaño borrado choca con la constraint. Sin esta comprobación el
+    conflicto llegaba al `commit()` y salía como 500 en vez de un 409 accionable.
     Ordena activas primero para que el 409 hable de la que el usuario tiene a la vista.
     """
     stmt = (
         select(ProductVariant)
         .where(
             ProductVariant.product_id == product_id,
-            func.lower(func.trim(ProductVariant.name)) == name.strip().lower(),
+            ProductVariant.presentation_id == presentation_id,
         )
         .order_by(ProductVariant.active.desc())
     )
     if exclude_id is not None:
         stmt = stmt.where(ProductVariant.id != exclude_id)
-    # `.first()` y no `scalar_one_or_none()`: si los datos ya traen dos filas que solo
-    # difieren en mayúsculas, esto no debe reventar con MultipleResultsFound.
     return db.execute(stmt).scalars().first()
 
 
 def ensure_default_variant(db: Session, product: Product, *, price=0) -> ProductVariant:
     """Garantiza que un producto tenga al menos una variante vendible. Los
-    productos sin tamaños obtienen una variante 'Presentación única' (spec 083,
-    A-74: renombre de "Single", registro-de-anomalias.md)."""
+    productos sin tamaños obtienen una variante asociada a la presentación
+    'Presentación única' (spec 083, A-74; spec 084, A-79)."""
     existing = db.execute(
         select(ProductVariant).where(ProductVariant.product_id == product.id).limit(1)
     ).scalar_one_or_none()
     if existing is not None:
         return existing
+    presentation = default_presentation(db)
     variant = ProductVariant(
         product_id=product.id,
-        name="Presentación única",
+        presentation_id=presentation.id,
         sku=_unique_sku(db, f"{_slug(product.name)}-DEF"),
         price=price,
         active=True,
@@ -119,23 +145,18 @@ def ensure_default_variant(db: Session, product: Product, *, price=0) -> Product
 # `variant_index` para identificar qué entrada del payload falló (research.md Decisión 5).
 
 
-def _raise_name_conflict(dup: ProductVariant, index: int) -> None:
+def _raise_presentation_conflict(dup: ProductVariant, index: int | None) -> None:
     if dup.active:
-        mensaje = f"Ya existe una variante «{dup.name}» en este producto"
+        mensaje = "Esta presentación ya está en uso por otra variante de este producto"
     else:
         mensaje = (
-            f"Ya existe una variante «{dup.name}» desactivada en este producto. "
-            "Reactívala en vez de crear otra."
+            f"Ya existe una variante «{dup.presentation_name}» desactivada en este "
+            "producto. Reactívala en vez de crear otra."
         )
-    raise HTTPException(
-        status.HTTP_409_CONFLICT,
-        detail={
-            "error": mensaje,
-            "variant_index": index,
-            "variant_id": str(dup.id),
-            "active": dup.active,
-        },
-    )
+    detail = {"error": mensaje, "variant_id": str(dup.id), "active": dup.active}
+    if index is not None:
+        detail["variant_index"] = index
+    raise HTTPException(status.HTTP_409_CONFLICT, detail=detail)
 
 
 def _ensure_sku_unique(
@@ -222,42 +243,33 @@ def _resolve_presentation(
     db: Session,
     product_id: UUID,
     presentation_id: UUID | None,
-    index: int,
+    index: int | None = None,
     *,
-    exclude_variant_id: UUID | None = None,
-) -> Presentation | None:
-    """Resuelve la presentación del catálogo (spec 083) que una entrada de variante pide
-    asociar (spec 084, FR-001). `None` es "Sin presentación" (FR-005), sin validar nada.
+    current: ProductVariant | None = None,
+) -> Presentation:
+    """Presentación del catálogo (spec 083) que una entrada de variante pide asociar
+    (spec 084, A-79). `None` significa "Presentación única" (`default_presentation`).
 
-    `exclude_variant_id` es la propia variante que se está actualizando (si la hay): permite
-    guardar sin cambios una variante que ya tenía esta presentación asociada, sin que se
-    detecte a sí misma como el "otro" uso en conflicto (FR-006).
+    `current` es la variante que se está actualizando (si la hay): puede seguir usando
+    una presentación que se desactivó después, y no se detecta a sí misma como el "otro"
+    uso en conflicto (FR-006).
     """
     if presentation_id is None:
-        return None
-    presentation = db.get(Presentation, presentation_id)
-    if presentation is None or not presentation.active:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error": "La presentación seleccionada no existe o está inactiva",
-                "variant_index": index,
-            },
-        )
-    stmt = select(ProductVariant.id).where(
-        ProductVariant.product_id == product_id,
-        ProductVariant.presentation_id == presentation_id,
+        presentation = default_presentation(db)
+    else:
+        presentation = db.get(Presentation, presentation_id)
+        keeps_current = current is not None and current.presentation_id == presentation_id
+        if presentation is None or not (presentation.active or keeps_current):
+            detail = {"error": "La presentación seleccionada no existe o está inactiva"}
+            if index is not None:
+                detail["variant_index"] = index
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
+    dup = variante_duplicada(
+        db, product_id, presentation.id,
+        exclude_id=current.id if current is not None else None,
     )
-    if exclude_variant_id is not None:
-        stmt = stmt.where(ProductVariant.id != exclude_variant_id)
-    if db.execute(stmt).first() is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={
-                "error": "Esta presentación ya está en uso por otra variante de este producto",
-                "variant_index": index,
-            },
-        )
+    if dup is not None:
+        _raise_presentation_conflict(dup, index)
     return presentation
 
 
@@ -276,37 +288,14 @@ def _save_variant_entry(
     No asigna el `display_order` final (lo hace `_assign_display_orders` una vez resueltas todas
     las entradas) ni hace `commit()` -- el llamador controla la transacción completa.
 
-    spec 084 (FR-001 a FR-006): si `entry.presentation_id` no es `None`, el nombre efectivo de
-    la variante deja de ser `entry.name` y pasa a ser el de la presentación del catálogo
-    (`Presentation.name`) -- el frontend ya lo muestra como derivado/no editable mientras haya
-    una presentación elegida (FR-002/003), pero el backend es quien decide el valor final.
+    spec 084 (A-79): la variante no tiene nombre propio; su nombre es el de su presentación
+    (`entry.presentation_id`, `None` = "Presentación única"). Cambiar el nombre de una variante
+    es cambiarle la presentación.
     """
-    presentation = _resolve_presentation(
-        db, product.id, entry.presentation_id, index, exclude_variant_id=entry.id
-    )
-    effective_name = presentation.name if presentation is not None else entry.name
-
-    if entry.id is None:
-        dup = variante_duplicada(db, product.id, effective_name)
-        if dup is not None:
-            _raise_name_conflict(dup, index)
-        if entry.sku is not None:
-            _ensure_sku_unique(db, entry.sku, index)
-        sku = entry.sku or _unique_sku(db, f"{_slug(product.name)}-{_slug(effective_name)}")
-        variant = ProductVariant(
-            product_id=product.id,
-            name=effective_name,
-            price=entry.price,
-            sku=sku,
-            active=entry.active,
-            display_order=_next_display_order(db, product.id),
-            presentation_id=presentation.id if presentation is not None else None,
-        )
-        db.add(variant)
-        db.flush()
-    else:
-        variant = existing_by_id.get(entry.id)
-        if variant is None:
+    current = None
+    if entry.id is not None:
+        current = existing_by_id.get(entry.id)
+        if current is None:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND,
                 detail={
@@ -315,15 +304,30 @@ def _save_variant_entry(
                     "variant_id": str(entry.id),
                 },
             )
+    presentation = _resolve_presentation(
+        db, product.id, entry.presentation_id, index, current=current
+    )
+
+    if current is None:
+        if entry.sku is not None:
+            _ensure_sku_unique(db, entry.sku, index)
+        sku = entry.sku or _unique_sku(db, f"{_slug(product.name)}-{_slug(presentation.name)}")
+        variant = ProductVariant(
+            product_id=product.id,
+            presentation_id=presentation.id,
+            price=entry.price,
+            sku=sku,
+            active=entry.active,
+            display_order=_next_display_order(db, product.id),
+        )
+        db.add(variant)
+        db.flush()
+    else:
+        variant = current
         if entry.sku is not None and entry.sku != variant.sku:
             _ensure_sku_unique(db, entry.sku, index, exclude_id=variant.id)
             variant.sku = entry.sku
-        if effective_name != variant.name:
-            dup = variante_duplicada(db, product.id, effective_name, exclude_id=variant.id)
-            if dup is not None:
-                _raise_name_conflict(dup, index)
-            variant.name = effective_name
-        variant.presentation_id = presentation.id if presentation is not None else None
+        variant.presentation_id = presentation.id
         variant.price = entry.price
         variant.active = entry.active
         db.flush()

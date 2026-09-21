@@ -195,6 +195,10 @@ class PromotionStatusUpdate(BaseModel):
 
 class PromotionDuplicate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
+    # spec 084 (A-83): si ya existe una promoción con ese nombre, `true` la reemplaza (se
+    # elimina con todas sus reglas y la copia ocupa su nombre); `false` (por defecto) devuelve
+    # 409 como siempre. Nunca reemplaza una promoción `active`.
+    replace_existing: bool = False
 
 
 class PromotionVariantResponse(BaseModel):

@@ -63,7 +63,9 @@ class MenuVariantPromotion(BaseModel):
 
 class MenuVariantResponse(BaseModel):
     id: UUID
-    name: str
+    # spec 084 (A-79): la variante no tiene nombre propio; este es el de su presentación.
+    presentation_id: UUID
+    presentation_name: str
     price: Decimal
     # Precio ya con el mejor descuento vigente aplicado, o `None` si ninguna
     # promoción aplica. Se evalúa asumiendo cantidad 1 (aún no hay carrito).

@@ -39,6 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.option import Option
+from app.models.presentation import Presentation
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.recipe_item import RecipeItem
@@ -157,8 +158,9 @@ def required_consumption(
 def variant_label(db: Session, variant_id: UUID) -> str:
     """'Producto · Variante' para poder nombrar el problema en el mensaje."""
     row = db.execute(
-        select(Product.name, ProductVariant.name)
+        select(Product.name, Presentation.name)
         .join(ProductVariant, ProductVariant.product_id == Product.id)
+        .join(Presentation, Presentation.id == ProductVariant.presentation_id)
         .where(ProductVariant.id == variant_id)
     ).first()
     return f"{row[0]} · {row[1]}" if row else str(variant_id)

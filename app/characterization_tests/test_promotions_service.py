@@ -32,7 +32,7 @@ def _line(variant, qty, *, active=True, combo_id=None, base_unit_price=None):
         "line_id": variant.id,   # una fila por variante en estos escenarios
         "combo_id": combo_id,
         "_variant_active": active,
-        "description": variant.name,
+        "description": variant.presentation_name,
     }
 
 
@@ -270,7 +270,7 @@ class TestEvaluateVariantSets(unittest.TestCase):
             "product_variant_id": v.id, "unit_price": Decimal("10000"),
             "base_unit_price": Decimal("8000"), "quantity": 1,
             "line_id": v.id, "combo_id": None, "_variant_active": True,
-            "description": v.name,
+            "description": v.presentation_name,
         }
         r = promotions.evaluate_variant_sets(self.db, [linea], NOW)
         # 10% de $8.000 (la base) = $800 -- no 10% de $10.000 ($1.000).

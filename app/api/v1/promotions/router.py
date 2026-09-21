@@ -6,7 +6,8 @@ La aplicación automática en la venta vive en el checkout, que llama a
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
@@ -134,10 +135,23 @@ def duplicate_promotion(promotion_id: UUID, body: PromotionDuplicate,
                         db: Session = Depends(get_db),
                         user: User = Depends(require_tenant_admin)):
     promo = get_or_404(db, Promotion, promotion_id, "Promoción no encontrada")
-    ensure_unique(db, Promotion, Promotion.name, body.name, "Ya existe una promoción con ese nombre")
-    copy = service.duplicate(db, promo, body.name)
+    existing = db.execute(
+        select(Promotion).where(Promotion.name == body.name)
+    ).scalar_one_or_none()
+    replaced = None
+    if existing is None:
+        copy = service.duplicate(db, promo, body.name)
+    elif not body.replace_existing:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Ya existe una promoción con ese nombre")
+    else:
+        # spec 084 (A-83): la promoción anterior con ese nombre se elimina y la copia ocupa su lugar.
+        replaced = {"id": str(existing.id), "name": existing.name, "status": existing.status}
+        copy = service.duplicate_replacing(db, promo, body.name, existing)
+        record_audit(db, action="delete", entity="promotion", entity_id=UUID(replaced["id"]),
+                     user=user, payload={"name": replaced["name"], "replaced_by": str(copy.id)})
     record_audit(db, action="duplicate", entity="promotion", entity_id=copy.id,
-                 user=user, payload={"source_id": str(promo.id), "name": copy.name})
+                 user=user, payload={"source_id": str(promo.id), "name": copy.name,
+                                     **({"replaced": replaced} if replaced else {})})
     db.commit()
     db.refresh(copy)
     return service.serialize_promotion(db, copy)
