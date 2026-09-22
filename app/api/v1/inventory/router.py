@@ -1,6 +1,7 @@
+from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,6 +17,7 @@ from app.models.unit_measure import UnitMeasure
 from app.models.supplier import Supplier
 from app.models.purchase import Purchase
 from app.api.v1.inventory import service
+from app.api.v1.inventory.export import build_inventory_excel
 from app.api.v1.inventory.stock import apply_adjustment
 from app.api.v1.inventory.schemas import (
     InventoryItemCreate, InventoryItemUpdate, InventoryItemResponse, InventoryItemType,
@@ -63,6 +65,22 @@ def low_stock(
             InventoryItem.current_stock <= InventoryItem.min_stock,
         ).order_by(InventoryItem.name)
     ).scalars().all()
+
+
+@router.get("/items/export", summary="Exportar el inventario completo a .xlsx")
+def export_items(
+    db: Session = Depends(get_db),
+    _: User = Depends(require_tenant_admin),
+):
+    items = service.list_all_items_for_export(db)
+    unit_measures_by_id = {u.id: u for u in db.execute(select(UnitMeasure)).scalars().all()}
+    buffer = build_inventory_excel(items, unit_measures_by_id)
+    filename = f"inventario_{date.today().isoformat()}.xlsx"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/items/{item_id}", response_model=InventoryItemResponse, summary="Obtener un insumo")
