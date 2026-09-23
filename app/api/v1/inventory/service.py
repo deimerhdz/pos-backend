@@ -43,6 +43,15 @@ def list_items_query(
     return stmt
 
 
+def list_all_items_for_export(db: Session) -> list[InventoryItem]:
+    """Todos los insumos del tenant (activos e inactivos), sin paginar ni filtrar —
+    respaldo completo para GET /inventory/items/export (FR-003). Mismo orden por
+    defecto que `list_items_query()`."""
+    return db.execute(
+        select(InventoryItem).order_by(InventoryItem.name)
+    ).scalars().all()
+
+
 def create_purchase(db: Session, data: PurchaseCreate, user_id: UUID | None) -> Purchase:
     if data.supplier_id is not None:
         get_or_404(db, Supplier, data.supplier_id, "Supplier not found")
