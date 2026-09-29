@@ -19,6 +19,10 @@ from app.models.option_group import OptionGroup
 from app.models.variant_option_group import VariantOptionGroup
 from app.models.presentation import Presentation
 from app.api.v1.catalog.schemas import VariantSaveIn, RecipeItemIn, VariantOptionGroupIn
+# Reexportado (no definido aquí): `catalog_engine.core` no puede depender del
+# ORM (SC-006), así que la constante vive allá y este módulo solo la reusa —
+# ver `format_item_description` (spec 087, FR-010).
+from app.catalog_engine.core import DEFAULT_PRESENTATION_NAME  # noqa: F401
 
 
 def _slug(text: str) -> str:
@@ -48,9 +52,6 @@ def _next_display_order(db: Session, product_id: UUID) -> int:
         )
     ).scalar()
     return (current_max or 0) + 1
-
-
-DEFAULT_PRESENTATION_NAME = "Presentación única"
 
 
 def default_presentation(db: Session) -> Presentation:
