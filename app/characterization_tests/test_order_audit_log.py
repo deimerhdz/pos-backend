@@ -54,7 +54,11 @@ SECRETO = "clave-de-auditoria-de-prueba"
 
 NOMBRE_COMENSAL = "María Pérez"
 
-COMPROBANTE = "https://example.invalid/comprobantes/abc123.jpg"
+# spec 088 (A-93): el comprobante que se persiste y se hashea es la KEY (carpeta `comprobantes`
+# del negocio); el frontend puede seguir enviando la URL del presign, que `submit_cart` reduce a
+# esta key. `object_exists` se simula en los tests que pasan por `submit_cart`.
+COMPROBANTE = "tenant_test/comprobantes/abc123.jpg"
+COMPROBANTE_URL = f"https://example.invalid/{COMPROBANTE}"
 
 
 def _prod():
@@ -679,16 +683,22 @@ class TestOrderAuditIntegration(unittest.TestCase):
     def test_el_mismo_comprobante_produce_el_mismo_hash_en_sus_tres_eventos(self):
         """FR-012: `order.payment_attempt.created`, `transfer_approved` y
         `transfer_rejected` comparten el `receipt_hash` del comprobante, que
-        nunca viaja como URL en texto plano."""
+        nunca viaja como URL en texto plano.
+
+        spec 088 (A-93, research D11): el hash esperado se calcula sobre la **key** persistida
+        (aunque el frontend envíe la URL del presign): la igualdad entre los eventos del mismo
+        intento se preserva."""
         with _prod(), _con_secreto(), \
-                mock.patch("app.core.order_audit.sentry_sdk") as sentry:
+                mock.patch("app.core.order_audit.sentry_sdk") as sentry, \
+                mock.patch("app.core.asset_refs.object_exists", return_value=True):
             esperado = _hash_sensitive(COMPROBANTE)
 
             # Intento rechazado: nace en `submit_cart` (con su comprobante) y
             # lo rechaza el cajero — el mismo intento en sus dos eventos.
             db, participant, nequi = self._seed_carrito_qr(is_cash=False)
             order = cart_service.submit_cart(
-                db, participant, nequi.id, COMPROBANTE, tenant_id=7,
+                db, participant, nequi.id, COMPROBANTE_URL, tenant_id=7,
+                tenant_schema="tenant_test",
             )
             attempt = self._attempt_de(db, order.id)
             checkout.reject_payment_attempt(db, attempt.id, "borroso", _staff())
@@ -696,7 +706,8 @@ class TestOrderAuditIntegration(unittest.TestCase):
             # Intento aprobado, con el mismo comprobante en otra orden.
             db2, participant2, nequi2 = self._seed_carrito_qr(is_cash=False)
             order2 = cart_service.submit_cart(
-                db2, participant2, nequi2.id, COMPROBANTE, tenant_id=7,
+                db2, participant2, nequi2.id, COMPROBANTE_URL, tenant_id=7,
+                tenant_schema="tenant_test",
             )
             shift2 = fx.make_cash_shift(db2)
             db2.commit()
@@ -719,6 +730,7 @@ class TestOrderAuditIntegration(unittest.TestCase):
         for atributos in [a for lista in por_tipo.values() for a in lista]:
             for valor in atributos.values():
                 self.assertNotIn(COMPROBANTE, str(valor))
+                self.assertNotIn(COMPROBANTE_URL, str(valor))
 
     # -------------------------------- checkout_and_send (T040, FR-014, adenda)
 
