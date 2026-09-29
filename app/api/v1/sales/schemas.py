@@ -48,9 +48,13 @@ class PaymentMethodCreate(BaseModel):
 
 class PaymentMethodUpdate(BaseModel):
     payment_info: dict[str, str] | None = None
+    # spec 088 (FR-002, research D5/D7): `payment_info` que el formulario mostraba al
+    # abrirse (basta con las claves de imagen). Una imagen enviada solo cuenta como
+    # cambio si su valor base coincide con el vigente; "no enviado" != `null`.
+    payment_info_base: dict[str, str] | None = None
     active: bool | None = None
 
-    @field_validator("payment_info")
+    @field_validator("payment_info", "payment_info_base")
     @classmethod
     def _normalize_assets(cls, info: dict[str, str] | None) -> dict[str, str] | None:
         return _normalize_payment_info_assets(info)

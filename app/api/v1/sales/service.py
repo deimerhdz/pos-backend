@@ -11,8 +11,10 @@ from sqlalchemy import cast, func, select, String
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql import Select
 
+from app.core.asset_refs import ImageDecision, resolve_image_change
 from app.core.crud import ensure_unique, get_or_404
 from app.core.models import User
+from app.core.storage import FOLDER_PAYMENT_METHODS, normalize_asset_ref
 from app.core.timezone import local_day_bounds_utc, resolve_timezone
 from app.models.invoice import Invoice
 from app.models.product_variant import ProductVariant
@@ -69,7 +71,83 @@ def _validate_payment_info(fields: list[dict], payment_info: dict | None) -> boo
     return complete
 
 
-def create_payment_method(db: Session, data: PaymentMethodCreate) -> PaymentMethod:
+def _image_field_keys(catalog: PaymentMethodCatalog | None) -> list[str]:
+    """Claves de `payment_info` que son un archivo (`format:"image"`, típ. `qr`)."""
+    if catalog is None:
+        return []
+    return [f["key"] for f in (catalog.fields or []) if f.get("format") == "image"]
+
+
+def _require_schema(tenant_schema: str | None) -> str:
+    if not tenant_schema:
+        raise ValueError("tenant_schema es obligatorio para validar la imagen del método de pago")
+    return tenant_schema
+
+
+def _verify_new_payment_images(
+    db: Session, tenant_schema: str | None, catalog: PaymentMethodCatalog, payment_info: dict | None,
+) -> None:
+    """Creación (spec 088, FR-001/FR-003/FR-004): cada clave de imagen gestionada debe
+    ser una key del propio negocio, carpeta `payment-methods`, y existir en R2. Sin base:
+    no hay imagen vigente que comparar. 422/503 antes de crear nada."""
+    for key in _image_field_keys(catalog):
+        sent = normalize_asset_ref((payment_info or {}).get(key))
+        if sent is None:
+            continue
+        resolve_image_change(
+            db, tenant_schema=_require_schema(tenant_schema), folder=FOLDER_PAYMENT_METHODS,
+            sent=sent, base_provided=False, base=None, current=None, is_creation=True,
+        )
+
+
+def _resolve_payment_images(
+    db: Session,
+    tenant_schema: str | None,
+    catalog: PaymentMethodCatalog,
+    current_info: dict | None,
+    sent_info: dict[str, str],
+    base_info: dict[str, str] | None,
+    base_provided: bool,
+) -> dict[str, str]:
+    """Edición (spec 088, research D7): devuelve el `payment_info` **resultante**, con la
+    regla de imagen aplicada por cada clave `format:"image"` del catálogo. El resto de las
+    claves (`celular`, `cuenta`…) se guardan tal cual llegan.
+
+    Por clave `k`: igual a la vigente → sin cambio; forma inválida/ajena → 422; sin
+    `payment_info_base` o `base[k]` ≠ vigente (formulario desactualizado) → se conserva
+    el valor vigente (o se elimina la clave si no había), en silencio; edición legítima
+    con `k` vacío/ausente → se elimina (comportamiento actual, el archivo no se borra,
+    D8); edición legítima con valor nuevo → debe existir en R2 (422/503).
+    """
+    result = dict(sent_info)
+    current_info = current_info or {}
+    for key in _image_field_keys(catalog):
+        sent = normalize_asset_ref(sent_info.get(key))
+        current_raw = current_info.get(key)
+        current = normalize_asset_ref(current_raw)
+        base = normalize_asset_ref((base_info or {}).get(key))
+        if sent is None:
+            if current is not None and not (base_provided and base == current):
+                # Quitar la imagen solo es legítimo con una base que coincida con la
+                # vigente; si no, el formulario está desactualizado: se conserva.
+                result[key] = current_raw
+            continue
+        decision = resolve_image_change(
+            db, tenant_schema=_require_schema(tenant_schema), folder=FOLDER_PAYMENT_METHODS,
+            sent=sent, base_provided=base_provided, base=base, current=current,
+            is_creation=False,
+        )
+        if decision is ImageDecision.IGNORE:
+            if current_raw is None or current is None:
+                result.pop(key, None)
+            else:
+                result[key] = current_raw
+    return result
+
+
+def create_payment_method(
+    db: Session, data: PaymentMethodCreate, *, tenant_schema: str | None = None
+) -> PaymentMethod:
     """Activa, para el tenant, un método del catálogo de la plataforma (spec
     032, FR-007/FR-011). `name`/`type`/`is_cash` se copian del catálogo
     (research.md Decisión 5) — el body ya no los acepta, un tenant no puede
@@ -101,6 +179,7 @@ def create_payment_method(db: Session, data: PaymentMethodCreate) -> PaymentMeth
         )
 
     is_complete = _validate_payment_info(catalog.fields, data.payment_info)
+    _verify_new_payment_images(db, tenant_schema, catalog, data.payment_info)
     method = PaymentMethod(
         name=catalog.name,
         type=catalog.type,
@@ -117,7 +196,8 @@ def create_payment_method(db: Session, data: PaymentMethodCreate) -> PaymentMeth
 
 
 def update_payment_method(
-    db: Session, payment_method_id: UUID, data: PaymentMethodUpdate
+    db: Session, payment_method_id: UUID, data: PaymentMethodUpdate,
+    *, tenant_schema: str | None = None,
 ) -> PaymentMethod:
     """Edita datos de pago/estado de un método ya activado (spec 024 US1,
     spec 032 FR-008/FR-009/FR-010).
@@ -133,10 +213,19 @@ def update_payment_method(
     method = get_or_404(db, PaymentMethod, payment_method_id, "Payment method not found")
 
     if data.payment_info is not None:
-        method.payment_info = data.payment_info
         catalog = db.get(PaymentMethodCatalog, method.catalog_id) if method.catalog_id else None
+        payment_info = data.payment_info
         if catalog is not None:
-            method.is_complete = _validate_payment_info(catalog.fields, data.payment_info)
+            # spec 088 (FR-001…FR-004, research D7/D8): la clave de imagen se resuelve
+            # ANTES de asignar nada; `is_complete` se calcula sobre el `payment_info`
+            # resultante (con la imagen conservada si la enviada se ignoró).
+            payment_info = _resolve_payment_images(
+                db, tenant_schema, catalog, method.payment_info, data.payment_info,
+                data.payment_info_base, "payment_info_base" in data.model_fields_set,
+            )
+        method.payment_info = payment_info
+        if catalog is not None:
+            method.is_complete = _validate_payment_info(catalog.fields, payment_info)
 
     if data.active is not None and data.active != method.active:
         if data.active is False:
