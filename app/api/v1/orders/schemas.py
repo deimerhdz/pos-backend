@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.v1.catalog.schemas import OptionSelectionIn
 from app.api.v1.sales.schemas import PaymentIn
+from app.core.schema_types import AssetUrl
 from app.core.timezone import UtcDatetime
 
 
@@ -196,7 +197,8 @@ class CurrentPaymentAttemptSummary(BaseModel):
     status: str
     payment_method_name: str
     is_cash: bool
-    receipt_file_url: str | None = None
+    # spec 088 (FR-008): la columna guarda la key; se ensambla la URL al serializar.
+    receipt_file_url: AssetUrl = None
 
 
 class OrderResponse(BaseModel):
@@ -253,7 +255,9 @@ class PaymentAttemptResponse(BaseModel):
     status: str
     amount_received: Decimal | None = None
     change_amount: Decimal | None = None
-    receipt_file_url: str | None = None
+    # spec 088 (FR-008): alimenta "Pagos por confirmar" del cajero; la columna guarda la key
+    # y aquí se ensambla la URL lista para renderizar (tolerancia de lectura a filas antiguas).
+    receipt_file_url: AssetUrl = None
     rejection_reason: str | None = None
     resolved_by_user_id: UUID | None = None
     resolved_at: UtcDatetime | None = None

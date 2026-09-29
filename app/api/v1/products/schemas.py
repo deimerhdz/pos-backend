@@ -52,6 +52,12 @@ class ProductUpdate(BaseModel):
     description: str | None = Field(None, max_length=500)
     preparation_type: PreparationType | None = None
     image_url: AssetRefIn = Field(None, max_length=500)
+    # spec 088 (FR-002, research D5): imagen que el formulario mostraba al abrirse. Una
+    # imagen enviada solo cuenta como cambio si esta base coincide con la vigente; un
+    # formulario desactualizado se ignora en silencio. "No enviada" (ausente) es distinto
+    # de `null` explícito ("el formulario no vio ninguna imagen"): el servicio los
+    # distingue con `model_fields_set`. Solo existe al actualizar, no al crear.
+    image_url_base: AssetRefIn = Field(None, max_length=500)
     active: bool | None = None
     available: bool | None = None
     tracks_inventory: bool | None = None

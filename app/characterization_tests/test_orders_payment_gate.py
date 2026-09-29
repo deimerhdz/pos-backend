@@ -24,6 +24,7 @@ from datetime import datetime, time, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 import unittest
+from unittest import mock
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -501,9 +502,14 @@ class TestOrdersPaymentGate(unittest.TestCase):
         nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
         db.commit()
 
-        order = cart_service.submit_cart(
-            db, participant, nequi.id, receipt_file_url="https://example.invalid/a.jpg"
-        )
+        # spec 088 (A-93): el comprobante es una key existente de la carpeta `comprobantes` del
+        # negocio (R2 simulado); en base de datos se guarda la key.
+        with mock.patch("app.core.asset_refs.object_exists", return_value=True):
+            order = cart_service.submit_cart(
+                db, participant, nequi.id,
+                receipt_file_url="tenant_test/comprobantes/a1b2c3d4e5f60718293a4b5c6d7e8f90.jpg",
+                tenant_schema="tenant_test",
+            )
         first_attempt_id = order.current_payment_attempt.id
 
         rejected = checkout.reject_payment_attempt(
@@ -517,7 +523,10 @@ class TestOrdersPaymentGate(unittest.TestCase):
         presign = cart_service.presign_receipt(
             db, "tenant_test", participant.id, second.id, "image/jpeg"
         )
-        cart_service.attach_receipt(db, participant.id, second.id, presign.public_url)
+        with mock.patch("app.core.asset_refs.object_exists", return_value=True):
+            cart_service.attach_receipt(
+                db, participant.id, second.id, presign.public_url, tenant_schema="tenant_test"
+            )
 
         approved = checkout.approve_payment_attempt(db, second.id, self._shift(db).id, self._user())
         self.assertEqual(approved.status, "confirmado")

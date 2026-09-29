@@ -8,6 +8,10 @@ intacta (FR-010). Las respuestas (`ProductResponse` y subclases,
 `MenuProductResponse`) devuelven `image_url` como URL absoluta contra
 `ASSETS_BASE_URL` mientras la columna sigue con la key (FR-006/FR-007).
 
+spec 088 (A-92): las ediciones legítimas envían `image_url_base` (la imagen que el
+formulario mostraba) y la existencia del archivo en R2 se simula con `object_exists`;
+lo que estos tests verifican no cambia.
+
 Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_products_image_key -v
@@ -31,6 +35,9 @@ URL_LEGACY = f"{LEGACY}/{KEY}"
 URL_NEW = f"{ASSETS}/{KEY}"
 URL_OTHER = "https://xyz.supabase.co/storage/v1/object/public/img/foto.jpg"
 
+# spec 088 (FR-003): el archivo existe en R2 (simulado; los tests no abren red).
+EXISTS = "app.core.asset_refs.object_exists"
+
 
 class TestImageUrlPersistsAsKey(unittest.TestCase):
     """FR-002/FR-004/SC-001 — la columna nunca guarda esquema ni dominio."""
@@ -38,10 +45,11 @@ class TestImageUrlPersistsAsKey(unittest.TestCase):
     def _create(self, db, image_url):
         category = fx.make_category(db)
         db.commit()
-        return ProductService().create_product(
-            db, fx.make_tenant_stub(),
-            ProductCreate(category_id=category.id, name=f"p-{uuid4()}", image_url=image_url),
-        )
+        with mock.patch(EXISTS, return_value=True):
+            return ProductService().create_product(
+                db, fx.make_tenant_stub(),
+                ProductCreate(category_id=category.id, name=f"p-{uuid4()}", image_url=image_url),
+            )
 
     def test_key_directa_se_guarda_igual(self):
         db = fx.new_session()
@@ -72,9 +80,11 @@ class TestImageUrlPersistsAsKey(unittest.TestCase):
         db = fx.new_session()
         product = self._create(db, KEY)
         svc = ProductService()
-        with mock.patch("app.api.v1.products.service.delete_object"):
+        with mock.patch("app.api.v1.products.service.delete_object"), \
+             mock.patch(EXISTS, return_value=True):
             svc.update_product(db, fx.make_tenant_stub(), product.id,
-                               ProductUpdate(image_url=URL_LEGACY.replace(KEY, "heladeria3/products/otra.png")))
+                               ProductUpdate(image_url=URL_LEGACY.replace(KEY, "heladeria3/products/otra.png"),
+                                             image_url_base=KEY))
         self.assertEqual(product.image_url, "heladeria3/products/otra.png")
 
 
@@ -136,9 +146,11 @@ class TestImageUrlPreviousObjectDeletion(unittest.TestCase):
 
     def _update(self, db, product, image_url):
         svc = ProductService()
-        with mock.patch("app.api.v1.products.service.delete_object") as md:
+        # spec 088 (A-92): edición legítima = la base es la imagen vigente del producto.
+        with mock.patch("app.api.v1.products.service.delete_object") as md, \
+             mock.patch(EXISTS, return_value=True):
             svc.update_product(db, fx.make_tenant_stub(), product.id,
-                               ProductUpdate(image_url=image_url))
+                               ProductUpdate(image_url=image_url, image_url_base=product.image_url))
         return md
 
     def test_reemplazo_con_previa_url_vieja_borra_la_key_correcta(self):
@@ -172,10 +184,12 @@ class TestImageUrlPreviousObjectDeletion(unittest.TestCase):
         product = self._seed(db, KEY)
         svc = ProductService()
         with mock.patch("app.api.v1.products.service.delete_object") as md, \
+             mock.patch(EXISTS, return_value=True), \
              mock.patch.object(db, "commit", side_effect=RuntimeError("ajeno")):
             with self.assertRaises(RuntimeError):
                 svc.update_product(db, fx.make_tenant_stub(), product.id,
-                                   ProductUpdate(image_url="heladeria3/products/nueva.png"))
+                                   ProductUpdate(image_url="heladeria3/products/nueva.png",
+                                                 image_url_base=KEY))
         md.assert_not_called()                                # FR-012 / A-44
 
 

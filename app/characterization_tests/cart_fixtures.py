@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.schema import DefaultClause
 
 from app.characterization_tests.fixtures import (
+    attach_shared_tenants,
     make_category,
     make_inventory_item,
     make_option,
@@ -225,6 +226,7 @@ def new_session() -> Session:
     conn = engine.connect().execution_options(schema_translate_map={"tenant": None})
     conn.connection.dbapi_connection.create_aggregate("bool_or", 1, _BoolOr)
     Base.metadata.create_all(bind=conn, tables=tables)
+    attach_shared_tenants(conn)  # spec 088: `shared.tenants.logo_url` (is_key_referenced)
     conn.commit()
     return Session(bind=conn)
 

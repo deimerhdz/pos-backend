@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core import events
+from app.core.asset_refs import resolve_receipt_key
 from app.core.config import settings
 from app.core.crud import get_or_404
 from app.core.order_audit import (
@@ -514,6 +515,7 @@ def submit_cart(
     receipt_file_url: str | None = None,
     tenant_id: int | None = None,
     request_id: str | None = None,
+    tenant_schema: str | None = None,
 ) -> CustomerOrder:
     """Envía el carrito del comensal como pedido: crea una `CustomerOrder` en
     estado `recibida` con sus líneas **y** su primer `OrderPaymentAttempt`, en
@@ -534,7 +536,12 @@ def submit_cart(
     `tenant_id` (spec 074) es solo para el log de auditoría: el comensal no es
     un `User`, así que el tenant lo pasa el router, que ya lo tiene resuelto
     por el token firmado. Opcional para no cambiar el contrato de ningún
-    llamador existente."""
+    llamador existente.
+
+    `tenant_schema` (spec 088, FR-008) es el esquema del negocio contra el que se
+    valida el comprobante de un método que no es efectivo (prefijo del negocio +
+    carpeta `comprobantes` + existencia en R2); en base de datos se guarda la
+    **key**. Obligatorio solo cuando llega un comprobante."""
     cart = _load_open_cart_or_none(db, participant.id)
 
     # spec 024, FR-005: no permitir una segunda orden activa del mismo
@@ -609,6 +616,11 @@ def submit_cart(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Este método de pago exige cargar un comprobante",
         )
+    else:
+        # spec 088 (FR-008): el comprobante deja de ser texto libre. Se valida DESPUÉS de los
+        # 422 de arriba y ANTES de comprobar disponibilidad y de crear nada: un 422/503 no crea
+        # orden ni intento ni borra el carrito. Se persiste (y se audita) la key resuelta.
+        receipt_file_url = resolve_receipt_key(receipt_file_url, _require_receipt_schema(tenant_schema))
 
     check_availability(db, _cart_consumption(db, cart), extra_context="envío de pedido")
 
@@ -910,12 +922,23 @@ def presign_receipt(
     )
 
 
+def _require_receipt_schema(tenant_schema: str | None) -> str:
+    if not tenant_schema:
+        raise ValueError("tenant_schema es obligatorio para validar el comprobante")
+    return tenant_schema
+
+
 def attach_receipt(
-    db: Session, participant_id: UUID, attempt_id: UUID, file_url: str
+    db: Session, participant_id: UUID, attempt_id: UUID, file_url: str,
+    *, tenant_schema: str | None = None,
 ) -> OrderPaymentAttempt:
     """Asocia el archivo ya subido a R2 con el intento (FR-012). Un
     comprobante por intento — un reintento crea un intento nuevo, no
-    reemplaza el archivo de uno existente."""
+    reemplaza el archivo de uno existente.
+
+    spec 088 (FR-008): el `409` "ya tiene comprobante" se evalúa **antes** que la validación;
+    luego el comprobante debe ser un archivo existente de la carpeta `comprobantes` del propio
+    negocio (`tenant_schema`), y se guarda la **key**."""
     attempt = _load_own_pending_attempt(db, participant_id, attempt_id)
     method = get_or_404(
         db, PaymentMethod, attempt.payment_method_id, "Método de pago no encontrado"
@@ -925,8 +948,10 @@ def attach_receipt(
     if attempt.receipt_file_url:
         raise HTTPException(status.HTTP_409_CONFLICT, "El intento ya tiene un comprobante adjunto")
 
+    receipt_key = resolve_receipt_key(file_url, _require_receipt_schema(tenant_schema))
+
     try:
-        attempt.receipt_file_url = file_url
+        attempt.receipt_file_url = receipt_key
         db.commit()
     except Exception:
         db.rollback()

@@ -11,10 +11,11 @@ import logging
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.core.db import get_tenant
+from app.core.asset_refs import ImageDecision, delete_if_unreferenced, resolve_image_change
+from app.core.db import get_tenant, with_db
 from app.core.dependencies import get_current_user, require_tenant_admin, get_shared_db
 from app.core.models import Tenant, User
-from app.core.storage import delete_object, object_key_for_deletion
+from app.core.storage import FOLDER_LOGO, deletable_key, delete_object, normalize_asset_ref
 from app.api.v1.tenant.schemas import TenantInfoResponse, TenantUpdate
 
 logger = logging.getLogger(__name__)
@@ -55,13 +56,29 @@ def update_tenant(
 ):
     row = db.query(Tenant).filter(Tenant.id == tenant.id).one()
 
+    # spec 088 (research D6): el logo se resuelve ANTES de tocar `row`, de modo que un
+    # 422/503 deja todo intacto. Un logo enviado solo cuenta como cambio si `logo_url_base`
+    # coincide con el vigente (FR-002); si el formulario está desactualizado el logo no
+    # cambia, pero `receipt_message` e `invoice_prefix` se guardan igualmente.
+    # spec 080: `logo_url`/`logo_url_base` ya vienen normalizados a key (AssetRefIn).
+    logo_decision = resolve_image_change(
+        db, tenant_schema=row.schema, folder=FOLDER_LOGO,
+        sent=body.logo_url,
+        base_provided="logo_url_base" in body.model_fields_set,
+        base=body.logo_url_base,
+        current=normalize_asset_ref(row.logo_url),
+        is_creation=False,
+    )
+
     old_logo_key = None
-    # spec 080: `body.logo_url` ya viene normalizada a key (AssetRefIn) — la
-    # comparación es key vs key, así que reenviar la URL de visualización de un
-    # formulario que no tocó el logo no cuenta como cambio (US3, FR-011/FR-012).
-    if body.logo_url is not None and body.logo_url != row.logo_url:
-        # None si la referencia anterior es de otro origen (FR-013): no se borra.
-        old_logo_key = object_key_for_deletion(row.logo_url)
+    if logo_decision is ImageDecision.APPLY:
+        # None si la referencia anterior es de otro origen o está fuera de convención
+        # (FR-004/FR-005): no se borra.
+        old_logo_key = deletable_key(row.logo_url, row.schema, FOLDER_LOGO)
+        row.logo_url = body.logo_url
+    elif body.logo_url is not None and normalize_asset_ref(row.logo_url) == body.logo_url:
+        # Mismo logo (KEEP) en otra representación: una fila histórica con URL absoluta
+        # pasa a guardarse como key (spec 080, FR-004). No borra ni verifica nada.
         row.logo_url = body.logo_url
 
     if body.receipt_message is not None:
@@ -74,8 +91,12 @@ def update_tenant(
         row.invoice_prefix = body.invoice_prefix.strip().upper() or None
 
     db.commit()
-    db.refresh(row)
-    # A-44 / spec 021 (intacto): primero confirmar, después borrar best-effort.
+    # A-44 / spec 021 (intacto): primero confirmar, después borrar best-effort. spec 088
+    # (FR-006): y solo si ninguna otra fila usa el archivo anterior. La sesión `shared` no
+    # alcanza las tablas del negocio (productos, métodos de pago, comprobantes): el chequeo
+    # abre una sesión corta del negocio (research D9).
     if old_logo_key:
-        delete_object(old_logo_key)
+        with with_db(row.schema) as tenant_db:
+            delete_if_unreferenced(tenant_db, old_logo_key, delete_object)
+    db.refresh(row)
     return row

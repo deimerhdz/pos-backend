@@ -13,6 +13,13 @@ ocurrió (`delete_object` es best-effort: solo loguea, nunca lanza).
 Esta spec invierte el orden: `delete_object` se invoca DESPUÉS de un
 `db.commit()` exitoso.
 
+spec 088 (A-92): los tres tests A-44 envían ahora `image_url_base=<imagen vigente>` (la
+imagen que el formulario mostraba: sin ella, un cambio de imagen se ignora) y simulan con
+`object_exists` que el archivo nuevo existe en R2, con el esquema del negocio de las keys
+(`tenant`). Lo que congelan —el borrado ocurre DESPUÉS del commit y un fallo de borrado o de
+commit no deja referencia rota— se conserva exactamente. `is_key_referenced` corre real
+(sobre las tablas del fixture): ninguna otra fila usa `old.jpg`, así que sí se borra.
+
 Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_products_service -v
@@ -40,9 +47,18 @@ from app.models.variant_option_group import VariantOptionGroup
 
 OLD_URL = "https://example.invalid/tenant/products/old.jpg"
 NEW_URL = "https://example.invalid/tenant/products/new.jpg"
+# spec 088: esquema del negocio al que pertenecen las keys de arriba, y R2 simulado.
+TENANT = fx.make_tenant_stub(schema="tenant")
+EXISTS = "app.core.asset_refs.object_exists"
 
 
 class TestUpdateProductA44(unittest.TestCase):
+    def setUp(self):
+        # spec 088 (FR-003): el archivo nuevo existe en R2 (simulado).
+        patcher = mock.patch(EXISTS, return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _seed_product(self, db):
         return fx.make_product(db, image_url=OLD_URL)
 
@@ -60,7 +76,9 @@ class TestUpdateProductA44(unittest.TestCase):
             db, "commit", side_effect=RuntimeError("fallo ajeno a la imagen")
         ):
             with self.assertRaises(RuntimeError):
-                service.update_product(db, fx.make_tenant_stub(), product.id, ProductUpdate(image_url=NEW_URL))
+                service.update_product(
+                    db, TENANT, product.id, ProductUpdate(image_url=NEW_URL, image_url_base=OLD_URL)
+                )
 
         mock_delete.assert_not_called()
 
@@ -81,7 +99,9 @@ class TestUpdateProductA44(unittest.TestCase):
         ) as mock_delete, mock.patch.object(
             db, "commit", side_effect=lambda: (orden.append("commit"), real_commit())
         ):
-            service.update_product(db, fx.make_tenant_stub(), product.id, ProductUpdate(image_url=NEW_URL))
+            service.update_product(
+                db, TENANT, product.id, ProductUpdate(image_url=NEW_URL, image_url_base=OLD_URL)
+            )
 
         self.assertEqual(orden, ["commit", "delete"])
         mock_delete.assert_called_once()
@@ -106,7 +126,9 @@ class TestUpdateProductA44(unittest.TestCase):
         with mock.patch(
             "app.api.v1.products.service.delete_object", side_effect=_delete_falla
         ):
-            result = service.update_product(db, fx.make_tenant_stub(), product.id, ProductUpdate(image_url=NEW_URL))
+            result = service.update_product(
+                db, TENANT, product.id, ProductUpdate(image_url=NEW_URL, image_url_base=OLD_URL)
+            )
 
         # spec 080 (A-73): en base de datos vive la KEY, no la URL absoluta. Bajo
         # la config de test `R2_PUBLIC_BASE_URL == https://example.invalid`, así que

@@ -12,6 +12,12 @@ existir dos llamadas HTTP separadas para lo mismo (crear la orden, y luego su
 primer intento). Se verifica contra
 `contracts/submit-cart-with-payment.md`/`contracts/payment-receipt-presign.md`.
 
+spec 088 (A-93): el comprobante deja de ser texto libre. `submit_cart` y `attach_receipt`
+reciben el esquema del negocio (`tenant_schema="tenant_test"`, el mismo del presign), validan
+que el comprobante sea un archivo existente de la carpeta `comprobantes` del propio negocio
+(R2 simulado con `object_exists`) y persisten la **key** (no la URL absoluta); lo que estos
+tests verifican no cambia.
+
 Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_cart_payment_attempts -v
@@ -30,7 +36,18 @@ from app.models.customer_order import CustomerOrder
 from app.models.order_payment_attempt import OrderPaymentAttempt
 
 
+SCHEMA = "tenant_test"
+RECEIPT_A = f"{SCHEMA}/comprobantes/a1b2c3d4e5f60718293a4b5c6d7e8f90.jpg"
+RECEIPT_B = f"{SCHEMA}/comprobantes/b1b2c3d4e5f60718293a4b5c6d7e8f90.jpg"
+
+
 class TestCartPaymentAttempts(unittest.TestCase):
+    def setUp(self):
+        # spec 088 (FR-008): el comprobante existe en R2 (simulado; los tests no abren red).
+        patcher = mock.patch("app.core.asset_refs.object_exists", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     # ------------------------------------------------------------- Helpers
 
     def _seed_order(self, *, order_status: str = "recibida"):
@@ -136,9 +153,12 @@ class TestCartPaymentAttempts(unittest.TestCase):
         self.assertTrue(presign.upload_url)
         self.assertTrue(presign.public_url.endswith(".jpg"))
 
-        updated = service.attach_receipt(db, participant.id, attempt.id, presign.public_url)
+        updated = service.attach_receipt(
+            db, participant.id, attempt.id, presign.public_url, tenant_schema=SCHEMA
+        )
         self.assertEqual(updated.status, "pendiente")
-        self.assertEqual(updated.receipt_file_url, presign.public_url)
+        # spec 088 (A-93): en base de datos vive la key, no la URL absoluta.
+        self.assertEqual(updated.receipt_file_url, presign.key)
         self.assertEqual(nequi.payment_info["cuenta"], "3001234567")
 
     def test_attach_receipt_409_si_ya_tiene_uno(self):
@@ -146,10 +166,10 @@ class TestCartPaymentAttempts(unittest.TestCase):
         nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
         db.commit()
         attempt = service.create_payment_attempt(db, participant.id, order.id, nequi.id)
-        service.attach_receipt(db, participant.id, attempt.id, "https://example.invalid/a.jpg")
+        service.attach_receipt(db, participant.id, attempt.id, RECEIPT_A, tenant_schema=SCHEMA)
 
         with self.assertRaises(HTTPException) as ctx:
-            service.attach_receipt(db, participant.id, attempt.id, "https://example.invalid/b.jpg")
+            service.attach_receipt(db, participant.id, attempt.id, RECEIPT_B, tenant_schema=SCHEMA)
         self.assertEqual(ctx.exception.status_code, 409)
 
     def test_presign_receipt_409_si_metodo_es_efectivo(self):
@@ -172,7 +192,7 @@ class TestCartPaymentAttempts(unittest.TestCase):
         nequi = fx.make_payment_method(db, name="Nequi", is_cash=False, type="transfer")
         db.commit()
         attempt = service.create_payment_attempt(db, participant.id, order.id, nequi.id)
-        service.attach_receipt(db, participant.id, attempt.id, "https://example.invalid/a.jpg")
+        service.attach_receipt(db, participant.id, attempt.id, RECEIPT_A, tenant_schema=SCHEMA)
 
         orders = service.list_my_orders(db, participant.id)
         self.assertEqual(orders[0].current_payment_attempt.status, "pendiente")
@@ -314,10 +334,11 @@ class TestCartPaymentAttempts(unittest.TestCase):
         presign = service.presign_payment_receipt(db, "tenant_test", participant.id, "image/jpeg")
 
         order = service.submit_cart(
-            db, participant, nequi.id, receipt_file_url=presign.public_url
+            db, participant, nequi.id, receipt_file_url=presign.public_url, tenant_schema=SCHEMA
         )
 
-        self.assertEqual(order.current_payment_attempt.receipt_file_url, presign.public_url)
+        # spec 088 (A-93): se persiste la key del `public_url` del presign.
+        self.assertEqual(order.current_payment_attempt.receipt_file_url, presign.key)
 
     def test_submit_cart_transferencia_sin_receipt_file_url_falla_422(self):
         """FR-006, Acceptance Scenario 3 (US3): no se crea el pedido de una
@@ -348,7 +369,8 @@ class TestCartPaymentAttempts(unittest.TestCase):
         ):
             with self.assertRaises(Exception):
                 service.submit_cart(
-                    db, participant, nequi.id, receipt_file_url=presign.public_url
+                    db, participant, nequi.id, receipt_file_url=presign.public_url,
+                    tenant_schema=SCHEMA,
                 )
 
         self.assertEqual(
@@ -364,9 +386,9 @@ class TestCartPaymentAttempts(unittest.TestCase):
         )
 
         order = service.submit_cart(
-            db, participant, nequi.id, receipt_file_url=presign.public_url
+            db, participant, nequi.id, receipt_file_url=presign.public_url, tenant_schema=SCHEMA
         )
-        self.assertEqual(order.current_payment_attempt.receipt_file_url, presign.public_url)
+        self.assertEqual(order.current_payment_attempt.receipt_file_url, presign.key)
 
 
 if __name__ == "__main__":
