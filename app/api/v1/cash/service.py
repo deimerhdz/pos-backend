@@ -15,6 +15,7 @@ from app.core.pagination import paginate
 from app.models.cash_register import CashRegister
 from app.models.cash_shift import CashShift
 from app.models.cash_movement import CashMovement
+from app.models.customer_order import CustomerOrder
 from app.models.sale import Sale
 from app.models.payment import Payment, PaymentMethod
 
@@ -26,6 +27,35 @@ def get_open_shift(db: Session, cash_register_id: UUID) -> CashShift | None:
             CashShift.status == "open",
         )
     ).scalar_one_or_none()
+
+
+def resolve_dine_in_table_order(db: Session) -> tuple[UUID | None, int | None]:
+    """spec 087 (FR-006, A-86): turno/número a asignar a un pedido `DINE_IN`
+    nuevo. Un solo turno abierto a la vez por decisión de negocio (research.md);
+    si excepcionalmente hubiera más de uno, se toma el de `opened_at` más
+    reciente del tenant. Sin turno abierto, el pedido nace sin numerar
+    (`None, None`) -- no bloquea la creación del pedido.
+
+    `with_for_update()` bloquea la fila del turno hasta el commit de quien
+    llama, serializando el conteo+asignación de dos pedidos creados casi al
+    mismo tiempo dentro del mismo turno (evita que ambos lean el mismo
+    `COUNT(*)` y choquen contra el índice único de
+    `uq_customer_orders_shift_table_order_number`)."""
+    shift = db.execute(
+        select(CashShift)
+        .where(CashShift.status == "open")
+        .order_by(CashShift.opened_at.desc())
+        .limit(1)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if shift is None:
+        return None, None
+    count = db.execute(
+        select(func.count()).select_from(CustomerOrder).where(
+            CustomerOrder.cash_shift_id == shift.id
+        )
+    ).scalar_one()
+    return shift.id, count + 1
 
 
 def list_shifts(

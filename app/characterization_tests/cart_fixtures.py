@@ -69,6 +69,8 @@ from app.models.product_variant import ProductVariant
 from app.models.promotion import Promotion, PromotionRule, PromotionVariant
 from app.models.payment import PaymentMethod
 from app.models.order_payment_attempt import OrderPaymentAttempt
+from app.models.cash_register import CashRegister
+from app.models.cash_shift import CashShift
 
 
 # --------------------------------------------------------------- Esquema SQLite
@@ -112,6 +114,12 @@ _CART_TABLE_NAMES = [
     # "no such table: sales" aunque el escenario probado no cree ninguna
     # venta.
     "sales",
+    # spec 087 (FR-006, A-86): `submit_cart` consulta `cash_shifts` para
+    # numerar el pedido DINE_IN (`resolve_dine_in_table_order`) — sin estas
+    # dos tablas, esa consulta revienta con "no such table: cash_shifts"
+    # aunque el escenario probado no abra ningún turno.
+    "cash_registers",
+    "cash_shifts",
 ]
 
 _TABLE_NAMES = _CATALOG_TABLE_NAMES + _CART_TABLE_NAMES
@@ -369,6 +377,34 @@ def make_payment_method(db: Session, **kw) -> PaymentMethod:
     kw.setdefault("type", "cash" if kw["is_cash"] else "other")
     kw.setdefault("active", True)
     obj = PaymentMethod(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def make_cash_register(db: Session, **kw) -> CashRegister:
+    kw.setdefault("id", _uid())
+    kw.setdefault("name", f"caja-{kw['id']}")
+    kw.setdefault("active", True)
+    obj = CashRegister(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def make_cash_shift(db: Session, register: CashRegister | None = None, **kw) -> CashShift:
+    """spec 087 (FR-006, A-86): turno abierto contra el que
+    `resolve_dine_in_table_order` numera los pedidos DINE_IN de `submit_cart`."""
+    if register is None:
+        register = make_cash_register(db)
+    kw.setdefault("id", _uid())
+    kw.setdefault("cash_register_id", register.id)
+    kw.setdefault("user_id", _uid())
+    kw.setdefault("user_name", "Cajero de prueba")
+    kw.setdefault("opening_amount", Decimal("0"))
+    kw.setdefault("opened_at", datetime.now())
+    kw.setdefault("status", "open")
+    obj = CashShift(**kw)
     db.add(obj)
     db.flush()
     return obj

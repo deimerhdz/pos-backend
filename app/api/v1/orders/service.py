@@ -44,6 +44,7 @@ from app.models.sale import Sale
 from app.models.table_session import TableSession
 from app.core.models import User
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
+from app.api.v1.cash.service import resolve_dine_in_table_order
 from app.api.v1.orders.consolidation import get_or_create_table_session_id
 from app.api.v1.orders.consumption import deduct_order_items
 from app.api.v1.orders.schemas import OrderChannel, OrderCreate, OrderType
@@ -302,6 +303,18 @@ def create_order(
         table_id = participant.dining_table_id
         customer_name = customer_name or participant.display_label or participant.display_name
 
+    # spec 087 (FR-005, A-88): el nombre del cliente pasa de opcional a
+    # obligatorio también para DINE_IN/TAKEAWAY (DELIVERY ya lo exigía,
+    # arriba). Corre después de resolver `participant` -- un pedido QR ya
+    # trae el nombre autocompletado desde `participant.display_label`/
+    # `display_name` en ese punto, así que validar antes rechazaría pedidos
+    # que sí traen nombre del comensal.
+    if data.order_type in (OrderType.DINE_IN, OrderType.TAKEAWAY) and not (customer_name or "").strip():
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "El nombre del cliente es obligatorio.",
+        )
+
     if table_id is not None and participant is None:
         get_or_404(db, DiningTable, table_id, "Table not found")
 
@@ -332,6 +345,12 @@ def create_order(
                 "abrir una comanda de mostrador/mesero.",
             )
 
+    # spec 087 (FR-006, A-86): numeración estable de pedidos de mesa, asignada
+    # una sola vez aquí -- solo para DINE_IN, nunca recalculada después.
+    cash_shift_id = table_order_number = None
+    if data.order_type is OrderType.DINE_IN:
+        cash_shift_id, table_order_number = resolve_dine_in_table_order(db)
+
     try:
         order = CustomerOrder(
             participant_id=data.participant_id,
@@ -343,6 +362,8 @@ def create_order(
             delivery_address=data.delivery_address,
             delivery_phone=data.delivery_phone,
             delivery_fee=data.delivery_fee,
+            cash_shift_id=cash_shift_id,
+            table_order_number=table_order_number,
             # spec 073 (FR-008, A-70): el instante de vigencia de promociones se
             # congela una sola vez, aquí, al crear el pedido — aware UTC (la
             # columna es DateTime(timezone=True); NO `.replace(tzinfo=None)`,
