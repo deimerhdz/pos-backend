@@ -50,6 +50,7 @@ from app.api.v1.catalog.line_pricing import (
     load_valid_options,
     required_consumption,
 )
+from app.api.v1.cash.service import resolve_dine_in_table_order
 from app.api.v1.orders.schemas import CancelIn
 from app.api.v1.promotions import service as promotions
 from app.api.v1.cart.schemas import (
@@ -611,6 +612,12 @@ def submit_cart(
 
     check_availability(db, _cart_consumption(db, cart), extra_context="envío de pedido")
 
+    # spec 087 (FR-006, A-86): segundo punto de creación de CustomerOrder que
+    # necesita la numeración estable de pedidos de mesa -- mismo criterio de
+    # "segundo punto de creación" que ya usa spec 073 abajo, mismo helper que
+    # `orders/service.py::create_order`.
+    cash_shift_id, table_order_number = resolve_dine_in_table_order(db)
+
     try:
         order = CustomerOrder(
             table_session_id=participant.table_session_id,
@@ -621,6 +628,8 @@ def submit_cart(
             order_type="DINE_IN",
             status="recibida",
             user_id=None,  # lo envió el comensal, no un usuario del sistema
+            cash_shift_id=cash_shift_id,
+            table_order_number=table_order_number,
             # spec 073 (FR-008/FR-018, A-70): segundo punto de creación de
             # CustomerOrder — el flujo del carrito QR también congela su instante
             # de vigencia de promociones (aware UTC), igual que

@@ -21,7 +21,7 @@ from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem
 from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.api.v1.orders import service
-from app.api.v1.orders.consolidation import consolidate_table, add_item_to_table
+from app.api.v1.orders.consolidation import consolidate_table, add_item_to_order
 from app.api.v1.orders import kitchen
 from app.api.v1.orders import checkout
 from app.api.v1.orders import tables_advanced
@@ -203,6 +203,22 @@ def issue_table_qr_token(
 #   completa, en el router de `table_sessions`.
 
 
+@router.post(
+    "/{order_id}/items",
+    response_model=OrderResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Agregar un ítem directo a un pedido específico (mesero)",
+)
+def add_order_item(
+    order_id: UUID,
+    body: OrderItemIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    order = add_item_to_order(db, order_id, body, user)
+    return _load_order(db, order.id)
+
+
 # ============================ Confirmación (staff) ============================
 @router.post(
     "/{order_id}/confirm",
@@ -296,22 +312,6 @@ def consolidate(
     user: User = Depends(get_current_user),
 ):
     order = consolidate_table(db, table_id, user)
-    return _load_order(db, order.id)
-
-
-@router.post(
-    "/tables/{table_id}/items",
-    response_model=OrderResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Agregar un ítem directo a la orden de la mesa (mesero)",
-)
-def add_table_item(
-    table_id: UUID,
-    body: OrderItemIn,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    order = add_item_to_table(db, table_id, body, user)
     return _load_order(db, order.id)
 
 

@@ -16,6 +16,16 @@ ahora pasa `variant=variant` a `load_valid_options`
 (`consolidation.py:199`), igual que ya hacía `create_order` — antes aceptaba
 en silencio una selección incompleta o que excediera `max_select`.
 
+**spec 087 (A-85)**: `add_item_to_table(db, table_id, ...)` se retira — pedidos
+paralelos por mesa (FR-007) invalidan resolver "la orden abierta de la mesa"
+de forma implícita. Lo reemplaza `add_item_to_order(db, order_id, ...)`, que
+opera siempre sobre un pedido específico ya identificado y rechaza con 409 si
+está `pagada`/`cancelada`. Los escenarios de abajo que antes llamaban al
+primero sobre `table.id` ahora crean el pedido explícitamente (vía
+`get_or_create_open_order`, que sigue existiendo para `consolidate_table`) y
+llaman al segundo sobre `order.id` — el comportamiento de A-04 que documentan
+no cambia, solo cómo se identifica el pedido destino.
+
 Ejecutar solo este módulo:
 
     python -m unittest app.characterization_tests.test_orders_consolidation -v
@@ -80,85 +90,97 @@ class TestConsolidation(unittest.TestCase):
     def _user(self):
         return fx.make_user_double()
 
-    # ------------------------------------------------ add_item_to_table (T012)
+    # ------------------------------------------------ add_item_to_order (T012, spec 087)
 
-    def test_add_item_to_table_a04_valida_seleccion_de_opciones_tras_la_correccion(self):
-        """CONGELA comportamiento corregido — A-04 (`consolidation.py:199`,
+    def test_add_item_to_order_a04_valida_seleccion_de_opciones_tras_la_correccion(self):
+        """CONGELA comportamiento corregido — A-04 (`consolidation.py`,
         spec 020, `registro-de-anomalias.md` "Tratamiento acordado"): una
         variante con un grupo de opciones obligatorio (`min_select=1`) y
         ninguna opción seleccionada se rechaza con 422, porque
-        `add_item_to_table` ahora pasa `variant` a `load_valid_options`,
-        igual que ya hacía `create_order`."""
+        `add_item_to_order` (spec 087, A-85 — reemplaza `add_item_to_table`)
+        pasa `variant` a `load_valid_options`, igual que ya hacía
+        `create_order`."""
         db = fx.new_session()
         table = fx.make_dining_table(db)
         _, _, variant, _ = self._seed_variant_con_receta(db)
         self._seed_grupo_obligatorio_que_descuenta(db, variant)
         db.commit()
         user = self._user()
+        order = consolidation.get_or_create_open_order(db, table.id, user.id)
+        db.commit()
 
         data = OrderItemIn(product_variant_id=variant.id, quantity=1, options=[])
         with self.assertRaises(HTTPException) as ctx:
-            consolidation.add_item_to_table(db, table.id, data, user)
+            consolidation.add_item_to_order(db, order.id, data, user)
         self.assertEqual(ctx.exception.status_code, 422)
 
-    def test_add_item_to_table_seleccion_completa_se_acepta_historia_1_escenario_2(self):
+    def test_add_item_to_order_seleccion_completa_se_acepta_historia_1_escenario_2(self):
         """Historia 1, escenario 2 (spec 020): la misma variante con un grupo
         `min_select=3`/`max_select=3`, seleccionando los 3 sabores correctos,
         se agrega normalmente — sin cambio frente al comportamiento de
-        siempre para una selección completa."""
+        siempre para una selección completa (migrado a `add_item_to_order`,
+        spec 087/A-85)."""
         db = fx.new_session()
         table = fx.make_dining_table(db)
         _, _, variant, _ = self._seed_variant_con_receta(db)
         _, options = self._seed_grupo_tres_sabores_que_descuenta(db, variant)
         db.commit()
         user = self._user()
+        order = consolidation.get_or_create_open_order(db, table.id, user.id)
+        db.commit()
 
         data = OrderItemIn(
             product_variant_id=variant.id, quantity=1,
             options=[OptionSelectionIn(option_id=o.id) for o in options[:3]],
         )
-        order = consolidation.add_item_to_table(db, table.id, data, user)
+        order = consolidation.add_item_to_order(db, order.id, data, user)
 
         self.assertEqual(len(order.items), 1)
         self.assertEqual(order.items[0].product_variant_id, variant.id)
         self.assertEqual(len(order.items[0].options), 3)
 
-    def test_add_item_to_table_excede_maximo_del_grupo_rechaza_historia_1_escenario_3(self):
+    def test_add_item_to_order_excede_maximo_del_grupo_rechaza_historia_1_escenario_3(self):
         """Historia 1, escenario 3 (spec 020): la misma variante y grupo
         (`max_select=3`), seleccionando 4 sabores, se rechaza con 422 — el
         mismo mecanismo de `min_select`/`max_select` cubre tanto elegir de
-        menos (escenario 1) como de más."""
+        menos (escenario 1) como de más (migrado a `add_item_to_order`, spec
+        087/A-85)."""
         db = fx.new_session()
         table = fx.make_dining_table(db)
         _, _, variant, _ = self._seed_variant_con_receta(db)
         _, options = self._seed_grupo_tres_sabores_que_descuenta(db, variant)
         db.commit()
         user = self._user()
+        order = consolidation.get_or_create_open_order(db, table.id, user.id)
+        db.commit()
 
         data = OrderItemIn(
             product_variant_id=variant.id, quantity=1,
             options=[OptionSelectionIn(option_id=o.id) for o in options],
         )
         with self.assertRaises(HTTPException) as ctx:
-            consolidation.add_item_to_table(db, table.id, data, user)
+            consolidation.add_item_to_order(db, order.id, data, user)
         self.assertEqual(ctx.exception.status_code, 422)
 
-    def test_add_item_to_table_y_create_order_convergen_tras_la_correccion_historia_2_escenario_1(self):
+    def test_add_item_to_order_y_create_order_convergen_tras_la_correccion_historia_2_escenario_1(self):
         """Historia 2, escenario 1 (spec 020, research.md Decisión 3): el
         mismo escenario de selección vacía en un grupo `min_select=1` que
-        descuenta inventario, ejecutado por separado vía `add_item_to_table`
+        descuenta inventario, ejecutado por separado vía `add_item_to_order`
         y vía `create_order`, produce el mismo `status_code` en ambos —
-        cierra la divergencia que motivaba A-04."""
+        cierra la divergencia que motivaba A-04 (migrado a `add_item_to_order`,
+        spec 087/A-85)."""
         db = fx.new_session()
         table = fx.make_dining_table(db)
         _, _, variant, _ = self._seed_variant_con_receta(db)
         self._seed_grupo_obligatorio_que_descuenta(db, variant)
         db.commit()
         user = self._user()
+        order = consolidation.get_or_create_open_order(db, table.id, user.id)
+        db.commit()
 
         data_add = OrderItemIn(product_variant_id=variant.id, quantity=1, options=[])
         with self.assertRaises(HTTPException) as ctx_add:
-            consolidation.add_item_to_table(db, table.id, data_add, user)
+            consolidation.add_item_to_order(db, order.id, data_add, user)
 
         data_create = OrderCreate(
             channel=OrderChannel.POS,
@@ -250,26 +272,69 @@ class TestConsolidation(unittest.TestCase):
         order_2 = consolidation.get_or_create_open_order(db, table.id, user_id)
         self.assertEqual(order_2.id, order.id)
 
-    # --------------------------------- add_item_to_table abre sobre la marcha (T017)
+    # --------------------------------- add_item_to_order sobre pedido ya creado (T017, spec 087/A-85)
 
-    def test_add_item_to_table_abre_sesion_y_orden_sobre_la_marcha(self):
-        """CONGELA comportamiento actual (spec.md Historia 1, escenario 3):
-        mesa sin sesión de mesa abierta ni orden abierta → `add_item_to_table`
-        crea ambas y el ítem queda asociado a ellas."""
+    def test_add_item_to_order_agrega_sobre_pedido_ya_creado(self):
+        """Spec 087 (A-85): a diferencia de la extinta `add_item_to_table`,
+        `add_item_to_order` ya no abre sesión/orden "sobre la marcha" — exige
+        un `order_id` que ya exista (404 si no, ver test dedicado más abajo).
+        Este escenario documenta el camino feliz: mesa sin sesión ni orden
+        previas, se crea el pedido explícitamente primero
+        (`get_or_create_open_order`, igual que hacía `add_item_to_table` por
+        dentro) y luego se le anexa el ítem por `order_id`."""
         db = fx.new_session()
         table = fx.make_dining_table(db)
         _, _, variant, _ = self._seed_variant_con_receta(db)
         db.commit()
         user = self._user()
+        order = consolidation.get_or_create_open_order(db, table.id, user.id)
+        db.commit()
 
         data = OrderItemIn(product_variant_id=variant.id, quantity=1)
-        order = consolidation.add_item_to_table(db, table.id, data, user)
+        order = consolidation.add_item_to_order(db, order.id, data, user)
 
         self.assertEqual(order.status, "abierta")
         self.assertEqual(order.channel, "POS")
         self.assertTrue(order.is_consolidation_order)
         self.assertIsNotNone(order.table_session_id)
         self.assertEqual(len(order.items), 1)
+
+    def test_add_item_to_order_404_con_order_id_inexistente(self):
+        """Spec 087 (FR-008/FR-009, A-85): un `order_id` que no corresponde a
+        ningún pedido responde 404 — no hay ninguna resolución implícita por
+        mesa a la que caer de vuelta."""
+        db = fx.new_session()
+        _, _, variant, _ = self._seed_variant_con_receta(db)
+        db.commit()
+        user = self._user()
+
+        data = OrderItemIn(product_variant_id=variant.id, quantity=1)
+        with self.assertRaises(HTTPException) as ctx:
+            consolidation.add_item_to_order(db, uuid4(), data, user)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_add_item_to_order_409_si_pedido_pagado_o_cancelado(self):
+        """Spec 087 (FR-009, A-85): un pedido `pagada` o `cancelada` rechaza
+        el anexo con 409 — hay que crear un pedido nuevo en vez de reabrir
+        uno ya cerrado."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db)
+        ts = fx.make_table_session(db, table=table)
+        _, _, variant, _ = self._seed_variant_con_receta(db)
+        db.commit()
+        user = self._user()
+
+        for estado in ("pagada", "cancelada"):
+            order = fx.make_customer_order(
+                db, ts, dining_table_id=table.id, channel="POS",
+                is_consolidation_order=True, status=estado,
+            )
+            db.commit()
+
+            data = OrderItemIn(product_variant_id=variant.id, quantity=1)
+            with self.assertRaises(HTTPException) as ctx:
+                consolidation.add_item_to_order(db, order.id, data, user)
+            self.assertEqual(ctx.exception.status_code, 409)
 
     # --------------------------------------------------- consolidate_table (T018)
 
@@ -322,18 +387,21 @@ class TestConsolidation(unittest.TestCase):
             consolidation.consolidate_table(db, table.id, user)
         self.assertEqual(ctx.exception.status_code, 409)
 
-    # ---------------------------------------- add_item_to_table combo (T019)
+    # ---------------------------------------- add_item_to_order combo (T019)
 
     # spec 063 (FR-024, A-61): `test_add_item_to_table_combo_expande_componentes_a_precio_normal`
     # se elimina — el mecanismo de combo se retira; `OrderItemIn` ya no acepta `combo_id`.
 
-    # ------------------------------------- add_item_to_table sin receta (T020)
+    # ------------------------------------- add_item_to_order sin receta (T020, spec 087/A-85)
 
-    def test_add_item_to_table_variante_sin_receta_rechaza(self):
+    def test_add_item_to_order_variante_sin_receta_rechaza(self):
         """CONGELA comportamiento actual: variante sin receta asociada vía
-        `add_item_to_table` → la guarda de `deduct_order_items` rechaza la
-        creación con 409, migrando el caso de `test_receta_obligatoria.py`
-        correspondiente a este camino (research.md §5, SC-007)."""
+        `add_item_to_order` (spec 087/A-85, reemplaza `add_item_to_table`) →
+        la guarda de `deduct_order_items` rechaza la creación con 409,
+        migrando el caso de `test_receta_obligatoria.py` correspondiente a
+        este camino (research.md §5, SC-007). La orden en sí ya existía antes
+        del intento (creada explícitamente, como exige `add_item_to_order`) y
+        no se le agrega el ítem fallido."""
         db = fx.new_session()
         table = fx.make_dining_table(db)
         category = fx.make_category(db)
@@ -341,15 +409,17 @@ class TestConsolidation(unittest.TestCase):
         variant_sin_receta = fx.make_variant(db, product=product, price=PRECIO)
         db.commit()
         user = self._user()
+        order = consolidation.get_or_create_open_order(db, table.id, user.id)
+        db.commit()
 
         data = OrderItemIn(product_variant_id=variant_sin_receta.id, quantity=1)
         with self.assertRaises(HTTPException) as ctx:
-            consolidation.add_item_to_table(db, table.id, data, user)
+            consolidation.add_item_to_order(db, order.id, data, user)
         self.assertEqual(ctx.exception.status_code, 409)
 
-        # La orden no quedó creada a medias.
-        orders = db.query(CustomerOrder).all()
-        self.assertEqual(orders, [])
+        # La orden preexistente no ganó ningún ítem del intento fallido.
+        db.refresh(order)
+        self.assertEqual(order.items, [])
 
     # ------------------------- spec 055, research.md D2: no reabrir lo cobrado
 

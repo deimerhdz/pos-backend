@@ -32,6 +32,7 @@ from app.models.session_participant import SessionParticipant
 from app.models.cart import Cart
 from app.models.option import Option
 from app.catalog_engine import ChosenOption, compute_line_price, load_valid_options
+from app.catalog_engine.core import format_item_description
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.cash_shift import CashShift
@@ -290,10 +291,7 @@ def order_sale_lines(
     for it in db.execute(stmt).scalars():
         variant = db.get(ProductVariant, it.product_variant_id)
         product = db.get(Product, variant.product_id) if variant else None
-        description = (
-            f"{product.name} - {variant.presentation_name}" if product
-            else (variant.presentation_name if variant else "")
-        )
+        description = format_item_description(product, variant)
         lines.append(SaleLine(
             product_variant_id=it.product_variant_id,
             description=description,
@@ -444,10 +442,7 @@ def compute_draft_preview(db: Session, data: DraftPreviewIn) -> CheckoutPreviewR
             )
         options = load_valid_options(db, item.options, variant=variant)
         product = db.get(Product, variant.product_id)
-        description = (
-            f"{product.name} - {variant.presentation_name}" if product
-            else variant.presentation_name
-        )
+        description = format_item_description(product, variant)
         lines.append(SaleLine(
             product_variant_id=item.product_variant_id,
             description=description,

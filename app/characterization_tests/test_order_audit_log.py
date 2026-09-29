@@ -285,6 +285,7 @@ class TestOrderAuditIntegration(unittest.TestCase):
         data = OrderCreate(
             channel=OrderChannel.POS,
             order_type=OrderType.DINE_IN,
+            customer_name="Cliente de prueba",
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1)],
             hold_for_payment=hold_for_payment,
         )
