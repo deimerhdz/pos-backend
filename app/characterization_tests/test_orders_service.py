@@ -59,6 +59,7 @@ class TestService(unittest.TestCase):
 
         data = OrderCreate(
             channel=OrderChannel.POS,
+            customer_name="Cliente de prueba",
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
         order = service.create_order(db, data, uuid4())
@@ -86,6 +87,7 @@ class TestService(unittest.TestCase):
 
         data = OrderCreate(
             channel=OrderChannel.POS,
+            customer_name="Cliente de prueba",
             items=[OrderItemIn(product_variant_id=variant_sin_receta.id, quantity=1)],
         )
         with self.assertRaises(HTTPException) as ctx:
@@ -112,6 +114,7 @@ class TestService(unittest.TestCase):
 
         data = OrderCreate(
             channel=OrderChannel.POS,
+            customer_name="Cliente de prueba",
             dining_table_id=table.id,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1)],
         )
@@ -133,6 +136,7 @@ class TestService(unittest.TestCase):
 
         data = OrderCreate(
             channel=OrderChannel.POS,
+            customer_name="Cliente de prueba",
             hold_for_payment=True,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
@@ -179,6 +183,7 @@ class TestService(unittest.TestCase):
 
         data = OrderCreate(
             channel=OrderChannel.POS,
+            customer_name="Cliente de prueba",
             dining_table_id=table.id,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
@@ -199,6 +204,7 @@ class TestService(unittest.TestCase):
 
         data = OrderCreate(
             channel=OrderChannel.POS,
+            customer_name="Cliente de prueba",
             dining_table_id=table.id,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
@@ -339,14 +345,15 @@ class TestService(unittest.TestCase):
         ]
         for channel, order_type in combinaciones:
             with self.subTest(channel=channel, order_type=order_type):
-                # spec 056, FR-007: DELIVERY exige cliente/dirección/valor del
-                # domicilio — se completan aquí para que este test siga
+                # spec 056, FR-007: DELIVERY exige además dirección/valor del
+                # domicilio -- se completan aquí para que este test siga
                 # verificando únicamente la combinación canal×tipo de orden
                 # (spec 055), no la obligatoriedad de esos campos nuevos
-                # (cubierta aparte en TestCreateOrderDelivery).
+                # (cubierta aparte en TestCreateOrderDelivery). spec 087
+                # (FR-005, A-88): customer_name ahora es obligatorio para los
+                # tres tipos, no solo DELIVERY -- se incluye siempre.
                 extra = (
                     dict(
-                        customer_name="Ana Torres",
                         delivery_address="Cra 45 #12-30",
                         delivery_fee=Decimal("6000"),
                     )
@@ -355,12 +362,118 @@ class TestService(unittest.TestCase):
                 data = OrderCreate(
                     channel=channel,
                     order_type=order_type,
+                    customer_name="Ana Torres",
                     items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
                     **extra,
                 )
                 order = service.create_order(db, data, uuid4())
                 self.assertEqual(order.channel, channel.value)
                 self.assertEqual(order.order_type, order_type.value)
+
+    # -------------------------- customer_name obligatorio (spec 087, FR-005, A-88)
+
+    def test_create_order_dine_in_sin_nombre_cliente_rechaza_422(self):
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.DINE_IN,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_create_order_takeaway_sin_nombre_cliente_rechaza_422(self):
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.TAKEAWAY,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_create_order_dine_in_con_participant_sin_nombre_explicito_se_autocompleta(self):
+        """Con `participant_id`, `customer_name` se completa desde
+        `participant.display_label`/`display_name` (líneas ya existentes,
+        antes de la validación nueva) — un pedido QR con comensal identificado
+        sigue funcionando sin exigirle el campo explícito."""
+        db = fx.new_session()
+        ts = fx.make_table_session(db)
+        participante = fx.make_participant(db, table_session=ts, display_name="Camila")
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.QR_MENU,
+            order_type=OrderType.DINE_IN,
+            participant_id=participante.id,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
+        )
+        order = service.create_order(db, data, uuid4())
+        self.assertEqual(order.customer_name, "Camila")
+
+    def test_create_order_dos_pedidos_en_la_misma_mesa_no_se_rechazan(self):
+        """spec 087 (FR-007): comportamiento intencional -- `POST /orders`
+        permite dos `CustomerOrder` con el mismo `dining_table_id` sin ningún
+        rechazo (confirmado en investigación: ninguna constraint lo impide
+        hoy). Hasta esta spec era "silencioso", sin ningún test que lo
+        declarara; se documenta aquí como comportamiento nuevo autorizado."""
+        db = fx.new_session()
+        table = fx.make_dining_table(db, status="libre")
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            customer_name="Ana",
+            dining_table_id=table.id,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
+        )
+        order_1 = service.create_order(db, data, uuid4())
+
+        data_2 = OrderCreate(
+            channel=OrderChannel.POS,
+            customer_name="Beto",
+            dining_table_id=table.id,
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
+        )
+        order_2 = service.create_order(db, data_2, uuid4())
+
+        self.assertNotEqual(order_1.id, order_2.id)
+        self.assertEqual(order_1.dining_table_id, table.id)
+        self.assertEqual(order_2.dining_table_id, table.id)
+
+    def test_create_order_delivery_sigue_validado_una_sola_vez(self):
+        """DELIVERY ya exigía `customer_name` desde spec 056 (FR-007, arriba)
+        -- confirma que la validación nueva de DINE_IN/TAKEAWAY no la duplica
+        ni cambia su mensaje/status para este tipo."""
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        data = OrderCreate(
+            channel=OrderChannel.POS,
+            order_type=OrderType.DELIVERY,
+            delivery_address="Cra 45 #12-30",
+            delivery_fee=Decimal("6000"),
+            items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(db, data, uuid4())
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertEqual(
+            ctx.exception.detail,
+            "Un pedido a domicilio requiere nombre del cliente, dirección y "
+            "valor del domicilio.",
+        )
 
 
 class TestCreateOrderDelivery(unittest.TestCase):

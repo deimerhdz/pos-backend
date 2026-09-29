@@ -23,6 +23,7 @@ from app.models.payment import Payment, PaymentMethod
 from app.models.payment_method_catalog import PaymentMethodCatalog
 from app.models.sale import Sale, SaleItem
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
+from app.catalog_engine.core import format_item_description
 from app.api.v1.orders import checkout
 from app.api.v1.sales.consumption import deduct_sale
 from app.api.v1.sales.builder import SaleLine, build_sale, ensure_open_shift
@@ -225,10 +226,7 @@ def checkout(db: Session, data: SaleCreate, cashier: User, *, invoice_prefix: st
         for line in data.items:
             variant = get_or_404(db, ProductVariant, line.product_variant_id, "Variant not found")
             product = db.get(Product, variant.product_id)
-            description = (
-                f"{product.name} - {variant.presentation_name}" if product
-                else variant.presentation_name
-            )
+            description = format_item_description(product, variant)
 
             # Deduplica, exige que estén activas y valida la selección contra los
             # grupos del producto. Antes este bucle cargaba las opciones a mano y se

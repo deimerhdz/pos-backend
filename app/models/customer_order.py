@@ -121,6 +121,16 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
 
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
+    # spec 087 (FR-006, A-86): numeración estable de pedidos de mesa,
+    # asignada una sola vez al crear el pedido (`orders/service.py::create_order`
+    # y `cart/service.py::submit_cart`) vía `cash/service.py::resolve_dine_in_table_order`.
+    # Ambas NULL para TAKEAWAY/DELIVERY y para todo pedido creado antes de esta
+    # migración -- nunca se recalculan ni se desplazan después.
+    cash_shift_id: Mapped[Optional[UUID]] = mapped_column(
+        ForeignKey("cash_shifts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    table_order_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )
@@ -184,6 +194,15 @@ class CustomerOrder(UUIDPrimaryKeyMixin, Base):
             "participant_id",
             unique=True,
             postgresql_where=text("status NOT IN ('pagada', 'cancelada')"),
+        ),
+        # spec 087 (FR-006): unicidad del número de pedido dentro del turno de
+        # caja, solo para las filas que sí lo tienen (DINE_IN).
+        Index(
+            "uq_customer_orders_shift_table_order_number",
+            "cash_shift_id",
+            "table_order_number",
+            unique=True,
+            postgresql_where=text("table_order_number IS NOT NULL"),
         ),
         {"schema": "tenant"},
     )

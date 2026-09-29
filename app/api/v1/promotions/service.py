@@ -231,10 +231,14 @@ def evaluate_variant_sets(db: Session, promo_lines: list, now: datetime) -> SetD
     FR-027 (spec 083, sesión 2026-09-17): para `type == "percent"`, el `%` se
     aplica solo sobre `base_unit_price` (precio de la variante sin toppings),
     nunca sobre `unit_price` (que incluye los adicionales elegidos, spec
-    064/065) — el precio de cada topping se cobra íntegro. `package_price` no
-    cambia: sigue descontando sobre `unit_price` completo. Una línea sin
-    `base_unit_price` (o sin toppings) trae `base_unit_price == unit_price`,
-    así que esta rama no cambia nada para ese caso."""
+    064/065) — el precio de cada topping se cobra íntegro.
+
+    FR-011 (spec 087, A-84): `package_price` sigue el mismo criterio desde
+    aquí — descuenta sobre `base_unit_price`, nunca sobre `unit_price`
+    completo, para que los adicionales no queden absorbidos por el
+    descuento de la promoción. Una línea sin `base_unit_price` (o sin
+    toppings) trae `base_unit_price == unit_price`, así que esta rama no
+    cambia nada para ese caso."""
     result = SetDiscountResult()
     rules = active_variant_set_rules(db, now)
     if not rules:
@@ -267,9 +271,12 @@ def evaluate_variant_sets(db: Session, promo_lines: list, now: datetime) -> SetD
         rule_amount = Decimal(0)
         for block in _greedy_units(units, r.min_qty):
             if r.type == "package_price":
-                normal_g = sum((u[1] for u in block), Decimal(0))
-                descuento_g = max(Decimal(0), normal_g - Decimal(r.value))
-                dist_block = block
+                base_g = sum((base_price_by_line[u[0]] for u in block), Decimal(0))
+                descuento_g = max(Decimal(0), base_g - Decimal(r.value))
+                dist_block = [
+                    (idx, base_price_by_line[idx], pv_id, line_id)
+                    for idx, _price, pv_id, line_id in block
+                ]
             else:  # percent (FR-027: solo sobre el precio base de la variante)
                 base_g = sum((base_price_by_line[u[0]] for u in block), Decimal(0))
                 descuento_g = (

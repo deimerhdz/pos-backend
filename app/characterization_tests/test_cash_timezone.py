@@ -1,6 +1,10 @@
-"""Spec 030 — Historia 2: Caja (`ShiftResponse`, `CashMovementResponse`,
-`PartialCountResponse`) usa el mismo mecanismo central (`UtcDatetime`) que
-Ventas (A-50, registro-de-anomalias.md).
+"""Spec 030 — Historia 2: Caja (`ShiftResponse`, `CashMovementResponse`) usa
+el mismo mecanismo central (`UtcDatetime`) que Ventas (A-50,
+registro-de-anomalias.md).
+
+spec 087 (FR-001, A-87): `PartialCountResponse` se retiró junto con Arqueo
+Parcial (endpoint + schemas + modelo + tabla) — `TestPartialCountUtcSerialization`,
+que documentaba su serialización UTC, se elimina con ella.
 
     python -m unittest app.characterization_tests.test_cash_timezone -v
 """
@@ -45,18 +49,6 @@ class TestCashMovementUtcSerialization(unittest.TestCase):
             amount=Decimal("5000"), occurred_at=naive,
         )
         dumped = resp.model_dump(mode="json")["occurred_at"]
-        self.assertTrue(dumped.endswith("+00:00"), dumped)
-
-
-class TestPartialCountUtcSerialization(unittest.TestCase):
-    def test_counted_at_lleva_offset_utc_explicito(self):
-        naive = datetime(2026, 8, 24, 12, 53, 7)
-        resp = cash_schemas.PartialCountResponse.model_construct(
-            id=uuid.uuid4(), cash_shift_id=uuid.uuid4(),
-            counted_amount=Decimal("10000"), expected_amount=Decimal("10000"),
-            difference=Decimal("0"), counted_at=naive,
-        )
-        dumped = resp.model_dump(mode="json")["counted_at"]
         self.assertTrue(dumped.endswith("+00:00"), dumped)
 
 

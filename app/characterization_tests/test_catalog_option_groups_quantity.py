@@ -266,6 +266,7 @@ class EndToEndQuantityConsumptionTests(unittest.TestCase):
 
         data = OrderCreate(
             channel=OrderChannel.POS,
+            customer_name="Cliente de prueba",
             items=[OrderItemIn(
                 product_variant_id=variant.id, quantity=2,
                 options=[OptionSelectionIn(option_id=opt.id, quantity=3)],
@@ -346,6 +347,7 @@ class SelectionModeChangeIsNotRetroactiveTests(unittest.TestCase):
 
         data = OrderCreate(
             channel=OrderChannel.POS,
+            customer_name="Cliente de prueba",
             items=[OrderItemIn(
                 product_variant_id=variant.id, quantity=1,
                 options=[OptionSelectionIn(option_id=opt.id)],
