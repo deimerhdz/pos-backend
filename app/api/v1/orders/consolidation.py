@@ -186,13 +186,23 @@ def _reload_order(db: Session, order_id: UUID) -> CustomerOrder:
     ).scalar_one()
 
 
-def add_item_to_table(db: Session, table_id: UUID, data, user: User) -> CustomerOrder:
-    """Inserta uno o varios order_items en la orden de la mesa (add directo del
-    mesero, Fase 5). Aplica la regla de routing (orden abierta o crea orden-hija)
-    y el mismo descuento de inventario por ítem que la consolidación.
+def add_item_to_order(db: Session, order_id: UUID, data, user: User) -> CustomerOrder:
+    """Inserta uno o varios order_items en un pedido específico ya identificado
+    por `order_id` (add directo del mesero). Mismo descuento de inventario por
+    ítem que la consolidación.
+
+    spec 087 (FR-008/FR-009, A-85): reemplaza a `add_item_to_table` -- con
+    pedidos paralelos por mesa (FR-007) ya no hay una única "orden abierta de
+    la mesa" que resolver de forma implícita; el llamador siempre identifica el
+    pedido exacto al que anexa. Un pedido `pagada`/`cancelada` rechaza el anexo.
 
     spec 063 (FR-024): el mecanismo de combo se retira; `combo_id` ya no llega."""
-    table = get_or_404(db, DiningTable, table_id, "Table not found")
+    order = get_or_404(db, CustomerOrder, order_id, "Order not found")
+    if order.status in ("pagada", "cancelada"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Este pedido ya está pagado o cancelado; crea un pedido nuevo.",
+        )
 
     variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
     if not variant.active:
@@ -201,8 +211,6 @@ def add_item_to_table(db: Session, table_id: UUID, data, user: User) -> Customer
     lines = [(variant.id, data.quantity, options, compute_line_price(variant, options), None)]
 
     try:
-        order = get_or_create_open_order(db, table.id, user.id)
-
         entries: list[tuple[OrderItem, list[ChosenOption]]] = []
         for product_variant_id, quantity, options, unit_price, combo_id in lines:
             item = OrderItem(
