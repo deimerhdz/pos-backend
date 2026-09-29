@@ -17,7 +17,12 @@ from sqlalchemy.sql import Select
 from app.core.crud import get_or_404
 from app.core.models import Tenant
 from app.core.plan_limits import ensure_module_access
-from app.core.storage import delete_object, object_key_for_deletion
+from app.core.asset_refs import (
+    ImageDecision,
+    delete_if_unreferenced,
+    resolve_image_change,
+)
+from app.core.storage import FOLDER_PRODUCTS, deletable_key, delete_object, normalize_asset_ref
 from app.models.product import Product
 from app.models.product_variant import ProductVariant
 from app.models.category import Category
@@ -65,6 +70,14 @@ class ProductService:
         # crear un producto con tracks_inventory=False sigue funcionando sin ese módulo.
         if data.tracks_inventory:
             ensure_module_access(db, tenant, "inventario")
+        # spec 088 (FR-001/FR-003/FR-004): una imagen gestionada nueva debe ser una key
+        # del propio negocio y carpeta `products`, y existir en R2. Sin base: en una
+        # creación no hay imagen vigente que comparar. 422/503 antes de crear nada.
+        resolve_image_change(
+            db, tenant_schema=tenant.schema, folder=FOLDER_PRODUCTS,
+            sent=data.image_url, base_provided=False, base=None, current=None,
+            is_creation=True,
+        )
         try:
             product = Product(
                 category_id=data.category_id,
@@ -101,6 +114,20 @@ class ProductService:
     def update_product(self, db: Session, tenant: Tenant, id: UUID, data: ProductUpdate) -> Product:
         product = self.get_or_404(db, id)
         self._validate_fks(db, data.category_id)
+        # spec 088 (research D6): la imagen se resuelve ANTES de asignar cualquier otro
+        # campo, de modo que un 422/503 deja el registro exactamente como estaba. Una
+        # imagen enviada solo cuenta como cambio si `image_url_base` coincide con la
+        # vigente (FR-002); un formulario desactualizado no cambia la imagen y el resto
+        # de los campos se guarda igualmente, en silencio.
+        # spec 080: `image_url`/`image_url_base` ya vienen normalizadas a key (AssetRefIn).
+        image_decision = resolve_image_change(
+            db, tenant_schema=tenant.schema, folder=FOLDER_PRODUCTS,
+            sent=data.image_url,
+            base_provided="image_url_base" in data.model_fields_set,
+            base=data.image_url_base,
+            current=normalize_asset_ref(product.image_url),
+            is_creation=False,
+        )
         if data.category_id is not None:
             product.category_id = data.category_id
         if data.name is not None:
@@ -110,15 +137,16 @@ class ProductService:
         if data.preparation_type is not None:
             product.preparation_type = data.preparation_type.value
         old_key = None
-        # spec 080: `data.image_url` ya viene normalizada a key (AssetRefIn), así
-        # que la comparación es key vs key — un formulario reenviado sin tocar la
-        # imagen (que manda la URL de visualización) no se interpreta como cambio
-        # y no dispara el borrado del objeto en uso (US3, FR-011/FR-012).
-        if data.image_url is not None and data.image_url != product.image_url:
-            # object_key_for_deletion acepta una key directa o una URL del bucket
-            # gestionado, y devuelve None para una referencia de otro origen
-            # (FR-013): en ese caso no se intenta borrar nada.
-            old_key = object_key_for_deletion(product.image_url)
+        if image_decision is ImageDecision.APPLY:
+            # `deletable_key` solo devuelve una key en convención del propio negocio
+            # (FR-004/FR-005): una URL de otro origen o una key histórica fuera de
+            # convención queda huérfana en vez de borrarse.
+            old_key = deletable_key(product.image_url, tenant.schema, FOLDER_PRODUCTS)
+            product.image_url = data.image_url
+        elif data.image_url is not None and normalize_asset_ref(product.image_url) == data.image_url:
+            # Misma imagen (KEEP) en otra representación: una fila histórica con URL
+            # absoluta pasa a guardarse como key al volver a guardarla (spec 080, FR-004).
+            # No es un cambio de imagen: no se borra ni se verifica nada.
             product.image_url = data.image_url
         if data.active is not None:
             product.active = data.active
@@ -147,9 +175,11 @@ class ProductService:
             db.rollback()
             logger.exception("Error actualizando producto")
             raise
-        db.refresh(product)
+        # A-44 / spec 021 (intacto): primero confirmar, después borrar best-effort. spec 088
+        # (FR-006/FR-007): y solo si ninguna otra fila usa el archivo anterior.
         if old_key:
-            delete_object(old_key)
+            delete_if_unreferenced(db, old_key, delete_object)
+        db.refresh(product)
         return product
 
     def soft_delete(self, db: Session, id: UUID) -> Product:
