@@ -302,19 +302,19 @@ class TestEvaluateVariantSets(unittest.TestCase):
         by_line = dict(r.by_line)
         self.assertEqual(sorted(by_line.values()), [Decimal("100"), Decimal("100")])
 
-    def test_17_package_price_no_excluye_toppings_sin_cambio(self):
-        """FR-027 aplica únicamente a `percent` -- `package_price` sigue
-        descontando sobre el precio total de la línea (con toppings incluidos,
-        si los hubiera), exactamente como antes de esta spec."""
-        a = self._variant(8000, "a")
-        b = self._variant(8000, "b")
-        self._promo("package_price", 12000, 2, [a, b])
-
-        linea_a = _line(a, 1, base_unit_price=Decimal("6000"))  # toppings != base
-        linea_b = _line(b, 1, base_unit_price=Decimal("6000"))
-        r = promotions.evaluate_variant_sets(self.db, [linea_a, linea_b], NOW)
-        # 16000 (unit_price total, ignora base_unit_price) - 12000 = 4000.
-        self.assertEqual(r.total, Decimal("4000.00"))
+    def test_17_package_price_excluye_toppings_de_la_base_min_qty_1(self):
+        """spec 087, FR-011: el fix corrige `package_price` para que también
+        descuente sobre `base_unit_price` (sin adicionales), igual que `percent`
+        desde FR-027 (spec 083) -- reemplaza el comportamiento congelado en la
+        versión anterior de este test, que documentaba el bug ahora corregido
+        (A-84, registro-de-anomalias.md)."""
+        v = self._variant(6000, "Granizado de Mora")
+        self._promo("package_price", 5000, 1, [v])
+        linea = _line(v, 1, base_unit_price=Decimal("6000"))
+        linea["unit_price"] = Decimal("9500")  # 6000 base + 2000 leche cond. + 1500 choco-chips
+        r = promotions.evaluate_variant_sets(self.db, [linea], NOW)
+        # Descuento = base(6000) - promo(5000) = 1000 -- nunca sobre 9500 (total final 8500).
+        self.assertEqual(r.total, Decimal("1000.00"))
 
 
 if __name__ == "__main__":
