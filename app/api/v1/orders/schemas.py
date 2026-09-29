@@ -151,6 +151,11 @@ class OrderItemOptionResponse(BaseModel):
     id: UUID
     option_id: UUID
     quantity: int
+    # spec 087 (FR-015, A-89): nombre de la opción y de su grupo, resueltos por
+    # JOIN en lectura (`OrderItemOption.name`/`group_name`). Opcionales: un
+    # `OrderItemOption` recién creado y devuelto sin recargar los trae en `None`.
+    name: str | None = None
+    group_name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -208,6 +213,10 @@ class OrderResponse(BaseModel):
     delivery_phone: str | None = None
     delivery_fee: Decimal | None = None
     notes: str | None = None
+    # spec 087 (FR-006, A-86): número de pedido de mesa, estable dentro del
+    # turno de caja en que se creó. `None` para TAKEAWAY/DELIVERY y para
+    # pedidos creados antes de esta spec (nunca se recalcula ni se migra).
+    table_order_number: int | None = None
     created_at: UtcDatetime
     items: list[OrderItemResponse] = Field(default_factory=list)
     # Intento de pago más reciente (spec 024) — `None` si nunca se inició

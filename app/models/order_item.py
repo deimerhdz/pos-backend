@@ -1,7 +1,8 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy import String, Integer, Numeric, ForeignKey, CheckConstraint, UniqueConstraint
-from sqlalchemy.orm import mapped_column, Mapped, relationship
+from sqlalchemy.orm import mapped_column, Mapped, relationship, column_property
+from sqlalchemy import select
 from typing import Optional, List, TYPE_CHECKING
 from decimal import Decimal
 
@@ -111,3 +112,27 @@ class OrderItemOption(UUIDPrimaryKeyMixin, Base):
         CheckConstraint("quantity > 0", name="ck_order_item_options_quantity_positive"),
         {"schema": "tenant"},
     )
+
+
+# spec 087 (FR-015, A-89, research.md D12): nombre de la opción y de su grupo,
+# derivados en lectura con subconsultas escalares correlacionadas. Viajan en el
+# mismo SELECT que la fila (sin N+1 y sin tocar los `selectinload(OrderItem.options)`
+# existentes). `order_item_options.option_id` es FK a `options.id` sin `ON DELETE`,
+# así que una opción referenciada por un pedido no puede borrarse: no hace falta snapshot.
+# Se definen después de la clase para poder referenciar `Option`/`OptionGroup`.
+from app.models.option import Option  # noqa: E402
+from app.models.option_group import OptionGroup  # noqa: E402
+
+OrderItemOption.name = column_property(
+    select(Option.name)
+    .where(Option.id == OrderItemOption.option_id)
+    .correlate_except(Option)
+    .scalar_subquery()
+)
+OrderItemOption.group_name = column_property(
+    select(OptionGroup.name)
+    .join(Option, Option.option_group_id == OptionGroup.id)
+    .where(Option.id == OrderItemOption.option_id)
+    .correlate_except(Option, OptionGroup)
+    .scalar_subquery()
+)
