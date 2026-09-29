@@ -5,10 +5,12 @@ localmente (no hay I/O de red al generar un presigned URL), por eso no hace falt
 un cliente async pese a que el resto del proyecto es multi-tenant/sync.
 """
 import logging
+import re
 from functools import lru_cache
 
 import boto3
 from botocore.config import Config as BotoConfig
+from botocore.exceptions import BotoCoreError, ClientError
 
 from app.core.config import settings
 
@@ -22,6 +24,28 @@ CONTENT_TYPE_EXTENSIONS = {
 }
 
 
+R2_CONNECT_TIMEOUT_SECONDS = 3
+R2_READ_TIMEOUT_SECONDS = 5
+R2_MAX_ATTEMPTS = 2
+
+# Carpetas del bucket por campo (spec 088). El primer segmento de una key es el
+# esquema del negocio dueño; el segundo, una de estas carpetas.
+FOLDER_PRODUCTS = "products"
+FOLDER_LOGO = "logo"
+FOLDER_PAYMENT_METHODS = "payment-methods"
+FOLDER_RECEIPTS = "comprobantes"
+
+
+class AssetKeyError(ValueError):
+    """La key no es una key nueva válida para ese negocio y carpeta (spec 088,
+    FR-004). Los llamadores la convierten en 422."""
+
+
+class StorageUnavailable(RuntimeError):
+    """R2 no respondió con un "existe" / "no existe" definitivo (spec 088,
+    FR-003: fallo cerrado). Los llamadores la convierten en 503."""
+
+
 @lru_cache
 def get_r2_client():
     return boto3.client(
@@ -29,7 +53,17 @@ def get_r2_client():
         endpoint_url=settings.R2_ENDPOINT_URL,
         aws_access_key_id=settings.R2_ACCESS_KEY_ID,
         aws_secret_access_key=settings.R2_SECRET_ACCESS_KEY,
-        config=BotoConfig(signature_version="s3v4", region_name="auto"),
+        # spec 088 (research D3): timeouts cortos y pocos reintentos para que una
+        # verificación de existencia "falle cerrado" en segundos y no cuelgue la
+        # petición 60 s (default de boto3). El cliente es compartido, así que
+        # `delete_object` (best-effort) también los hereda.
+        config=BotoConfig(
+            signature_version="s3v4",
+            region_name="auto",
+            connect_timeout=R2_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=R2_READ_TIMEOUT_SECONDS,
+            retries={"total_max_attempts": R2_MAX_ATTEMPTS, "mode": "standard"},
+        ),
     )
 
 
@@ -170,3 +204,59 @@ def delete_object(key: str) -> None:
         get_r2_client().delete_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
     except Exception:
         logger.exception("No se pudo borrar el objeto '%s' en R2", key)
+
+
+# ---------------------------------------------------------------------------
+# Integridad de referencias (spec 088). Validación de key nueva, existencia en
+# R2 y key que se puede borrar. `normalize_asset_ref`, `asset_display_url`,
+# `object_key_for_deletion` y `delete_object` (arriba) no cambian.
+# ---------------------------------------------------------------------------
+
+_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}"
+
+
+def validate_asset_key(value: str, tenant_schema: str, folder: str) -> str:
+    """Devuelve `value` sin modificarlo si es una key **nueva** válida
+    (`{esquema}/{carpeta}/{nombre}` del propio negocio, sensible a mayúsculas);
+    si no, lanza `AssetKeyError`. Pura: sin I/O y sin normalizar, recortar ni
+    decodificar nada — lo que no encaja se rechaza (research D2)."""
+    pattern = rf"{re.escape(tenant_schema)}/{re.escape(folder)}/{_NAME_PATTERN}"
+    if re.fullmatch(pattern, value) is None or ".." in value:
+        raise AssetKeyError("La key no corresponde al negocio o a la carpeta esperada.")
+    return value
+
+
+_NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
+
+
+def object_exists(key: str) -> bool:
+    """`HEAD` del objeto en R2. `True` si existe, `False` si R2 responde que no.
+    Cualquier otro resultado (403, 5xx, sin conexión, timeout) lanza
+    `StorageUnavailable`: no saber no es lo mismo que "no existe" (FR-003)."""
+    try:
+        get_r2_client().head_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
+        return True
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in _NOT_FOUND_CODES:
+            return False
+        logger.warning("R2 respondió %s al verificar '%s'", code, key)
+        raise StorageUnavailable(f"R2 respondió {code}") from exc
+    except BotoCoreError as exc:
+        # Incluye EndpointConnectionError, ConnectTimeoutError y ReadTimeoutError.
+        logger.warning("R2 no respondió al verificar '%s': %s", key, exc)
+        raise StorageUnavailable(str(exc)) from exc
+
+
+def deletable_key(value: str | None, tenant_schema: str, folder: str) -> str | None:
+    """Key que **se puede** borrar al reemplazar `value`, o `None` (no borrar).
+    Compone `object_key_for_deletion` con la convención: una URL de otro origen,
+    una key fuera de convención (histórica) o de otro negocio/carpeta nunca se
+    borra — queda huérfana, que es seguro (FR-004, FR-005)."""
+    key = object_key_for_deletion(value)
+    if key is None:
+        return None
+    try:
+        return validate_asset_key(key, tenant_schema, folder)
+    except AssetKeyError:
+        return None

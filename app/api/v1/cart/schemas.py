@@ -5,6 +5,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.api.v1.catalog.schemas import OptionSelectionIn
+from app.core.schema_types import AssetUrl
 from app.core.storage import asset_display_url
 
 
@@ -152,7 +153,9 @@ class DinerPaymentAttempt(BaseModel):
     order_id: UUID
     payment_method_id: UUID
     status: str
-    receipt_file_url: str | None = None
+    # spec 088 (FR-008): la columna guarda la key; se ensambla la URL de visualización al
+    # serializar (una fila histórica con URL absoluta se sigue viendo, tolerancia de lectura).
+    receipt_file_url: AssetUrl = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

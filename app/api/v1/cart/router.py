@@ -154,6 +154,7 @@ async def submit_cart(
     order = service.submit_cart(
         ctx.db, ctx.participant, body.payment_method_id, body.receipt_file_url,
         tenant_id=ctx.tenant.id, request_id=current_request_id(request),
+        tenant_schema=ctx.tenant.schema,
     )
     # Después del COMMIT del servicio, nunca dentro: si la transacción fallara no
     # puede haber salido un evento anunciando un pedido que no existe.
@@ -285,4 +286,6 @@ def attach_receipt(
     attempt_id: UUID, body: ReceiptAttachIn,
     ctx: SessionContext = Depends(get_session_context),
 ):
-    return service.attach_receipt(ctx.db, ctx.participant.id, attempt_id, body.file_url)
+    return service.attach_receipt(
+        ctx.db, ctx.participant.id, attempt_id, body.file_url, tenant_schema=ctx.tenant.schema
+    )

@@ -45,10 +45,12 @@ for _k, _v in {
 }.items():
     os.environ.setdefault(_k, _v)
 
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, select, text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
 
-from app.core.models import Base
+from app.core.models import Base, Tenant
 import app.models  # noqa: F401  - registra todas las tablas de negocio en Base.metadata
 
 from app.models.category import Category
@@ -77,7 +79,31 @@ _TABLE_NAMES = [
     # spec 083: catálogo de presentaciones + asociación categoría<->presentación.
     "presentations",
     "category_presentations",
+    # spec 088: las cuatro fuentes de referencias a archivos de R2 que consulta
+    # `asset_refs.is_key_referenced` -- `products` (arriba), estas dos del esquema del
+    # negocio y `shared.tenants` (ver `attach_shared_tenants`).
+    "payment_methods",
+    "order_payment_attempts",
 ]
+
+
+# `payment_methods.payment_info` es `postgresql.JSONB`: sin este shim `create_all`
+# falla sobre SQLite (mismo mecanismo que `cart_fixtures.py`/`payment_catalog_fixtures.py`;
+# registrarlo varias veces es inocuo).
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_as_json_on_sqlite(element, compiler, **kw):  # pragma: no cover
+    return "JSON"
+
+
+def attach_shared_tenants(conn) -> None:
+    """spec 088, research D9 (opción a): `is_key_referenced` consulta
+    `shared.tenants.logo_url` por nombre calificado. SQLite no tiene esquemas de
+    Postgres; se simula adjuntando una segunda base en memoria como `shared` y
+    creando ahí `tenants`, igual que `payment_catalog_fixtures.py` hace con
+    `payment_method_catalog`. La conexión conserva `schema_translate_map={"tenant": None}`
+    (solo `tenant` se remapea), así que `shared.tenants` se resuelve a la base adjunta."""
+    conn.execute(text("ATTACH DATABASE ':memory:' AS shared"))
+    Tenant.__table__.create(bind=conn)
 
 
 def new_session() -> Session:
@@ -86,6 +112,7 @@ def new_session() -> Session:
     engine = create_engine("sqlite:///:memory:")
     conn = engine.connect().execution_options(schema_translate_map={"tenant": None})
     Base.metadata.create_all(bind=conn, tables=tables)
+    attach_shared_tenants(conn)
     conn.commit()
     return Session(bind=conn)
 
@@ -212,6 +239,19 @@ def make_option_group(db: Session, **kw) -> OptionGroup:
     return obj
 
 
+def make_shared_tenant(db: Session, **kw) -> Tenant:
+    """Fila real de `shared.tenants` (spec 088): su `logo_url` es una de las cuatro
+    fuentes de referencias a archivos. Requiere una sesión con `attach_shared_tenants`."""
+    kw.setdefault("name", f"negocio-{uuid.uuid4()}")
+    kw.setdefault("schema", f"schema_{uuid.uuid4().hex[:8]}")
+    kw.setdefault("host", f"host-{uuid.uuid4().hex[:8]}")
+    kw.setdefault("plan_id", _uid())  # SQLite no impone la FK a shared.plans
+    obj = Tenant(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
 def make_tenant_stub(**kw):
     """Objeto `tenant` mínimo, NO persistido -- suficiente para pasar a
     `ProductService.create_product`/`update_product` (spec 064) en tests de este módulo,
@@ -224,6 +264,8 @@ def make_tenant_stub(**kw):
     kw.setdefault("id", _uid())
     kw.setdefault("plan_id", _uid())
     kw.setdefault("plan_vence_en", None)
+    # spec 088: las escrituras de imagen validan la key contra `tenant.schema`.
+    kw.setdefault("schema", "heladeria3")
     return SimpleNamespace(**kw)
 
 

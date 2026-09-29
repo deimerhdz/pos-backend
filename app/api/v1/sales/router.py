@@ -94,7 +94,9 @@ def create_payment_method(
     _: User = Depends(require_tenant_admin),
 ):
     enforce_plan_limit(db, tenant, "metodos_pago_activos")  # spec 033, FR-005/FR-006
-    return payment_method_response(service.create_payment_method(db, body))
+    return payment_method_response(
+        service.create_payment_method(db, body, tenant_schema=tenant.schema)
+    )
 
 
 @router.patch(
@@ -104,9 +106,13 @@ def create_payment_method(
 )
 def update_payment_method(
     payment_method_id: UUID, body: PaymentMethodUpdate,
-    db: Session = Depends(get_db), _: User = Depends(require_tenant_admin),
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+    _: User = Depends(require_tenant_admin),
 ):
-    return payment_method_response(service.update_payment_method(db, payment_method_id, body))
+    return payment_method_response(
+        service.update_payment_method(db, payment_method_id, body, tenant_schema=tenant.schema)
+    )
 
 
 # ============================ Ventas ============================

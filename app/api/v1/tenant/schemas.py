@@ -26,6 +26,9 @@ class TenantUpdate(BaseModel):
     # spec 080: en base de datos vive solo la key; si el cliente reenvía una URL
     # absoluta del bucket gestionado se normaliza a key antes de persistir (FR-004).
     logo_url: AssetRefIn = Field(None, max_length=500)
+    # spec 088 (FR-002, research D5): logo que el formulario mostraba al abrirse. "No
+    # enviado" (ausente) != `null` explícito; se distinguen con `model_fields_set`.
+    logo_url_base: AssetRefIn = Field(None, max_length=500)
     # Mensaje que cierra la factura impresa. Cadena vacía = borrarlo (queda NULL);
     # omitirlo = dejarlo como está.
     receipt_message: str | None = Field(None, max_length=255)
