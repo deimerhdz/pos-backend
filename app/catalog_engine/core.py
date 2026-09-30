@@ -34,6 +34,11 @@ class ChosenOption(NamedTuple):
 
     option: "Option"
     quantity: int
+    # spec 089 (A-94): `True` = adicional del Menú QR, cobrado y consumido UNA vez por línea
+    # (no por unidad de producto). El default `False` es el comportamiento histórico, así
+    # que ningún llamador existente (terminal POS, mostrador, checkout, kitchen) cambia.
+    # Solo `cart/service.py` la pone en `True`; el resto la LEE de la fila guardada.
+    per_line: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,14 +51,43 @@ class ConsumptionLine:
     source: str  # 'receta' | 'variante' | 'opcion' — para diagnóstico y mensajes
 
 
+def compute_unit_price(variant: ProductVariant, options: Sequence[ChosenOption]) -> Decimal:
+    """Precio de UNA unidad de producto (spec 089): precio de la variante + extras de las
+    opciones `per_line=False`, cada uno por su cantidad elegida (spec 065). Los adicionales
+    `per_line=True` no entran aquí: se cobran una vez por línea (`compute_addons_total`)."""
+    price = Decimal(variant.price)
+    for chosen in options:
+        if not chosen.per_line:
+            price += Decimal(chosen.option.extra_price) * chosen.quantity
+    return price
+
+
+def compute_addons_total(options: Sequence[ChosenOption]) -> Decimal:
+    """Σ(extra × cantidad elegida) de las opciones `per_line=True` (spec 089): lo que se
+    cobra UNA vez por línea, sin importar cuántas unidades del producto se piden."""
+    total = Decimal(0)
+    for chosen in options:
+        if chosen.per_line:
+            total += Decimal(chosen.option.extra_price) * chosen.quantity
+    return total
+
+
+def line_total(unit_price: Decimal, quantity: int, addons_total: Decimal | int = 0) -> Decimal:
+    """La única fórmula del total de una línea (spec 089): `unit_price × quantity +
+    addons_total`. Con `addons_total = 0` (toda línea histórica y la de la terminal POS)
+    es el `unit_price × quantity` de siempre."""
+    return Decimal(unit_price) * quantity + Decimal(addons_total or 0)
+
+
 def compute_line_price(variant: ProductVariant, options: Sequence[ChosenOption]) -> Decimal:
     """Snapshot de precio de una línea: precio de la variante + extras de opción,
     cada uno multiplicado por su cantidad elegida (spec 065; siempre 1 en "conteo",
-    por lo que esto no cambia el precio de ningún grupo existente)."""
-    price = Decimal(variant.price)
-    for chosen in options:
-        price += Decimal(chosen.option.extra_price) * chosen.quantity
-    return price
+    por lo que esto no cambia el precio de ningún grupo existente).
+
+    spec 089: conserva firma y resultado para todo llamador existente. Es
+    `compute_unit_price + compute_addons_total`: con `per_line=False` (todos los
+    llamadores salvo el Menú QR) es exactamente lo de siempre."""
+    return compute_unit_price(variant, options) + compute_addons_total(options)
 
 
 def format_item_description(product: Product | None, variant: ProductVariant | None) -> str:

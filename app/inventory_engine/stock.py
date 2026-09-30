@@ -72,7 +72,8 @@ def record_movement(
     if new_stock < 0 and not allow_negative:
         raise InsufficientStockError(
             f"Stock insuficiente de '{item.name}': disponible {item.current_stock}, "
-            f"requerido {quantity}."
+            f"requerido {quantity}.",
+            item_name=item.name,
         )
     item.current_stock = new_stock
 
