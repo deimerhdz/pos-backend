@@ -1,6 +1,6 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy import String, Integer, Numeric, ForeignKey, CheckConstraint, UniqueConstraint
+from sqlalchemy import Boolean, String, Integer, Numeric, ForeignKey, CheckConstraint, UniqueConstraint, false
 from sqlalchemy.orm import mapped_column, Mapped, relationship, column_property
 from sqlalchemy import select
 from typing import Optional, List, TYPE_CHECKING
@@ -40,6 +40,14 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
         Numeric(12, 2), nullable=False, default=0, server_default="0"
     )
 
+    # spec 089 (A-94): Σ(precio del adicional × cantidad elegida) de las opciones
+    # `per_line`, cobrado UNA vez por línea (copiado del carrito al confirmar, nunca
+    # recalculado). Las filas anteriores quedan en 0 y su `unit_price` sigue incluyendo
+    # los extras por unidad: el total no cambia (Principio VII).
+    addons_total: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, default=0, server_default="0"
+    )
+
     # Snapshot del descuento vigente al momento de confirmar el pedido (spec
     # 038, FR-013): `None` si ninguna promoción aplicó a esta línea (o es una
     # línea de combo, cuyo ahorro se calcula aparte). Nullable sin default:
@@ -76,8 +84,15 @@ class OrderItem(UUIDPrimaryKeyMixin, Base):
         back_populates="order_item", cascade="all, delete-orphan"
     )
 
+    @property
+    def line_total(self) -> Decimal:
+        """spec 089: la única fórmula del total de una línea, sin descuento:
+        `unit_price × quantity + addons_total` (con `addons_total = 0` es la de siempre)."""
+        return Decimal(self.unit_price) * self.quantity + Decimal(self.addons_total or 0)
+
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_order_item_quantity_positive"),
+        CheckConstraint("addons_total >= 0", name="ck_order_item_addons_total_nonneg"),
         CheckConstraint(
             "estado_cocina IN ('pendiente', 'en_preparacion', 'listo', 'anulado')",
             name="ck_order_item_estado_cocina",
@@ -103,6 +118,11 @@ class OrderItemOption(UUIDPrimaryKeyMixin, Base):
     # spec 065: unidades elegidas de esta opción (grupo "cantidad"); siempre 1 para un
     # grupo "conteo" (validado en validate_option_selection, no asumido aquí).
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+
+    # spec 089 (A-94): ver `CartItemOption.per_line`. Copiado del carrito al confirmar.
+    per_line: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
     __table_args__ = (
         UniqueConstraint(

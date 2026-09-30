@@ -21,11 +21,14 @@ class InsufficientStockError(HTTPException):
     ("Stock insuficiente o vencido para el insumo 'Stock insuficiente para …'").
     """
 
-    def __init__(self, message: str):
+    def __init__(self, message: str, *, item_name: str | None = None):
         super().__init__(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=message,
         )
+        # spec 089 (D18): nombre del insumo que se agotó, para que quien agrega una línea
+        # pueda decir qué PRODUCTO falla sin parsear `detail`. `None` si no se conoce.
+        self.item_name = item_name
 
 
 class InvalidToken(Exception):

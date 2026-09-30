@@ -901,5 +901,87 @@ class TestVigenciaCongeladaSesionMesa(unittest.TestCase):
         self.assertEqual(resp.total, Decimal("8000"))
 
 
+class TestTryReleaseAndNotify(unittest.TestCase):
+    """spec 089 (A-95, contracts/session-closed.md §1): `try_release_if_empty` devuelve las sesiones
+    que cerró (lista vacía = no cerró; la truthiness de siempre se conserva) y
+    `notify_sessions_closed` publica un `session.closed` por sesión sin lanzar nunca."""
+
+    def _seed(self, *, con_pedido_por_cobrar=False, comensal_abierto=False):
+        db = fx.new_session()
+        table = fx.make_dining_table(db, status="ocupada")
+        ts = fx.make_table_session(db, table=table)
+        ana = fx.make_participant(db, table_session=ts, display_name="Ana")
+        ana.status = "closed"
+        if comensal_abierto:
+            fx.make_participant(db, table_session=ts, display_name="Beto")
+        if con_pedido_por_cobrar:
+            fx.make_customer_order(db, ts, status="abierta")
+        db.commit()
+        return db, table, ts
+
+    def test_devuelve_la_sesion_cerrada_cuando_libera_la_mesa(self):
+        db, table, ts = self._seed()
+
+        closed = service.try_release_if_empty(db, ts.id)
+
+        self.assertEqual([c.id for c in closed], [ts.id])
+        self.assertTrue(closed)  # truthiness preservada para quien solo hacía `if try_release...`
+        self.assertEqual(ts.status, "closed")
+        self.assertEqual(table.status, "libre")
+
+    def test_devuelve_lista_vacia_si_queda_un_comensal(self):
+        db, table, ts = self._seed(comensal_abierto=True)
+
+        closed = service.try_release_if_empty(db, ts.id)
+
+        self.assertEqual(closed, [])
+        self.assertFalse(closed)
+        self.assertEqual(ts.status, "active")
+
+    def test_devuelve_lista_vacia_si_hay_pedidos_por_cobrar(self):
+        db, table, ts = self._seed(con_pedido_por_cobrar=True)
+
+        self.assertEqual(service.try_release_if_empty(db, ts.id), [])
+        self.assertEqual(ts.status, "active")
+
+    def test_devuelve_lista_vacia_si_la_sesion_ya_estaba_cerrada(self):
+        db, table, ts = self._seed()
+        ts.status = "closed"
+        db.commit()
+
+        self.assertEqual(service.try_release_if_empty(db, ts.id), [])
+
+    def test_notify_sessions_closed_publica_un_evento_por_sesion(self):
+        db, table, ts = self._seed()
+        otra = fx.make_table_session(db, table=fx.make_dining_table(db))
+        db.commit()
+
+        with mock.patch("app.core.events.session_closed") as publicar:
+            service.notify_sessions_closed(7, [ts, otra], reason="released")
+
+        self.assertEqual(publicar.call_count, 2)
+        publicar.assert_any_call(
+            7, table_session_id=ts.id, dining_table_id=ts.dining_table_id, reason="released"
+        )
+        publicar.assert_any_call(
+            7, table_session_id=otra.id, dining_table_id=otra.dining_table_id, reason="released"
+        )
+
+    def test_notify_sessions_closed_no_lanza_si_el_publicador_falla(self):
+        db, table, ts = self._seed()
+
+        with mock.patch("app.core.events.session_closed", side_effect=RuntimeError("redis caído")):
+            service.notify_sessions_closed(7, [ts], reason="empty")  # no debe propagar
+
+    def test_notify_sessions_closed_sin_sesiones_o_sin_tenant_no_publica(self):
+        db, table, ts = self._seed()
+
+        with mock.patch("app.core.events.session_closed") as publicar:
+            service.notify_sessions_closed(7, [], reason="empty")
+            service.notify_sessions_closed(None, [ts], reason="empty")
+
+        publicar.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

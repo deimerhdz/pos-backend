@@ -10,10 +10,15 @@ venta de mostrador: aquí solo se elige la dirección del movimiento ('out' al
 descontar, 'in' al revertir)."""
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core import inventory_reasons as reasons
-from app.catalog_engine import ChosenOption
+from fastapi import HTTPException
+
+from app.catalog_engine import ChosenOption, sold_out_detail
+from app.core.exceptions import InsufficientStockError
+from app.models.option import Option
 from app.models.order_item import OrderItem
 from app.api.v1.inventory.stock import lock_items, record_movement
 from app.api.v1.catalog.consumption_plan import (
@@ -21,6 +26,20 @@ from app.api.v1.catalog.consumption_plan import (
     plan_line_consumption,
     required_consumption,
 )
+
+
+def chosen_from_rows(db: Session, item: OrderItem) -> list[ChosenOption]:
+    """Reconstruye las `ChosenOption` de una línea **leyendo la marca `per_line` de cada
+    fila** `OrderItemOption` (spec 089, A-94; research D4).
+
+    Es el único constructor de opciones desde filas: descuento, reversa, anulación y
+    cobro pasan por aquí, así siempre aplican la regla con la que se creó la línea, aunque
+    el administrador cambie después el `pricing_type` del grupo (deduct == reverse)."""
+    rows = {o.option_id: o for o in item.options}
+    if not rows:
+        return []
+    options = db.execute(select(Option).where(Option.id.in_(rows.keys()))).scalars().all()
+    return [ChosenOption(opt, rows[opt.id].quantity, rows[opt.id].per_line) for opt in options]
 
 
 def ensure_consumes_inventory(
@@ -65,6 +84,29 @@ def deduct_order_items(
     lock_consumption(db, entries)
     for item, options in entries:
         deduct_order_item(db, item, options, user_id, reference_id)
+
+
+def deduct_order_items_naming_product(
+    db: Session,
+    entries: list[tuple[OrderItem, list[ChosenOption]]],
+    user_id: UUID | None,
+    reference_id: UUID,
+) -> None:
+    """Igual que `deduct_order_items`, pero si un insumo se agota responde con un `detail` que
+    nombra el PRODUCTO (spec 089, A-96, FR-029; research D18) en vez de solo el insumo. Es lo que
+    usan los tres caminos donde el cajero agrega líneas a una orden (crear la orden, agregar un
+    ítem, reemplazar una línea): así el mensaje dice qué producto quitar. El status se conserva
+    (400) y, como siempre, el `except HTTPException` del llamador hace rollback total."""
+    ensure_consumes_inventory(db, entries)
+    lock_consumption(db, entries)
+    for item, options in entries:
+        try:
+            deduct_order_item(db, item, options, user_id, reference_id)
+        except InsufficientStockError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=sold_out_detail(db, item.product_variant_id, exc),
+            ) from exc
 
 
 def reverse_order_items(

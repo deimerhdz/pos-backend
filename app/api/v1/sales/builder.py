@@ -36,7 +36,7 @@ class SaleLine:
     de un sitio distinto."""
 
     __slots__ = ("product_variant_id", "description", "options", "quantity",
-                 "unit_price", "line_total", "combo_id", "line_id")
+                 "unit_price", "addons_total", "line_total", "combo_id", "line_id")
 
     def __init__(
         self,
@@ -46,6 +46,7 @@ class SaleLine:
         options: list[dict],
         quantity: int,
         unit_price: Decimal,
+        addons_total: Decimal = Decimal(0),
         combo_id: UUID | None = None,
         line_id: UUID | None = None,
     ) -> None:
@@ -54,7 +55,10 @@ class SaleLine:
         self.options = options
         self.quantity = quantity
         self.unit_price = Decimal(unit_price)
-        self.line_total = self.unit_price * Decimal(quantity)
+        # spec 089 (A-94): adicionales cobrados una vez por línea (0 en toda línea
+        # histórica, de la terminal POS y del mostrador).
+        self.addons_total = Decimal(addons_total or 0)
+        self.line_total = self.unit_price * Decimal(quantity) + self.addons_total
         # Combo (selección explícita) al que pertenece esta línea, si aplica.
         self.combo_id = combo_id
         # `id` de la fila de origen (`order_items` / `cart_items`), cuando existe:
@@ -66,9 +70,16 @@ class SaleLine:
     def base_unit_price(self) -> Decimal:
         """FR-027 (spec 083): `unit_price` sin el precio de los toppings/
         adicionales elegidos (`options`, spec 064/065) — la base sobre la que
-        una promoción de tipo `percent` debe aplicar su descuento."""
+        una promoción de tipo `percent` debe aplicar su descuento.
+
+        spec 089: solo se restan las opciones que van por unidad (`per_line` ausente o
+        falso). Los adicionales `per_line` no están dentro de `unit_price` (van en
+        `addons_total`), así que no hay nada que restar y la promoción no los descuenta."""
         toppings = sum(
-            (Decimal(opt["extra_price"]) * opt.get("quantity", 1) for opt in self.options),
+            (
+                Decimal(opt["extra_price"]) * opt.get("quantity", 1)
+                for opt in self.options if not opt.get("per_line", False)
+            ),
             Decimal(0),
         )
         return self.unit_price - toppings

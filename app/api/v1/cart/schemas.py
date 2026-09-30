@@ -61,6 +61,8 @@ class CartItemOptionResponse(BaseModel):
     id: UUID
     option_id: UUID
     quantity: int
+    # spec 089 (A-94): la opción es un adicional cobrado/consumido una vez por línea.
+    per_line: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -69,7 +71,11 @@ class CartItemResponse(BaseModel):
     id: UUID
     product_variant_id: UUID
     quantity: int
+    # spec 089: `unit_price` es solo el precio de UNA unidad de producto (en las líneas
+    # nuevas del Menú QR ya no incluye los adicionales); `addons_total` los suma una vez.
+    # `line_total = unit_price × quantity + addons_total`.
     unit_price: Decimal
+    addons_total: Decimal = Decimal("0")
     line_total: Decimal
     # Precio/subtotal ya con el mejor descuento percent/fixed vigente aplicado, o
     # `None` si ninguna promoción aplica a esta línea (o es un combo: ese ahorro se

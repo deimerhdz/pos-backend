@@ -11,6 +11,10 @@ Una línea consume:
 
   (a) las líneas fijas de la receta de la variante  → `quantity × cantidad`
   (b) por cada opción elegida con insumo ligado     → `por_opción × cantidad`
+      (spec 089: si la opción es un adicional `per_line`, es `por_opción × cantidad
+      elegida` SIN multiplicar por la cantidad de la línea: 2 hamburguesas con 1 tocino
+      descuentan 1 tocino. La marca sale de la fila, nunca de `pricing_type` vigente,
+      para que descuento y reversa calculen siempre lo mismo.)
 
 donde, para el grupo de esa opción:
 
@@ -132,10 +136,12 @@ def plan_line_consumption(
         # spec 065: multiplica también por la cantidad elegida de esta opción --
         # siempre 1 en un grupo "conteo", así que esto no cambia ningún consumo
         # existente (research.md Decisión 2).
+        # spec 089 (A-94): un adicional `per_line` se consume una vez por línea.
+        consumed = per_unit * chosen.quantity if chosen.per_line else per_unit * qty * chosen.quantity
         lines.append(
             ConsumptionLine(
                 option.inventory_item_id,
-                per_unit * qty * chosen.quantity,
+                consumed,
                 "variante" if manda_el_tamano else "opcion",
             )
         )
@@ -164,6 +170,25 @@ def variant_label(db: Session, variant_id: UUID) -> str:
         .where(ProductVariant.id == variant_id)
     ).first()
     return f"{row[0]} · {row[1]}" if row else str(variant_id)
+
+
+def sold_out_detail(db: Session, variant_id: UUID, exc: HTTPException) -> dict:
+    """`detail` que nombra el PRODUCTO agotado (spec 089, A-96, FR-029; research D18) a partir del
+    `InsufficientStockError` que lanzó el descuento de inventario, que solo nombra el insumo:
+
+        {"error": "«Hamburguesa · Doble» está agotado: falta Queso",
+         "producto": "Hamburguesa · Doble", "insumo": "Queso"}
+
+    `extractError` del frontend ya lee `detail.error`, así que el texto aparece sin cambios de
+    cliente. Quien la use conserva el status del error original (400)."""
+    producto = variant_label(db, variant_id)
+    insumo = getattr(exc, "item_name", None)
+    falta = f"falta {insumo}" if insumo else "no hay insumo suficiente"
+    return {
+        "error": f"«{producto}» está agotado: {falta}",
+        "producto": producto,
+        "insumo": insumo,
+    }
 
 
 def _tracks_inventory(db: Session, variant_id: UUID) -> bool:

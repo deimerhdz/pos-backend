@@ -32,7 +32,7 @@ from app.core.storage import (
     generate_presigned_put_url,
     public_url_for,
 )
-from app.api.v1.table_sessions.service import try_release_if_empty
+from app.api.v1.table_sessions.service import notify_sessions_closed, try_release_if_empty
 from app.models.dining_table import DiningTable
 from app.models.table_session import TableSession
 from app.models.session_participant import SessionParticipant
@@ -42,12 +42,17 @@ from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
 from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.option import Option
-from app.catalog_engine import ChosenOption
+from app.models.option_group import OptionGroup
+from app.catalog_engine import (
+    ChosenOption,
+    compute_addons_total,
+    compute_unit_price,
+    line_total as compute_line_total,
+)
 from app.models.payment import PaymentMethod
 from app.models.product_variant import ProductVariant
 from app.api.v1.catalog.line_pricing import (
     check_availability,
-    compute_line_price,
     load_valid_options,
     required_consumption,
 )
@@ -210,6 +215,33 @@ def _get_or_create_open_cart(db: Session, participant_id: UUID) -> Cart:
     return cart
 
 
+def _chosen_from_cart_rows(db: Session, item: CartItem) -> list[ChosenOption]:
+    """`ChosenOption` de una línea del carrito **leyendo la marca `per_line` de cada fila**
+    (spec 089): la regla con la que se creó la línea manda, no el `pricing_type` vigente."""
+    rows = {o.option_id: o for o in item.options}
+    if not rows:
+        return []
+    options = db.execute(select(Option).where(Option.id.in_(rows.keys()))).scalars().all()
+    return [ChosenOption(opt, rows[opt.id].quantity, rows[opt.id].per_line) for opt in options]
+
+
+def _mark_addons(db: Session, options: list[ChosenOption]) -> list[ChosenOption]:
+    """spec 089 (A-94): marca `per_line=True` las opciones de grupos con recargo (los
+    adicionales) para que se cobren y consuman UNA vez por línea. Solo el Menú QR llama a
+    esto; la terminal POS y el mostrador siguen por unidad. Con `QR_ADDONS_PER_LINE=false`
+    no marca nada (regla histórica) — la bandera solo gobierna la creación de líneas."""
+    if not settings.QR_ADDONS_PER_LINE or not options:
+        return options
+    group_ids = {c.option.option_group_id for c in options}
+    tipos = dict(db.execute(
+        select(OptionGroup.id, OptionGroup.pricing_type).where(OptionGroup.id.in_(group_ids))
+    ).all())
+    return [
+        c._replace(per_line=tipos.get(c.option.option_group_id) == "con_recargo")
+        for c in options
+    ]
+
+
 def _cart_consumption(
     db: Session, cart: Cart, *, exclude_item_id: UUID | None = None
 ) -> dict[UUID, Decimal]:
@@ -219,12 +251,7 @@ def _cart_consumption(
     for item in cart.items:
         if exclude_item_id is not None and item.id == exclude_item_id:
             continue
-        quantities = {o.option_id: o.quantity for o in item.options}
-        options = (
-            db.execute(select(Option).where(Option.id.in_(quantities.keys())))
-            .scalars().all() if quantities else []
-        )
-        chosen = [ChosenOption(opt, quantities[opt.id]) for opt in options]
+        chosen = _chosen_from_cart_rows(db, item)
         for iid, need in required_consumption(
             db, item.product_variant_id, item.quantity, chosen
         ).items():
@@ -239,7 +266,11 @@ def _cart_promo_lines(db: Session, cart: Cart) -> list[dict]:
 
     `base_unit_price` (spec 083, FR-027): `unit_price` sin el precio de los
     toppings elegidos (`CartItemOption` -> `Option.extra_price`), la base
-    sobre la que un descuento `percent` debe aplicarse."""
+    sobre la que un descuento `percent` debe aplicarse.
+
+    spec 089 (D3): solo se restan las opciones `per_line=False`. En una línea nueva del
+    Menú QR el `unit_price` ya no contiene los adicionales (van en `addons_total`), así
+    que la base es el propio `unit_price` y una promoción nunca descuenta un adicional."""
     rows = db.execute(
         select(ProductVariant.id, ProductVariant.active)
         .where(ProductVariant.id.in_({it.product_variant_id for it in cart.items}))
@@ -255,7 +286,10 @@ def _cart_promo_lines(db: Session, cart: Cart) -> list[dict]:
     for it in cart.items:
         unit_price = Decimal(it.unit_price)
         toppings = sum(
-            (Decimal(extra_prices.get(o.option_id, 0)) * o.quantity for o in it.options),
+            (
+                Decimal(extra_prices.get(o.option_id, 0)) * o.quantity
+                for o in it.options if not o.per_line
+            ),
             Decimal(0),
         )
         promo_lines.append({
@@ -271,15 +305,21 @@ def _cart_promo_lines(db: Session, cart: Cart) -> list[dict]:
     return promo_lines
 
 
-def _cart_line_discount(result, index: int, line_total: Decimal, quantity: int):
+def _cart_line_discount(
+    result, index: int, line_total: Decimal, quantity: int, addons_total: Decimal = Decimal(0)
+):
     """`(discounted_unit_price, discounted_line_total)` del ítem `index` a partir
     del `by_line` de **una sola** llamada a `evaluate_variant_sets`, o
-    `(None, None)` si esa línea no recibió descuento."""
+    `(None, None)` si esa línea no recibió descuento.
+
+    spec 089: `discounted_unit_price` conserva su significado "precio por unidad de
+    producto": los adicionales (`addons_total`, cobrados una vez) no se reparten entre
+    las unidades. Sin adicionales es idéntico al cálculo anterior."""
     d = result.by_line.get(index, Decimal(0))
     if d <= 0:
         return None, None
     discounted_line_total = (line_total - d).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    discounted_unit_price = (discounted_line_total / quantity).quantize(
+    discounted_unit_price = ((discounted_line_total - Decimal(addons_total or 0)) / quantity).quantize(
         Decimal("0.01"), rounding=ROUND_HALF_UP
     )
     return discounted_unit_price, discounted_line_total
@@ -295,10 +335,12 @@ def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> 
     total = Decimal("0")
     any_discount = False
     for idx, it in enumerate(cart.items):
-        line_total = Decimal(it.unit_price) * it.quantity
+        # spec 089: `unit_price × quantity + addons_total` (con `addons_total = 0` es la
+        # fórmula de siempre para toda línea histórica).
+        line_total = compute_line_total(it.unit_price, it.quantity, it.addons_total)
         total += line_total
         discounted_unit_price, discounted_line_total = _cart_line_discount(
-            result, idx, line_total, it.quantity,
+            result, idx, line_total, it.quantity, it.addons_total,
         )
         if discounted_line_total is not None:
             any_discount = True
@@ -307,6 +349,7 @@ def serialize_cart(db: Session, cart: Cart, participant: SessionParticipant) -> 
             product_variant_id=it.product_variant_id,
             quantity=it.quantity,
             unit_price=it.unit_price,
+            addons_total=it.addons_total,
             line_total=line_total,
             discounted_unit_price=discounted_unit_price,
             discounted_line_total=discounted_line_total,
@@ -343,7 +386,7 @@ def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartRespons
     if not variant.active:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
 
-    options = load_valid_options(db, data.options, variant=variant)
+    options = _mark_addons(db, load_valid_options(db, data.options, variant=variant))
 
     # Disponibilidad: consumo del carrito actual + la línea nueva.
     required = _cart_consumption(db, cart)
@@ -356,7 +399,9 @@ def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartRespons
             cart_id=cart.id,
             product_variant_id=variant.id,
             quantity=data.quantity,
-            unit_price=compute_line_price(variant, options),
+            # spec 089 (A-94): precio de UNA unidad + adicionales cobrados una vez por línea.
+            unit_price=compute_unit_price(variant, options),
+            addons_total=compute_addons_total(options),
             notes=data.notes,
         )
         db.add(item)
@@ -364,6 +409,7 @@ def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartRespons
         for chosen in options:
             db.add(CartItemOption(
                 cart_item_id=item.id, option_id=chosen.option.id, quantity=chosen.quantity,
+                per_line=chosen.per_line,
             ))
         db.commit()
     except Exception:
@@ -386,16 +432,14 @@ def update_item(
     variant = get_or_404(db, ProductVariant, item.product_variant_id, "Variant not found")
 
     if data.options is not None:
-        options = load_valid_options(db, data.options, variant=variant)
+        # Editar la selección adopta la regla nueva (spec 089: líneas nuevas o editadas).
+        options = _mark_addons(db, load_valid_options(db, data.options, variant=variant))
     else:
         # Selección ya guardada: no se revalida, o un cambio de min/max en el catálogo
         # impediría hasta bajar la cantidad de una línea que ya estaba en el carrito.
-        quantities = {o.option_id: o.quantity for o in item.options}
-        loaded = (
-            db.execute(select(Option).where(Option.id.in_(quantities.keys())))
-            .scalars().all() if quantities else []
-        )
-        options = [ChosenOption(opt, quantities[opt.id]) for opt in loaded]
+        # spec 089: conserva la marca `per_line` de cada fila (una línea histórica sigue
+        # con la regla histórica al cambiar solo la cantidad).
+        options = _chosen_from_cart_rows(db, item)
 
     # Disponibilidad: resto del carrito (sin esta línea) + la línea editada.
     required = _cart_consumption(db, cart, exclude_item_id=item_id)
@@ -405,7 +449,8 @@ def update_item(
 
     try:
         item.quantity = new_qty
-        item.unit_price = compute_line_price(variant, options)
+        item.unit_price = compute_unit_price(variant, options)
+        item.addons_total = compute_addons_total(options)
         if data.notes is not None:
             item.notes = data.notes
         if data.options is not None:
@@ -415,6 +460,7 @@ def update_item(
             for chosen in options:
                 db.add(CartItemOption(
                     cart_item_id=item.id, option_id=chosen.option.id, quantity=chosen.quantity,
+                    per_line=chosen.per_line,
                 ))
         db.commit()
     except Exception:
@@ -490,13 +536,18 @@ def cancel_my_order(
 
     # Si era el último pedido y el comensal ya se había ido, la mesa queda vacía:
     # cubre el "pedí, me arrepentí y me fui" sin esperar al barrido.
-    if try_release_if_empty(db, participant.table_session_id):
+    closed = try_release_if_empty(db, participant.table_session_id)
+    if closed:
         db.commit()
+        # spec 089 (A-95): el aviso sale DESPUÉS del commit, nunca antes.
+        notify_sessions_closed(tenant_id, closed, reason="empty")
 
     return result
 
 
-def leave_session(db: Session, participant: SessionParticipant) -> None:
+def leave_session(
+    db: Session, participant: SessionParticipant, tenant_id: int | None = None
+) -> None:
     """El comensal se va de la mesa.
 
     Cierra su carrito y, si era el último y no quedó nada que cobrar, libera la
@@ -504,8 +555,10 @@ def leave_session(db: Session, participant: SessionParticipant) -> None:
     marchando — un error aquí no le sirve de nada a nadie.
     """
     close_participant(db, participant)
-    try_release_if_empty(db, participant.table_session_id)
+    closed = try_release_if_empty(db, participant.table_session_id)
     db.commit()
+    # spec 089 (A-95): si su salida dejó la mesa vacía y se liberó, el aviso sale DESPUÉS del commit.
+    notify_sessions_closed(tenant_id, closed, reason="empty")
 
 
 def submit_cart(
@@ -659,9 +712,9 @@ def submit_cart(
         result = promotions.evaluate_variant_sets(db, _cart_promo_lines(db, cart), now)
 
         for idx, ci in enumerate(cart.items):
-            line_total = Decimal(ci.unit_price) * ci.quantity
+            line_total = compute_line_total(ci.unit_price, ci.quantity, ci.addons_total)
             discounted_unit_price, discounted_line_total = _cart_line_discount(
-                result, idx, line_total, ci.quantity,
+                result, idx, line_total, ci.quantity, ci.addons_total,
             )
             item = OrderItem(
                 order_id=order.id,
@@ -669,6 +722,7 @@ def submit_cart(
                 product_variant_id=ci.product_variant_id,
                 quantity=ci.quantity,
                 unit_price=ci.unit_price,  # snapshot copiado del carrito
+                addons_total=ci.addons_total,  # spec 089: copiado, nunca recalculado
                 discounted_unit_price=discounted_unit_price,
                 discounted_line_total=discounted_line_total,
                 notes=ci.notes,
@@ -680,6 +734,7 @@ def submit_cart(
             for o in ci.options:
                 db.add(OrderItemOption(
                     order_item_id=item.id, option_id=o.option_id, quantity=o.quantity,
+                    per_line=o.per_line,
                 ))
 
         db.add(OrderPaymentAttempt(
