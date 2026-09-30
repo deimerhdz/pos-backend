@@ -60,6 +60,11 @@ def get_qr_context(x_qr_token: str = Header(..., alias="x-qr-token")) -> Iterato
 
 # --------------------------------------------------------------- Sesión (carrito)
 
+#: Cabecera de los 401 cuya causa es que la mesa/sesión SE CERRÓ (spec 089, A-95): valor `closed`.
+#: Ausente en los 401 por vencimiento (inactividad, duración máxima, firma). `main.py` la expone por CORS.
+SESSION_STATE_HEADER = "X-Session-State"
+
+
 @dataclass
 class SessionContext:
     db: Session
@@ -92,14 +97,18 @@ def close_participant(db: Session, participant) -> None:
         cart.status = "abandonado"
 
 
-def _abandon_expired(db: Session, participant) -> None:
+def _abandon_expired(db: Session, participant, tenant=None) -> None:
     """Cierra al comensal cuyo token expiró y libera la mesa si era el último y
-    no quedó ningún pedido que cobrar."""
-    from app.api.v1.table_sessions.service import try_release_if_empty
+    no quedó ningún pedido que cobrar.
+
+    spec 089 (A-95): si la mesa se liberó, avisa a los comensales conectados DESPUÉS del commit
+    (`session.closed`, `reason="empty"`)."""
+    from app.api.v1.table_sessions.service import notify_sessions_closed, try_release_if_empty
 
     close_participant(db, participant)
-    try_release_if_empty(db, participant.table_session_id)
+    closed = try_release_if_empty(db, participant.table_session_id)
     db.commit()
+    notify_sessions_closed(getattr(tenant, "id", None), closed, reason="empty")
 
 
 def _should_refresh(participant, now: datetime) -> bool:
@@ -163,7 +172,11 @@ def open_session_context(token: str, *, touch: bool = True) -> Iterator[SessionC
         participant = db.get(SessionParticipant, claims.participant_id)
         if participant is None or participant.status != "open":
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión no activa"
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión no activa",
+                # spec 089 (A-95, D10): el cliente distingue "cerrada" de "vencida" por esta
+                # cabecera, sin tocar el cuerpo ni el mensaje (los tests y el frontend actual
+                # dependen de esos textos).
+                headers={SESSION_STATE_HEADER: "closed"},
             )
 
         table_session = db.get(TableSession, claims.table_session_id)
@@ -175,12 +188,13 @@ def open_session_context(token: str, *, touch: bool = True) -> Iterator[SessionC
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="La mesa ya no tiene esta sesión abierta. Vuelve a escanear el QR.",
+                headers={SESSION_STATE_HEADER: "closed"},
             )
 
         now = utc_now().replace(tzinfo=None)
 
         if participant.expires_at is not None and participant.expires_at <= now:
-            _abandon_expired(db, participant)
+            _abandon_expired(db, participant, tenant)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Sesión expirada por inactividad. Vuelve a escanear el QR.",

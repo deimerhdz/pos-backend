@@ -46,7 +46,7 @@ from app.core.models import User
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.cash.service import resolve_dine_in_table_order
 from app.api.v1.orders.consolidation import get_or_create_table_session_id
-from app.api.v1.orders.consumption import deduct_order_items
+from app.api.v1.orders.consumption import deduct_order_items_naming_product
 from app.api.v1.orders.schemas import OrderChannel, OrderCreate, OrderType
 
 logger = logging.getLogger(__name__)
@@ -419,7 +419,7 @@ def create_order(
             # `checkout.checkout_and_send`, al cobrar — mismo punto único de
             # descuento que usa el flujo QR (`_confirm_order_impl`), por la
             # otra puerta.
-            deduct_order_items(db, entries, user_id, reference_id=order.id)
+            deduct_order_items_naming_product(db, entries, user_id, reference_id=order.id)
 
         db.commit()
     except HTTPException:

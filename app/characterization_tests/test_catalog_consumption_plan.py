@@ -310,5 +310,78 @@ class EnsureLinesConsumeInventoryTests(unittest.TestCase):
         )
 
 
+class AddonsPerLineConsumptionTests(unittest.TestCase):
+    """spec 089 (A-94, research D4): el consumo de una opción `per_line` es
+    `per_unit × chosen.quantity` -- NO se multiplica por la cantidad de la línea.
+    La marca vive en la fila (no en `pricing_type`), así descuento y reversa cuadran."""
+
+    def setUp(self):
+        self.db = f.new_session()
+        self.variant = f.make_variant(self.db)
+        self.insumo = f.make_inventory_item(self.db)
+        self.group = f.make_option_group(self.db)
+        f.link_variant_group(self.db, self.variant, self.group, quantity_per_option=Decimal("0"))
+
+    def _tocino(self, **kw):
+        kw.setdefault("inventory_item_id", self.insumo.id)
+        kw.setdefault("item_quantity", Decimal("30"))
+        return f.make_option(self.db, group=self.group, **kw)
+
+    def test_dos_hamburguesas_con_un_tocino_descuentan_un_tocino_no_dos(self):
+        tocino = self._tocino()
+        lines = plan_line_consumption(
+            self.db, self.variant.id, 2, [ChosenOption(tocino, 1, per_line=True)]
+        )
+        self.assertEqual([l.quantity for l in lines], [Decimal("30")])
+
+    def test_adicional_con_dos_unidades_descuenta_dos_veces_su_cantidad(self):
+        tocino = self._tocino()
+        lines = plan_line_consumption(
+            self.db, self.variant.id, 3, [ChosenOption(tocino, 2, per_line=True)]
+        )
+        self.assertEqual([l.quantity for l in lines], [Decimal("60")])
+
+    def test_opcion_por_unidad_sigue_multiplicando_por_la_cantidad_de_la_linea(self):
+        tocino = self._tocino()
+        lines = plan_line_consumption(
+            self.db, self.variant.id, 2, [ChosenOption(tocino, 1, per_line=False)]
+        )
+        self.assertEqual([l.quantity for l in lines], [Decimal("60")])
+
+    def test_la_receta_fija_sigue_por_cantidad_de_la_linea(self):
+        f.make_recipe_item(self.db, self.variant, self.insumo, quantity=Decimal("1"))
+        tocino = self._tocino()
+        lines = plan_line_consumption(
+            self.db, self.variant.id, 2, [ChosenOption(tocino, 1, per_line=True)]
+        )
+        self.assertEqual(sorted(l.quantity for l in lines), [Decimal("2"), Decimal("30")])
+
+    def test_adicional_gratis_tambien_consume_por_linea(self):
+        """Un adicional con precio $0 (topping gratis) consume por línea igual (research D2)."""
+        tocino = self._tocino(extra_price=Decimal("0"))
+        lines = plan_line_consumption(
+            self.db, self.variant.id, 2, [ChosenOption(tocino, 1, per_line=True)]
+        )
+        self.assertEqual([l.quantity for l in lines], [Decimal("30")])
+
+    def test_required_consumption_agrega_con_la_misma_regla(self):
+        tocino = self._tocino()
+        req = required_consumption(
+            self.db, self.variant.id, 2, [ChosenOption(tocino, 1, per_line=True)]
+        )
+        self.assertEqual(req, {self.insumo.id: Decimal("30")})
+
+    def test_deduct_igual_reverse_aunque_el_grupo_cambie_de_pricing_type(self):
+        """El consumo sigue la marca de la fila: si el administrador cambia el tipo del
+        grupo entre el descuento y la reversa, ambos calculan la misma cantidad."""
+        tocino = self._tocino()
+        chosen = [ChosenOption(tocino, 1, per_line=True)]
+        antes = plan_line_consumption(self.db, self.variant.id, 2, chosen)
+        self.group.pricing_type = "incluido"
+        self.db.flush()
+        despues = plan_line_consumption(self.db, self.variant.id, 2, chosen)
+        self.assertEqual([l.quantity for l in antes], [l.quantity for l in despues])
+
+
 if __name__ == "__main__":
     unittest.main()

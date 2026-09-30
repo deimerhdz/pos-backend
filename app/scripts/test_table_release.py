@@ -207,7 +207,8 @@ def main():
         # --- 8. try_release_if_empty es idempotente -------------------------
         with with_db(schema) as db:
             _check("liberar una sesión ya cerrada no hace nada",
-                   try_release_if_empty(db, r.table_session_id), False)
+                   # spec 089: devuelve las sesiones que cerró (lista vacía = no liberó nada).
+                   bool(try_release_if_empty(db, r.table_session_id)), False)
 
         print("\nTODO OK ✔")
     finally:

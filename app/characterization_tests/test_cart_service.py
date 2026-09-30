@@ -229,7 +229,8 @@ class TestCartService(unittest.TestCase):
     # -------------------------------------------------------------------- add_item (T014)
 
     def test_add_item_variante_con_opciones(self):
-        """CONGELA comportamiento actual: variante activa + opciones válidas
+        """CONGELA comportamiento actual (adicional por línea desde A-94, spec 089):
+        variante activa + opciones válidas
         delegan en `compute_line_price`/`load_valid_options`/
         `check_availability` reales; el precio de línea, las opciones
         guardadas y el `CartResponse` coinciden con lo que produce el código
@@ -248,9 +249,14 @@ class TestCartService(unittest.TestCase):
         self.assertEqual(len(resp.items), 1)
         item = resp.items[0]
         self.assertEqual(item.quantity, 2)
-        self.assertEqual(item.unit_price, Decimal("8500"))
-        self.assertEqual(item.line_total, Decimal("17000"))
+        # spec 089 (A-94): el grupo es "con_recargo" (default del fixture), así que su opción
+        # es un adicional: se cobra UNA vez por línea, no por unidad. Antes de A-94 esto
+        # congelaba `unit_price=8500` / `line_total=17000` (el extra multiplicado por 2).
+        self.assertEqual(item.unit_price, Decimal("8000"))
+        self.assertEqual(item.addons_total, Decimal("500"))
+        self.assertEqual(item.line_total, Decimal("16500"))
         self.assertEqual([o.option_id for o in item.options], [option.id])
+        self.assertTrue(item.options[0].per_line)
 
     def test_add_item_variante_inactiva_422(self):
         """CONGELA comportamiento actual: agregar una variante inactiva
@@ -677,6 +683,329 @@ class TestCartService(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             service.submit_cart(db, participant, uuid4())
         self.assertEqual(ctx.exception.status_code, 409)
+
+
+class TestQrAddonsPerLine(unittest.TestCase):
+    """spec 089 (A-94): en el Menú QR el adicional (opción de un grupo con recargo) se
+    cobra y se consume una vez por línea: 2 hamburguesas de $15.000 con 1 tocino de
+    $3.000 cuestan $33.000, no $36.000. La marca queda en la fila (`per_line`) para
+    que lectura, consumo y cobro no dependan del `pricing_type` vigente."""
+
+    def setUp(self):
+        self.db = cart_fixtures.new_session()
+        table = cart_fixtures.make_dining_table(self.db)
+        ts = cart_fixtures.make_table_session(self.db, table=table)
+        self.participant = cart_fixtures.make_participant(self.db, table_session=ts)
+        category = cart_fixtures.make_category(self.db)
+        self.product = cart_fixtures.make_product(self.db, category=category)
+        self.variant = cart_fixtures.make_variant(
+            self.db, product=self.product, price=Decimal("15000")
+        )
+        # Grupo de adicionales (con recargo) y grupo de sabores (incluido).
+        self.extras = cart_fixtures.make_option_group(
+            self.db, pricing_type="con_recargo", selection_mode="cantidad",
+            min_select=0, max_select=3,
+        )
+        self.tocino = cart_fixtures.make_option(
+            self.db, group=self.extras, extra_price=Decimal("3000")
+        )
+        cart_fixtures.link_variant_group(self.db, self.variant, self.extras, min_select=0, max_select=3)
+        self.sabores = cart_fixtures.make_option_group(
+            self.db, pricing_type="incluido", min_select=0, max_select=2
+        )
+        self.queso = cart_fixtures.make_option(self.db, group=self.sabores, extra_price=Decimal("0"))
+        cart_fixtures.link_variant_group(self.db, self.variant, self.sabores, min_select=0, max_select=2)
+
+    def _add(self, quantity=2, options=(), variant=None):
+        variant = variant or self.variant
+        return service.add_item(
+            self.db, self.participant.id,
+            CartItemIn(
+                product_variant_id=variant.id, quantity=quantity,
+                options=[OptionSelectionIn(option_id=o.id) for o in options],
+            ),
+        )
+
+    def _cart_item(self):
+        from app.models.cart_item import CartItem
+        return self.db.execute(select(CartItem)).scalars().one()
+
+    def test_dos_hamburguesas_con_un_tocino_cuestan_33000(self):
+        resp = self._add(2, [self.tocino])
+        item = resp.items[0]
+        self.assertEqual(item.unit_price, Decimal("15000"))
+        self.assertEqual(item.addons_total, Decimal("3000"))
+        self.assertEqual(item.line_total, Decimal("33000"))
+        self.assertEqual(resp.total, Decimal("33000"))
+
+    def test_subir_la_cantidad_no_multiplica_el_adicional(self):
+        resp = self._add(2, [self.tocino])
+        resp = service.update_item(
+            self.db, self.participant.id, resp.items[0].id, CartItemUpdate(quantity=3)
+        )
+        self.assertEqual(resp.items[0].line_total, Decimal("48000"))
+        self.assertEqual(resp.items[0].addons_total, Decimal("3000"))
+
+    def test_adicional_con_dos_unidades_en_una_sola_hamburguesa(self):
+        resp = service.add_item(
+            self.db, self.participant.id,
+            CartItemIn(
+                product_variant_id=self.variant.id, quantity=1,
+                options=[OptionSelectionIn(option_id=self.tocino.id, quantity=2)],
+            ),
+        )
+        self.assertEqual(resp.items[0].addons_total, Decimal("6000"))
+        self.assertEqual(resp.items[0].line_total, Decimal("21000"))
+
+    def test_grupo_incluido_no_es_adicional_y_sigue_por_unidad(self):
+        self._add(2, [self.queso])
+        row = self._cart_item()
+        self.assertEqual(row.addons_total, Decimal("0"))
+        self.assertFalse(row.options[0].per_line)
+
+    def test_se_marca_per_line_solo_en_grupos_con_recargo(self):
+        self._add(2, [self.tocino, self.queso])
+        row = self._cart_item()
+        marks = {o.option_id: o.per_line for o in row.options}
+        self.assertEqual(marks, {self.tocino.id: True, self.queso.id: False})
+
+    def test_bandera_apagada_crea_la_linea_con_la_regla_historica(self):
+        """`QR_ADDONS_PER_LINE=false`: la línea nueva vuelve a meter los extras dentro de
+        `unit_price` y sin `per_line`, pero lo ya creado no se invalida."""
+        with mock.patch.object(service.settings, "QR_ADDONS_PER_LINE", False):
+            resp = self._add(2, [self.tocino])
+        item = resp.items[0]
+        self.assertEqual(item.unit_price, Decimal("18000"))
+        self.assertEqual(item.addons_total, Decimal("0"))
+        self.assertEqual(item.line_total, Decimal("36000"))
+        self.assertFalse(item.options[0].per_line)
+
+    def test_promocion_del_20_por_ciento_no_descuenta_el_adicional(self):
+        promo = cart_fixtures.make_promotion(self.db, status="active")
+        cart_fixtures.add_rule_to_promotion(
+            self.db, promo, type="percent", value=Decimal("20"), min_qty=1,
+            variants=[self.variant],
+        )
+        resp = self._add(2, [self.tocino])
+        item = resp.items[0]
+        # 20 % solo sobre 2 × 15.000 = 30.000 → 6.000; el tocino ($3.000) no se descuenta.
+        self.assertEqual(item.discounted_line_total, Decimal("27000.00"))
+        self.assertEqual(item.discounted_unit_price, Decimal("12000.00"))
+        self.assertEqual(resp.discounted_total, Decimal("27000.00"))
+
+    def test_linea_historica_y_linea_nueva_conviven_en_el_mismo_carrito(self):
+        from app.models.cart_item import CartItem, CartItemOption
+        cart = cart_fixtures.make_cart(self.db, participant=self.participant)
+        # Histórica: 2 × 18.000 con el tocino ya dentro de `unit_price`, sin marcas.
+        hist = cart_fixtures.make_cart_item(
+            self.db, cart, self.variant, quantity=2, unit_price=Decimal("18000")
+        )
+        self.db.add(CartItemOption(cart_item_id=hist.id, option_id=self.tocino.id, quantity=1))
+        self.db.flush()
+        resp = self._add(2, [self.tocino])
+        totals = sorted(i.line_total for i in resp.items)
+        self.assertEqual(totals, [Decimal("33000"), Decimal("36000")])
+        self.assertEqual(resp.total, Decimal("69000"))
+
+    def test_editar_la_linea_recalcula_los_adicionales_y_las_marcas(self):
+        resp = self._add(2, [self.tocino])
+        resp = service.update_item(
+            self.db, self.participant.id, resp.items[0].id,
+            CartItemUpdate(options=[OptionSelectionIn(option_id=self.tocino.id, quantity=2)]),
+        )
+        item = resp.items[0]
+        self.assertEqual(item.quantity, 2)
+        self.assertEqual(item.addons_total, Decimal("6000"))
+        self.assertEqual(item.line_total, Decimal("36000"))
+        self.assertTrue(item.options[0].per_line)
+
+    def test_cambiar_solo_la_cantidad_conserva_las_marcas_de_la_fila(self):
+        """Una línea histórica (sin `per_line`) sigue con la regla histórica al cambiar
+        la cantidad; no se reinterpreta con el `pricing_type` vigente."""
+        from app.models.cart_item import CartItemOption
+        cart = cart_fixtures.make_cart(self.db, participant=self.participant)
+        hist = cart_fixtures.make_cart_item(
+            self.db, cart, self.variant, quantity=2, unit_price=Decimal("18000")
+        )
+        self.db.add(CartItemOption(cart_item_id=hist.id, option_id=self.tocino.id, quantity=1))
+        self.db.flush()
+        resp = service.update_item(self.db, self.participant.id, hist.id, CartItemUpdate(quantity=3))
+        self.assertEqual(resp.items[0].unit_price, Decimal("18000"))
+        self.assertEqual(resp.items[0].addons_total, Decimal("0"))
+        self.assertEqual(resp.items[0].line_total, Decimal("54000"))
+
+    def test_submit_cart_copia_addons_total_y_marcas_sin_recalcular(self):
+        efectivo = cart_fixtures.make_payment_method(self.db, name="efe", is_cash=True)
+        self._add(2, [self.tocino, self.queso])
+        order = service.submit_cart(self.db, self.participant, efectivo.id)
+        [item] = order.items
+        self.assertEqual(item.unit_price, Decimal("15000"))
+        self.assertEqual(item.addons_total, Decimal("3000"))
+        self.assertEqual(item.line_total, Decimal("33000"))
+        marks = {o.option_id: o.per_line for o in item.options}
+        self.assertEqual(marks, {self.tocino.id: True, self.queso.id: False})
+
+    def test_submit_cart_con_promocion_guarda_el_descuento_que_no_toca_el_adicional(self):
+        promo = cart_fixtures.make_promotion(self.db, status="active")
+        cart_fixtures.add_rule_to_promotion(
+            self.db, promo, type="percent", value=Decimal("20"), min_qty=1,
+            variants=[self.variant],
+        )
+        efectivo = cart_fixtures.make_payment_method(self.db, name="efe", is_cash=True)
+        self._add(2, [self.tocino])
+        order = service.submit_cart(self.db, self.participant, efectivo.id)
+        [item] = order.items
+        self.assertEqual(item.discounted_line_total, Decimal("27000.00"))
+        self.assertEqual(item.discounted_unit_price, Decimal("12000.00"))
+
+    def test_una_linea_de_combo_con_adicional_suma_bien_y_conserva_el_combo(self):
+        promo = cart_fixtures.make_promotion(self.db, status="active")
+        cart = cart_fixtures.make_cart(self.db, participant=self.participant)
+        combo_item = cart_fixtures.make_cart_item(
+            self.db, cart, self.variant, quantity=2, unit_price=Decimal("12000"),
+            addons_total=Decimal("3000"), combo_id=promo.id,
+        )
+        efectivo = cart_fixtures.make_payment_method(self.db, name="efe", is_cash=True)
+        resp = service.get_cart(self.db, self.participant.id)
+        self.assertEqual(resp.items[0].line_total, Decimal("27000"))
+        order = service.submit_cart(self.db, self.participant, efectivo.id)
+        self.assertEqual(order.items[0].combo_id, promo.id)
+        self.assertEqual(order.items[0].addons_total, Decimal("3000"))
+
+    def test_disponibilidad_del_carrito_descuenta_el_adicional_una_sola_vez(self):
+        """`_cart_consumption` lee `per_line` de la fila: 2 hamburguesas con 1 tocino
+        (30 g) requieren 30 g, no 60 g."""
+        insumo = cart_fixtures.make_inventory_item(
+            self.db, name="tocino", current_stock=Decimal("100")
+        )
+        self.tocino.inventory_item_id = insumo.id
+        self.tocino.item_quantity = Decimal("30")
+        self.db.flush()
+        self._add(2, [self.tocino])
+        cart = self.db.execute(select(Cart)).scalars().one()
+        need = service._cart_consumption(self.db, cart)
+        self.assertEqual(need, {insumo.id: Decimal("30")})
+
+
+class TestQrEditAddons(unittest.TestCase):
+    """spec 089 (Historia 3, contracts/addons-per-line.md §4): editar o quitar los adicionales de
+    una línea ya agregada (`PATCH /cart/items/{id}`), con el total recalculado por la regla nueva,
+    sin eliminar la línea y sin tocar la de otro comensal."""
+
+    def setUp(self):
+        self.db = cart_fixtures.new_session()
+        table = cart_fixtures.make_dining_table(self.db)
+        self.ts = cart_fixtures.make_table_session(self.db, table=table)
+        self.ana = cart_fixtures.make_participant(self.db, table_session=self.ts, display_name="Ana")
+        self.beto = cart_fixtures.make_participant(self.db, table_session=self.ts, display_name="Beto")
+        category = cart_fixtures.make_category(self.db)
+        product = cart_fixtures.make_product(self.db, category=category)
+        self.variant = cart_fixtures.make_variant(self.db, product=product, price=Decimal("15000"))
+        self.extras = cart_fixtures.make_option_group(
+            self.db, pricing_type="con_recargo", selection_mode="cantidad",
+            min_select=0, max_select=3, max_quantity_per_option=2,
+        )
+        self.tocino = cart_fixtures.make_option(self.db, group=self.extras, extra_price=Decimal("3000"))
+        self.queso = cart_fixtures.make_option(self.db, group=self.extras, extra_price=Decimal("2000"))
+        cart_fixtures.link_variant_group(self.db, self.variant, self.extras, min_select=0, max_select=3)
+
+    def _add(self, participant, *options, quantity=2):
+        return service.add_item(
+            self.db, participant.id,
+            CartItemIn(
+                product_variant_id=self.variant.id, quantity=quantity,
+                options=[OptionSelectionIn(option_id=o.id) for o in options],
+            ),
+        )
+
+    def _patch(self, participant, item_id, **kw):
+        return service.update_item(self.db, participant.id, item_id, CartItemUpdate(**kw))
+
+    def test_cambiar_de_adicional_reemplaza_la_seleccion_y_recalcula(self):
+        resp = self._add(self.ana, self.tocino)
+        resp = self._patch(self.ana, resp.items[0].id, options=[OptionSelectionIn(option_id=self.queso.id)])
+        item = resp.items[0]
+        self.assertEqual([o.option_id for o in item.options], [self.queso.id])
+        self.assertEqual(item.addons_total, Decimal("2000"))
+        self.assertEqual(item.line_total, Decimal("32000"))
+        self.assertEqual(item.quantity, 2)
+
+    def test_quitar_todos_los_adicionales_deja_la_linea_sin_eliminarla(self):
+        resp = self._add(self.ana, self.tocino)
+        resp = self._patch(self.ana, resp.items[0].id, options=[])
+        self.assertEqual(len(resp.items), 1)
+        self.assertEqual(resp.items[0].options, [])
+        self.assertEqual(resp.items[0].addons_total, Decimal("0"))
+        self.assertEqual(resp.items[0].line_total, Decimal("30000"))
+
+    def test_una_opcion_con_cantidad_cero_no_es_valida_asi_que_quitarla_es_no_enviarla(self):
+        """El contrato rechaza `quantity < 1`: nunca existe una fila "x0"; quitar un adicional es
+        no incluirlo en `options`."""
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            OptionSelectionIn(option_id=self.tocino.id, quantity=0)
+
+    def test_seleccion_que_viola_el_tope_por_opcion_es_422_con_el_mensaje_del_grupo(self):
+        resp = self._add(self.ana, self.tocino)
+        with self.assertRaises(HTTPException) as ctx:
+            self._patch(
+                self.ana, resp.items[0].id,
+                options=[OptionSelectionIn(option_id=self.tocino.id, quantity=3)],
+            )
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("máximo", str(ctx.exception.detail))
+        # La línea no cambió.
+        self.assertEqual(service.get_cart(self.db, self.ana.id).items[0].addons_total, Decimal("3000"))
+
+    def test_adicional_inactivo_es_422(self):
+        resp = self._add(self.ana, self.tocino)
+        self.queso.active = False
+        self.db.flush()
+        with self.assertRaises(HTTPException) as ctx:
+            self._patch(self.ana, resp.items[0].id, options=[OptionSelectionIn(option_id=self.queso.id)])
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_adicional_sin_stock_es_409(self):
+        resp = self._add(self.ana, self.tocino)
+        insumo = cart_fixtures.make_inventory_item(self.db, name="queso", current_stock=Decimal("0"))
+        self.queso.inventory_item_id = insumo.id
+        self.queso.item_quantity = Decimal("30")
+        self.db.flush()
+        with self.assertRaises(HTTPException) as ctx:
+            self._patch(self.ana, resp.items[0].id, options=[OptionSelectionIn(option_id=self.queso.id)])
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    def test_un_comensal_no_puede_editar_la_linea_de_otro(self):
+        resp = self._add(self.ana, self.tocino)
+        with self.assertRaises(HTTPException) as ctx:
+            self._patch(self.beto, resp.items[0].id, options=[])
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(service.get_cart(self.db, self.ana.id).items[0].addons_total, Decimal("3000"))
+
+    def test_una_linea_ya_enviada_no_se_puede_editar(self):
+        """Al enviar el carrito se elimina físicamente: la línea ya no existe para el comensal."""
+        efectivo = cart_fixtures.make_payment_method(self.db, name="efe", is_cash=True)
+        resp = self._add(self.ana, self.tocino)
+        item_id = resp.items[0].id
+        service.submit_cart(self.db, self.ana, efectivo.id)
+        with self.assertRaises(HTTPException) as ctx:
+            self._patch(self.ana, item_id, options=[])
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_editar_dos_lineas_hasta_que_queden_identicas_no_las_fusiona(self):
+        self._add(self.ana, self.tocino)
+        resp = self._add(self.ana, self.queso)
+        a, b = resp.items
+        resp = self._patch(self.ana, b.id, options=[OptionSelectionIn(option_id=self.tocino.id)])
+        self.assertEqual(len(resp.items), 2)
+        self.assertEqual({i.id for i in resp.items}, {a.id, b.id})
+        self.assertEqual(resp.total, Decimal("66000"))  # 2 × (2 × 15.000 + 3.000)
+
+    def test_editar_solo_las_notas_conserva_los_adicionales(self):
+        resp = self._add(self.ana, self.tocino)
+        resp = self._patch(self.ana, resp.items[0].id, notes="sin cebolla")
+        self.assertEqual(resp.items[0].notes, "sin cebolla")
+        self.assertEqual(resp.items[0].addons_total, Decimal("3000"))
 
 
 if __name__ == "__main__":

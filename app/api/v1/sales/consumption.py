@@ -33,7 +33,8 @@ def _sale_item_options(db: Session, si: SaleItem) -> list[ChosenOption]:
             continue
         option = db.get(Option, UUID(str(option_id)))
         if option is not None:
-            options.append(ChosenOption(option, opt.get("quantity", 1)))
+            # spec 089: `per_line` ausente = por unidad (snapshots anteriores a la spec).
+            options.append(ChosenOption(option, opt.get("quantity", 1), opt.get("per_line", False)))
     return options
 
 

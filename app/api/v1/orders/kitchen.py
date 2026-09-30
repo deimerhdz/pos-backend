@@ -13,14 +13,15 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.crud import get_or_404
 from app.core.models import User
-from app.models.option import Option
 from app.catalog_engine import ChosenOption
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import EN_CURSO, OrderItem, OrderItemOption
 from app.models.order_item_void_log import OrderItemVoidLog
 from app.models.product_variant import ProductVariant
 from app.api.v1.orders import service
-from app.api.v1.orders.consumption import deduct_order_items, reverse_order_items
+from app.api.v1.orders.consumption import (
+    chosen_from_rows, deduct_order_items_naming_product, reverse_order_items,
+)
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 from app.api.v1.orders.schemas import KitchenTransitionIn, VoidItemIn
 
@@ -33,14 +34,6 @@ _ALLOWED: dict[str, frozenset[str]] = {
     "pendiente": frozenset({"en_preparacion", "listo"}),
     "en_preparacion": frozenset({"listo"}),
 }
-
-
-def _item_options(db: Session, item: OrderItem) -> list[ChosenOption]:
-    quantities = {o.option_id: o.quantity for o in item.options}
-    if not quantities:
-        return []
-    options = db.execute(select(Option).where(Option.id.in_(quantities.keys()))).scalars().all()
-    return [ChosenOption(opt, quantities[opt.id]) for opt in options]
 
 
 def transition_kitchen(
@@ -143,7 +136,7 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
         if was_pendiente:
             # Cocina no consumió físicamente: se devuelve el inventario.
             reverse_order_items(
-                db, [(item, _item_options(db, item))], user.id, reference_id=order_id
+                db, [(item, chosen_from_rows(db, item))], user.id, reference_id=order_id
             )
 
         db.add(OrderItemVoidLog(
@@ -169,7 +162,8 @@ def void_item(db: Session, item_id: UUID, data: VoidItemIn, user: User) -> Custo
                     order_item_id=new_item.id, option_id=chosen.option.id, quantity=chosen.quantity,
                 ))
             # Nuevo consumo (con lock; puede 400 y hacer rollback total).
-            deduct_order_items(
+            # spec 089 (A-96): un insumo agotado nombra el PRODUCTO, no solo el insumo.
+            deduct_order_items_naming_product(
                 db, [(new_item, repl_options)], user.id, reference_id=order_id
             )
 

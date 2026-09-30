@@ -14,7 +14,10 @@ from app.characterization_tests import fixtures as f
 from app.catalog_engine import (
     ChosenOption,
     check_availability,
+    compute_addons_total,
     compute_line_price,
+    compute_unit_price,
+    line_total,
     load_valid_options,
     validate_option_selection,
 )
@@ -257,6 +260,73 @@ class ValidateOptionSelectionTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             load_valid_options(self.db, _selections(uuid.uuid4()))
         self.assertEqual(ctx.exception.status_code, 404)
+
+
+class AddonsPerLineTests(unittest.TestCase):
+    """spec 089 (A-94): un adicional (opción `per_line`) se cobra UNA vez por línea, no
+    por unidad de producto. `line_total = unit_price × quantity + addons_total`. Las
+    opciones `per_line=False` (grupos incluidos, terminal POS, líneas históricas)
+    siguen sumándose al precio por unidad exactamente como antes."""
+
+    def setUp(self):
+        self.db = f.new_session()
+        self.variant = f.make_variant(self.db, price=Decimal("15000"))
+        self.group = f.make_option_group(self.db)
+        self.tocino = f.make_option(self.db, group=self.group, extra_price=Decimal("3000"))
+
+    def _addon(self, quantity=1):
+        return ChosenOption(self.tocino, quantity, per_line=True)
+
+    def _total(self, options, quantity):
+        unit = compute_unit_price(self.variant, options)
+        return line_total(unit, quantity, compute_addons_total(options))
+
+    def test_dos_hamburguesas_con_un_tocino_cuestan_33000_no_36000(self):
+        self.assertEqual(self._total([self._addon()], 2), Decimal("33000"))
+
+    def test_subir_la_cantidad_a_3_no_multiplica_el_adicional(self):
+        self.assertEqual(self._total([self._addon()], 3), Decimal("48000"))
+
+    def test_una_hamburguesa_con_dos_unidades_del_adicional(self):
+        self.assertEqual(self._total([self._addon(2)], 1), Decimal("21000"))
+
+    def test_unit_price_de_una_linea_nueva_excluye_el_adicional(self):
+        self.assertEqual(compute_unit_price(self.variant, [self._addon()]), Decimal("15000"))
+        self.assertEqual(compute_addons_total([self._addon(2)]), Decimal("6000"))
+
+    def test_opcion_de_grupo_incluido_sigue_por_unidad(self):
+        """Una opción con `per_line=False` (p. ej. sabor con recargo dentro del precio
+        por unidad) se suma a `unit_price` y se multiplica por la cantidad, como hoy."""
+        sabor = f.make_option(self.db, group=self.group, extra_price=Decimal("1000"))
+        opts = [ChosenOption(sabor, 1)]
+        self.assertEqual(compute_unit_price(self.variant, opts), Decimal("16000"))
+        self.assertEqual(compute_addons_total(opts), Decimal("0"))
+        self.assertEqual(self._total(opts, 2), Decimal("32000"))
+
+    def test_mezcla_de_adicional_y_opcion_por_unidad(self):
+        sabor = f.make_option(self.db, group=self.group, extra_price=Decimal("1000"))
+        opts = [ChosenOption(sabor, 1), self._addon()]
+        # (15.000 + 1.000) × 2 + 3.000
+        self.assertEqual(self._total(opts, 2), Decimal("35000"))
+
+    def test_compute_line_price_conserva_su_resultado_para_todo_llamador_existente(self):
+        opts = [self._addon()]
+        self.assertEqual(compute_line_price(self.variant, opts), Decimal("18000"))
+        self.assertEqual(
+            compute_line_price(self.variant, [ChosenOption(self.tocino, 1)]), Decimal("18000")
+        )
+
+    def test_linea_historica_addons_cero_no_cambia_el_total(self):
+        """SC-003: 2 × 18.000 (con el tocino dentro del precio por unidad) = 36.000."""
+        self.assertEqual(line_total(Decimal("18000"), 2), Decimal("36000"))
+        self.assertEqual(line_total(Decimal("18000"), 2, Decimal("0")), Decimal("36000"))
+
+    def test_linea_de_combo_con_adicional_es_componente_por_cantidad_mas_adicionales(self):
+        """El componente de un combo tiene su propio precio; el adicional se suma una vez."""
+        self.assertEqual(line_total(Decimal("12000"), 2, Decimal("3000")), Decimal("27000"))
+
+    def test_chosen_option_per_line_es_falso_por_defecto(self):
+        self.assertIs(ChosenOption(self.tocino, 1).per_line, False)
 
 
 if __name__ == "__main__":

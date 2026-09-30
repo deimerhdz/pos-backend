@@ -85,9 +85,14 @@ def has_billable_orders(db: Session, table_session_id: UUID) -> bool:
     ).scalar() is not None
 
 
-def try_release_if_empty(db: Session, table_session_id: UUID) -> bool:
+def try_release_if_empty(db: Session, table_session_id: UUID) -> list[TableSession]:
     """Cierra la sesión y devuelve la mesa a `libre` **solo si** ya no queda nadie
-    y no hay nada que cobrar. Devuelve si la liberó.
+    y no hay nada que cobrar. Devuelve las sesiones que cerró (lista vacía = no la
+    liberó; su truthiness sigue sirviendo a quien solo evaluaba `if try_release...`).
+
+    spec 089 (A-95): devuelve las sesiones, y no un `bool`, para que el llamador —después
+    de su `commit`— avise al comensal con `notify_sessions_closed(..., reason="empty")`. El
+    evento nunca sale aquí, antes del commit: anunciaría un cierre que puede hacer rollback.
 
     Es el único punto que decide esto; lo llaman el "salir" del comensal, la
     expiración de su token, la cancelación de su último pedido y el barrido.
@@ -104,7 +109,7 @@ def try_release_if_empty(db: Session, table_session_id: UUID) -> bool:
     """
     ts = db.get(TableSession, table_session_id)
     if ts is None or ts.status != "active":
-        return False
+        return []
 
     # La sesión se abre con `autoflush=False` (ver `with_db`), así que sin este
     # flush las consultas de abajo no verían el comensal que el caller acaba de
@@ -118,17 +123,39 @@ def try_release_if_empty(db: Session, table_session_id: UUID) -> bool:
         ).limit(1)
     ).scalar()
     if quedan is not None:
-        return False
+        return []
 
     if has_billable_orders(db, ts.id):
-        return False
+        return []
 
     sessions = checkout.close_table_sessions(db, ts.dining_table_id, closed_by=None)
     table = db.get(DiningTable, ts.dining_table_id)
     if table is not None:
         table.status = "libre"
         checkout.delete_orphan_carts(db, sessions)
-    return True
+    return sessions
+
+
+def notify_sessions_closed(tenant_id: int | None, sessions, reason: str) -> None:
+    """Avisa en tiempo real al comensal de que su sesión de mesa se cerró (`session.closed`,
+    canales `staff` y `session:{id}`), una vez por sesión. spec 089 (A-95).
+
+    **Llamar siempre DESPUÉS del `commit`** que cerró las sesiones. Es *best-effort*: nunca
+    lanza (un evento perdido degrada la pantalla al sondeo de respaldo, que sigue existiendo),
+    porque el cierre ya está comprometido. `reason` ∈ `paid | swept | released | empty`.
+    Sin `tenant_id` o sin sesiones no hace nada."""
+    if tenant_id is None:
+        return
+    for ts in sessions or []:
+        try:
+            events.session_closed(
+                tenant_id,
+                table_session_id=ts.id,
+                dining_table_id=ts.dining_table_id,
+                reason=reason,
+            )
+        except Exception:
+            logger.warning("No se pudo publicar session.closed de %s", getattr(ts, "id", "?"), exc_info=True)
 
 
 def list_sessions(db: Session, *, only_active: bool = True) -> list[TableSession]:
@@ -601,6 +628,13 @@ def set_assignments(
         # La primera entrada se queda en la fila original; las demás nacen como filas
         # nuevas copiando TODO lo que define la línea (precio, sabores, notas, estado):
         # sin las opciones, media comanda perdería su sabor.
+        #
+        # spec 089 (A-94): los adicionales cobrados una vez por línea (`addons_total` y las
+        # opciones `per_line`) se quedan SOLO en la fila original: no se duplican ni se
+        # reparten entre los comensales. Las filas nuevas nacen con `addons_total = 0` y sin
+        # opciones `per_line`; las opciones por unidad se clonan como siempre. (A-97: este
+        # clon pierde además `OrderItemOption.quantity` en las opciones por unidad; defecto
+        # previo, documentado y sin corregir aquí.)
         item.participant_id = entradas[0].participant_id
         item.quantity = pedidas[0]
         for entrada, cantidad in zip(entradas[1:], pedidas[1:]):
@@ -617,6 +651,8 @@ def set_assignments(
             db.add(nueva)
             db.flush()
             for opcion in item.options:
+                if opcion.per_line:
+                    continue
                 db.add(OrderItemOption(order_item_id=nueva.id, option_id=opcion.option_id))
 
     db.commit()

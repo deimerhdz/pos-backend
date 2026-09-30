@@ -152,6 +152,8 @@ class OrderItemOptionResponse(BaseModel):
     id: UUID
     option_id: UUID
     quantity: int
+    # spec 089 (A-94): la opción es un adicional cobrado/consumido una vez por línea.
+    per_line: bool = False
     # spec 087 (FR-015, A-89): nombre de la opción y de su grupo, resueltos por
     # JOIN en lectura (`OrderItemOption.name`/`group_name`). Opcionales: un
     # `OrderItemOption` recién creado y devuelto sin recargar los trae en `None`.
@@ -167,6 +169,11 @@ class OrderItemResponse(BaseModel):
     participant_id: UUID | None = None
     quantity: int
     unit_price: Decimal
+    # spec 089 (A-94): adicionales cobrados UNA vez por línea (0 en toda línea histórica y
+    # en las de la terminal POS) y el total de la línea sin descuento, que antes el cliente
+    # calculaba como `unit_price × quantity`: `unit_price × quantity + addons_total`.
+    addons_total: Decimal = Decimal("0")
+    line_total: Decimal
     # Snapshot del descuento vigente al confirmar (spec 038, FR-013), mismos
     # nombres/semántica que `CartItemResponse`: `None` si ninguna promoción
     # aplicó a la línea (o es un combo), o si el pedido es anterior a esta

@@ -742,5 +742,185 @@ class TestListOrdersActiveSessionsOnly(unittest.TestCase):
         self.assertIn(order.id, [o.id for o in resultado])
 
 
+class TestOrderLinesWithAddonsPerLine(unittest.TestCase):
+    """spec 089 (A-94): las líneas con adicionales cobrados una vez por línea suman lo
+    mismo en el cobro (`order_sale_lines`/`compute_bill`), en la respuesta HTTP del pedido y
+    en la base del descuento; las de la terminal POS (`per_line=False`) no cambian."""
+
+    def setUp(self):
+        from app.models.order_item import OrderItemOption
+        self.db = fx.new_session()
+        self.table = fx.make_dining_table(self.db)
+        self.ts = fx.make_table_session(self.db, table=self.table)
+        self.order = fx.make_customer_order(self.db, self.ts, dining_table_id=self.table.id)
+        self.variant = fx.make_variant(self.db, price=Decimal("15000"))
+        self.group = fx.make_option_group(self.db)
+        self.tocino = fx.make_option(self.db, group=self.group, extra_price=Decimal("3000"))
+        self.OrderItemOption = OrderItemOption
+
+    def _item(self, *, quantity, unit_price, addons, per_line):
+        item = fx.make_order_item(
+            self.db, self.order, self.variant, quantity=quantity,
+            unit_price=unit_price, addons_total=addons,
+        )
+        self.db.add(self.OrderItemOption(
+            order_item_id=item.id, option_id=self.tocino.id, quantity=1, per_line=per_line,
+        ))
+        self.db.flush()
+        self.db.refresh(item)
+        return item
+
+    def test_order_sale_lines_suma_el_adicional_una_vez_y_no_lo_descuenta(self):
+        from app.api.v1.orders import checkout
+        self._item(quantity=2, unit_price=Decimal("15000"), addons=Decimal("3000"), per_line=True)
+        [line] = checkout.order_sale_lines(self.db, self.order.id)
+        self.assertEqual(line.unit_price, Decimal("15000"))
+        self.assertEqual(line.addons_total, Decimal("3000"))
+        self.assertEqual(line.line_total, Decimal("33000"))
+        # La promoción nunca descuenta el adicional: la base es el propio unit_price (D3).
+        self.assertEqual(line.base_unit_price, Decimal("15000"))
+        self.assertEqual(line.options[0]["per_line"], True)
+
+    def test_linea_por_unidad_no_cambia_de_total_ni_de_base(self):
+        from app.api.v1.orders import checkout
+        self._item(quantity=2, unit_price=Decimal("18000"), addons=Decimal("0"), per_line=False)
+        [line] = checkout.order_sale_lines(self.db, self.order.id)
+        self.assertEqual(line.line_total, Decimal("36000"))
+        self.assertEqual(line.base_unit_price, Decimal("15000"))
+        self.assertNotIn("per_line", line.options[0])
+
+    def test_compute_bill_usa_line_total_incluidos_los_adicionales(self):
+        from app.api.v1.orders import checkout
+        self._item(quantity=2, unit_price=Decimal("15000"), addons=Decimal("3000"), per_line=True)
+        bill = checkout.compute_bill(self.db, self.table.id)
+        self.assertEqual(bill.total, Decimal("33000"))
+        self.assertEqual(bill.orders[0].items[0].line_total, Decimal("33000"))
+
+    def test_order_item_response_expone_addons_total_line_total_y_la_cantidad_del_adicional(self):
+        from app.api.v1.orders.schemas import OrderItemResponse
+        item = self._item(
+            quantity=2, unit_price=Decimal("15000"), addons=Decimal("3000"), per_line=True
+        )
+        out = OrderItemResponse.model_validate(item)
+        self.assertEqual(out.addons_total, Decimal("3000"))
+        self.assertEqual(out.line_total, Decimal("33000"))
+        # La comanda conserva la cantidad ELEGIDA del adicional: x1, no x2 (FR-006).
+        self.assertEqual(out.options[0].quantity, 1)
+        self.assertTrue(out.options[0].per_line)
+
+    def test_order_item_response_de_una_linea_historica(self):
+        from app.api.v1.orders.schemas import OrderItemResponse
+        item = self._item(
+            quantity=2, unit_price=Decimal("18000"), addons=Decimal("0"), per_line=False
+        )
+        out = OrderItemResponse.model_validate(item)
+        self.assertEqual(out.addons_total, Decimal("0"))
+        self.assertEqual(out.line_total, Decimal("36000"))
+
+    def test_create_order_de_la_terminal_pos_sigue_por_unidad(self):
+        """La terminal POS/mostrador no cambia (decisión de negocio "solo Menú QR")."""
+        insumo = fx.make_inventory_item(self.db, current_stock=Decimal("100"))
+        fx.make_recipe_item(self.db, self.variant, insumo, quantity=Decimal("1"))
+        fx.link_variant_group(
+            self.db, self.variant, self.group, min_select=0, max_select=1,
+        )
+        data = OrderCreate(
+            channel=OrderChannel.POS, customer_name="Cliente de prueba",
+            items=[OrderItemIn(
+                product_variant_id=self.variant.id, quantity=2,
+                options=[OptionSelectionIn(option_id=self.tocino.id)],
+            )],
+        )
+        order = service.create_order(self.db, data, uuid4())
+        [item] = order.items
+        self.assertEqual(item.unit_price, Decimal("18000"))
+        self.assertEqual(item.addons_total, Decimal("0"))
+        self.assertEqual(item.line_total, Decimal("36000"))
+        self.assertFalse(item.options[0].per_line)
+
+
+class TestSoldOutNamesTheProduct(unittest.TestCase):
+    """spec 089 (A-96, FR-029, research D18): al agregar una línea cuyo insumo se agota, la
+    respuesta nombra el PRODUCTO, no solo el insumo, y no queda nada a medias. El status sigue
+    siendo el de `InsufficientStockError` (400)."""
+
+    def setUp(self):
+        self.db = fx.new_session()
+        category = fx.make_category(self.db)
+        self.product = fx.make_product(self.db, category=category, name="Hamburguesa")
+        self.variant = fx.make_variant(self.db, product=self.product, price=PRECIO)
+        self.queso = fx.make_inventory_item(
+            self.db, name="Queso", current_stock=Decimal("1")
+        )
+        fx.make_recipe_item(self.db, self.variant, self.queso, quantity=Decimal("5"))
+        self.db.commit()
+
+    def _assert_named(self, exc: HTTPException):
+        self.assertEqual(exc.status_code, 400)
+        self.assertIsInstance(exc.detail, dict)
+        self.assertIn("«", exc.detail["error"])
+        self.assertIn("Hamburguesa", exc.detail["error"])
+        self.assertIn("está agotado", exc.detail["error"])
+        self.assertIn("falta Queso", exc.detail["error"])
+        self.assertIn("Hamburguesa", exc.detail["producto"])
+        self.assertEqual(exc.detail["insumo"], "Queso")
+
+    def _assert_nothing_left(self):
+        from app.models.order_item import OrderItem
+        self.db.expire_all()
+        self.assertEqual(self.db.execute(select(OrderItem)).scalars().all(), [])
+        self.assertEqual(Decimal(self.queso.current_stock), Decimal("1"))
+        self.assertEqual(self.db.execute(select(InventoryMovement)).scalars().all(), [])
+
+    def test_create_order_nombra_el_producto_agotado_y_no_deja_lineas_a_medias(self):
+        data = OrderCreate(
+            channel=OrderChannel.POS, customer_name="Cliente de prueba",
+            items=[OrderItemIn(product_variant_id=self.variant.id, quantity=1)],
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            service.create_order(self.db, data, uuid4())
+        self._assert_named(ctx.exception)
+        self._assert_nothing_left()
+
+    def test_add_item_to_order_nombra_el_producto_agotado(self):
+        from app.api.v1.orders import consolidation
+        ts = fx.make_table_session(self.db)
+        order = fx.make_customer_order(self.db, ts, status="abierta", channel="POS")
+        self.db.commit()
+        with self.assertRaises(HTTPException) as ctx:
+            consolidation.add_item_to_order(
+                self.db, order.id,
+                OrderItemIn(product_variant_id=self.variant.id, quantity=1),
+                fx.make_user_double(),
+            )
+        self._assert_named(ctx.exception)
+        self._assert_nothing_left()
+
+    def test_reemplazo_de_linea_nombra_el_producto_agotado_y_conserva_la_original(self):
+        from app.api.v1.orders import kitchen
+        from app.api.v1.orders.schemas import VoidItemIn
+        ts = fx.make_table_session(self.db)
+        order = fx.make_customer_order(self.db, ts, status="abierta", channel="POS")
+        otro = fx.make_variant(self.db, product=self.product, price=PRECIO)
+        fx.make_recipe_item(self.db, otro, self.queso, quantity=Decimal("0.1"))
+        original = fx.make_order_item(
+            self.db, order, otro, estado_cocina="pendiente", quantity=1
+        )
+        self.db.commit()
+        with self.assertRaises(HTTPException) as ctx:
+            kitchen.void_item(
+                self.db, original.id,
+                VoidItemIn(
+                    motivo="cambio",
+                    replacement=OrderItemIn(product_variant_id=self.variant.id, quantity=1),
+                ),
+                fx.make_user_double(),
+            )
+        self._assert_named(ctx.exception)
+        self.db.expire_all()
+        # Rollback total: la línea original sigue viva y sin reversa.
+        self.assertNotEqual(self.db.get(type(original), original.id).estado_cocina, "anulado")
+
+
 if __name__ == "__main__":
     unittest.main()

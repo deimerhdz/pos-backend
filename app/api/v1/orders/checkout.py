@@ -30,7 +30,6 @@ from app.models.dining_table import DiningTable
 from app.models.table_session import TableSession
 from app.models.session_participant import SessionParticipant
 from app.models.cart import Cart
-from app.models.option import Option
 from app.catalog_engine import ChosenOption, compute_line_price, load_valid_options
 from app.catalog_engine.core import format_item_description
 from app.models.product import Product
@@ -44,7 +43,7 @@ from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.payment import PaymentMethod
 from app.api.v1.sales.builder import SaleLine, build_sale, compute_total, ensure_open_shift
 from app.api.v1.sales.schemas import PaymentIn
-from app.api.v1.orders.consumption import deduct_order_items, reverse_order_items
+from app.api.v1.orders.consumption import chosen_from_rows, deduct_order_items, reverse_order_items
 from app.api.v1.orders.schemas import (
     BlockIn, CancelIn, CheckoutAndSendIn, PayIn,
     BillResponse, BillOrderLine, BillItemLine, BillSessionLine,
@@ -126,14 +125,6 @@ def _record_order_confirmed(
         details={"trigger": trigger},
         request_id=request_id,
     )
-
-
-def _item_options(db: Session, item: OrderItem) -> list[ChosenOption]:
-    quantities = {o.option_id: o.quantity for o in item.options}
-    if not quantities:
-        return []
-    options = db.execute(select(Option).where(Option.id.in_(quantities.keys()))).scalars().all()
-    return [ChosenOption(opt, quantities[opt.id]) for opt in options]
 
 
 def _reload_order(db: Session, order_id: UUID) -> CustomerOrder:
@@ -234,7 +225,8 @@ def compute_bill(db: Session, table_id: UUID) -> BillResponse:
         for it in order.items:
             if it.estado_cocina == "anulado":
                 continue
-            line_total = Decimal(it.unit_price) * it.quantity
+            # spec 089: `unit_price × quantity + addons_total` (addons_total = 0 en histórico).
+            line_total = it.line_total
             subtotal += line_total
             split[it.participant_id] = split.get(it.participant_id, Decimal("0")) + line_total
             items.append(BillItemLine(
@@ -297,11 +289,15 @@ def order_sale_lines(
             description=description,
             options=[
                 {"option_id": str(chosen.option.id), "name": chosen.option.name,
-                 "extra_price": str(chosen.option.extra_price), "quantity": chosen.quantity}
-                for chosen in _item_options(db, it)
+                 "extra_price": str(chosen.option.extra_price), "quantity": chosen.quantity,
+                 # spec 089: ausente = por unidad (snapshots anteriores). Solo se escribe
+                 # la clave en los adicionales de la regla nueva.
+                 **({"per_line": True} if chosen.per_line else {})}
+                for chosen in chosen_from_rows(db, it)
             ],
             quantity=it.quantity,
             unit_price=Decimal(it.unit_price),
+            addons_total=Decimal(it.addons_total or 0),
             combo_id=it.combo_id,
             line_id=it.id,
         ))
@@ -546,7 +542,7 @@ def _deduct_and_open(db: Session, order: CustomerOrder, user: User) -> CustomerO
     cobro ya se resolvió en la misma llamada, vía `build_sale`, no vía un
     intento de pago aparte."""
     entries = [
-        (it, _item_options(db, it))
+        (it, chosen_from_rows(db, it))
         for it in order.items
         if it.estado_cocina != "anulado"
     ]
@@ -854,7 +850,7 @@ def cancel_order(
                     "estado_cocina": it.estado_cocina,
                 })
                 continue
-            a_revertir.append((it, _item_options(db, it)))
+            a_revertir.append((it, chosen_from_rows(db, it)))
 
         actor_id = user.id if user is not None else None
         reverse_order_items(db, a_revertir, actor_id, reference_id=order.id)
@@ -1028,8 +1024,13 @@ def delete_orphan_carts(db: Session, sessions: list[TableSession]) -> None:
 
 
 def release_table(
-    db: Session, table_id: UUID, *, closed_by: User | None = None
+    db: Session, table_id: UUID, *, closed_by: User | None = None,
+    closed_out: list | None = None,
 ) -> DiningTable:
+    """Libera la mesa (regla dura: cero órdenes no-terminales).
+
+    spec 089 (A-95): `closed_out`, si se pasa, recibe las sesiones que cerró para que el llamador
+    avise al comensal DESPUÉS del commit (`notify_sessions_closed`); el commit ocurre aquí dentro."""
     table = get_or_404(db, DiningTable, table_id, "Table not found")
 
     blocking = db.execute(
@@ -1061,6 +1062,8 @@ def release_table(
         sessions = close_table_sessions(db, table.id, closed_by=closed_by)
         delete_orphan_carts(db, sessions)
         db.commit()
+        if closed_out is not None:
+            closed_out.extend(sessions)
     except Exception:
         db.rollback()
         logger.exception("Error liberando la mesa")
