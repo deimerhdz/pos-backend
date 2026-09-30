@@ -1,6 +1,6 @@
 from app.core.models import Base, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy import String, Integer, Numeric, ForeignKey, CheckConstraint, UniqueConstraint
+from sqlalchemy import Boolean, String, Integer, Numeric, ForeignKey, CheckConstraint, UniqueConstraint, false
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 from typing import Optional, List, TYPE_CHECKING
 from decimal import Decimal
@@ -30,6 +30,14 @@ class CartItem(UUIDPrimaryKeyMixin, Base):
         Numeric(12, 2), nullable=False, default=0, server_default="0"
     )
 
+    # spec 089 (A-94): Σ(precio del adicional × cantidad elegida) de las opciones
+    # `per_line`, cobrado UNA vez por línea (no por unidad de producto). Total de la
+    # línea = `unit_price × quantity + addons_total`. Las líneas anteriores quedan en 0
+    # (su `unit_price` sigue incluyendo los extras por unidad): mismo total de siempre.
+    addons_total: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, default=0, server_default="0"
+    )
+
     # Promoción de combo que generó esta línea (selección explícita). Varias
     # líneas comparten el mismo combo_id: son los componentes de un mismo combo.
     combo_id: Mapped[Optional[UUID]] = mapped_column(
@@ -44,6 +52,7 @@ class CartItem(UUIDPrimaryKeyMixin, Base):
 
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_cart_item_quantity_positive"),
+        CheckConstraint("addons_total >= 0", name="ck_cart_item_addons_total_nonneg"),
         {"schema": "tenant"},
     )
 
@@ -66,6 +75,14 @@ class CartItemOption(UUIDPrimaryKeyMixin, Base):
     # spec 065: unidades elegidas de esta opción (grupo "cantidad"); siempre 1 para un
     # grupo "conteo" (validado en validate_option_selection, no asumido aquí).
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+
+    # spec 089 (A-94): la opción es un adicional de la regla nueva (cobrado y consumido
+    # una vez por línea). Es un snapshot inmutable de qué regla se aplicó: el consumo de
+    # inventario (descuento y reversa) lo lee de aquí, nunca de `option_groups.pricing_type`
+    # vigente, para que deduct == reverse aunque el grupo cambie de tipo después.
+    per_line: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
     __table_args__ = (
         UniqueConstraint(

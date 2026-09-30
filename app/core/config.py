@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # descuenta, así que tolerarla descuadra el stock.
     STRICT_OPTION_SELECTION:bool = Field(default=False,env="STRICT_OPTION_SELECTION")
 
+    # spec 089 (A-94): los adicionales (opciones de grupos con recargo) del Menú QR se cobran
+    # y consumen una vez por línea, no por unidad de producto. Es la bandera de reversa: en
+    # false, las líneas NUEVAS del Menú QR vuelven a la regla histórica (extras dentro de
+    # `unit_price`). Solo gobierna la creación; la lectura, el consumo y el cobro siempre
+    # honran las marcas ya guardadas en cada fila (`addons_total`, `per_line`).
+    QR_ADDONS_PER_LINE:bool = Field(default=True,env="QR_ADDONS_PER_LINE")
+
     # Rate limiting de las rutas públicas del QR (ventana deslizante en Redis).
     RATE_LIMIT_ENABLED:bool = Field(default=True,env="RATE_LIMIT_ENABLED")
     # Peticiones permitidas por IP y por mesa dentro de la ventana.
