@@ -128,7 +128,7 @@ def leave(x_session_token: str | None = Header(None, alias="x-session-token")):
         return None
     try:
         with open_session_context(x_session_token) as ctx:
-            service.leave_session(ctx.db, ctx.participant)
+            service.leave_session(ctx.db, ctx.participant, tenant_id=ctx.tenant.id)
     except HTTPException:
         pass  # token inválido/expirado: ya no ocupa la mesa, nada que hacer
     return None
@@ -158,7 +158,8 @@ async def submit_cart(
     )
     # Después del COMMIT del servicio, nunca dentro: si la transacción fallara no
     # puede haber salido un evento anunciando un pedido que no existe.
-    _total = sum((i.unit_price * i.quantity for i in order.items), start=Decimal(0))
+    # spec 089: `line_total` = unit_price × quantity + addons_total (los adicionales una vez).
+    _total = sum((i.line_total for i in order.items), start=Decimal(0))
     events.order_created(
         ctx.tenant.id,
         order_id=order.id,
