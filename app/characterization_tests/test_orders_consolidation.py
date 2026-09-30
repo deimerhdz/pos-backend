@@ -456,5 +456,116 @@ class TestConsolidation(unittest.TestCase):
         self.assertTrue(order.is_consolidation_order)
 
 
+class TestConsolidationAddonsPerLine(unittest.TestCase):
+    """spec 089 (A-94): `consolidate_table` COPIA `addons_total` y `per_line` del carrito
+    (nunca los recalcula) y descuenta inventario con la marca de cada fila, de modo que la
+    reversa devuelve exactamente lo descontado."""
+
+    def setUp(self):
+        self.db = fx.new_session()
+        self.table = fx.make_dining_table(self.db)
+        self.ts = fx.make_table_session(self.db, table=self.table)
+        self.ana = fx.make_participant(self.db, table_session=self.ts, display_name="Ana")
+        category = fx.make_category(self.db)
+        product = fx.make_product(self.db, category=category)
+        self.variant = fx.make_variant(self.db, product=product, price=Decimal("15000"))
+        self.carne = fx.make_inventory_item(self.db, current_stock=Decimal("1000"))
+        fx.make_recipe_item(self.db, self.variant, self.carne, quantity=Decimal("1"))
+        self.tocino_stock = fx.make_inventory_item(self.db, current_stock=Decimal("1000"))
+        self.group = fx.make_option_group(
+            self.db, selection_mode="cantidad", min_select=0, max_select=3
+        )
+        fx.link_variant_group(self.db, self.variant, self.group, min_select=0, max_select=3)
+        self.tocino = fx.make_option(
+            self.db, group=self.group, extra_price=Decimal("3000"),
+            inventory_item_id=self.tocino_stock.id, item_quantity=Decimal("30"),
+        )
+
+    def _add_cart_line(self, cart, *, quantity, unit_price, addons, per_line):
+        from app.models.cart_item import CartItemOption
+        item = fx.make_cart_item(
+            self.db, cart, self.variant, quantity=quantity,
+            unit_price=unit_price, addons_total=addons, combo_id=None,
+        )
+        self.db.add(CartItemOption(
+            cart_item_id=item.id, option_id=self.tocino.id, quantity=1, per_line=per_line,
+        ))
+        self.db.flush()
+        return item
+
+    def test_consolidate_table_copia_addons_total_y_per_line(self):
+        cart = fx.make_cart(self.db, participant=self.ana)
+        self._add_cart_line(
+            cart, quantity=2, unit_price=Decimal("15000"), addons=Decimal("3000"), per_line=True
+        )
+        self.db.commit()
+
+        order = consolidation.consolidate_table(self.db, self.table.id, fx.make_user_double())
+
+        [item] = order.items
+        self.assertEqual(item.unit_price, Decimal("15000"))
+        self.assertEqual(item.addons_total, Decimal("3000"))
+        self.assertEqual(item.line_total, Decimal("33000"))
+        self.assertTrue(item.options[0].per_line)
+
+    def test_el_adicional_descuenta_una_vez_y_la_receta_por_unidad(self):
+        cart = fx.make_cart(self.db, participant=self.ana)
+        self._add_cart_line(
+            cart, quantity=2, unit_price=Decimal("15000"), addons=Decimal("3000"), per_line=True
+        )
+        self.db.commit()
+
+        consolidation.consolidate_table(self.db, self.table.id, fx.make_user_double())
+
+        self.db.refresh(self.carne)
+        self.db.refresh(self.tocino_stock)
+        self.assertEqual(self.carne.current_stock, Decimal("998"))       # receta: 1 × 2
+        self.assertEqual(self.tocino_stock.current_stock, Decimal("970"))  # 30 × 1 (no × 2)
+
+    def test_linea_historica_y_linea_nueva_en_el_mismo_pedido_suman_y_descuentan_por_su_marca(self):
+        cart = fx.make_cart(self.db, participant=self.ana)
+        # Histórica: 2 × 18.000 (tocino dentro del precio por unidad), sin marcas.
+        self._add_cart_line(
+            cart, quantity=2, unit_price=Decimal("18000"), addons=Decimal("0"), per_line=False
+        )
+        self.db.commit()
+        # Nueva en otro comensal.
+        beto = fx.make_participant(self.db, table_session=self.ts, display_name="Beto")
+        cart_beto = fx.make_cart(self.db, participant=beto)
+        self._add_cart_line(
+            cart_beto, quantity=2, unit_price=Decimal("15000"), addons=Decimal("3000"), per_line=True
+        )
+        self.db.commit()
+
+        order = consolidation.consolidate_table(self.db, self.table.id, fx.make_user_double())
+
+        self.assertEqual(sum((i.line_total for i in order.items), Decimal(0)), Decimal("69000"))
+        self.db.refresh(self.tocino_stock)
+        # histórica: 30 × 2 = 60 · nueva: 30 × 1 = 30  → 90 descontados
+        self.assertEqual(self.tocino_stock.current_stock, Decimal("910"))
+
+    def test_la_reversa_devuelve_exactamente_lo_descontado_aunque_cambie_el_pricing_type(self):
+        from app.api.v1.orders.consumption import chosen_from_rows, reverse_order_items
+        cart = fx.make_cart(self.db, participant=self.ana)
+        self._add_cart_line(
+            cart, quantity=2, unit_price=Decimal("15000"), addons=Decimal("3000"), per_line=True
+        )
+        self.db.commit()
+        order = consolidation.consolidate_table(self.db, self.table.id, fx.make_user_double())
+        self.db.refresh(self.tocino_stock)
+        self.assertEqual(self.tocino_stock.current_stock, Decimal("970"))
+
+        # El administrador cambia el tipo del grupo entre el descuento y la reversa.
+        self.group.pricing_type = "incluido"
+        self.db.flush()
+        [item] = order.items
+        reverse_order_items(
+            self.db, [(item, chosen_from_rows(self.db, item))], uuid4(), reference_id=order.id
+        )
+        self.db.flush()
+        self.db.refresh(self.tocino_stock)
+        self.assertEqual(self.tocino_stock.current_stock, Decimal("1000"))
+
+
 if __name__ == "__main__":
     unittest.main()

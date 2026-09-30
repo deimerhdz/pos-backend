@@ -25,7 +25,7 @@ from app.catalog_engine import ChosenOption
 from app.models.product_variant import ProductVariant
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
-from app.api.v1.orders.consumption import deduct_order_items
+from app.api.v1.orders.consumption import deduct_order_items, deduct_order_items_naming_product
 from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
 
 logger = logging.getLogger(__name__)
@@ -141,6 +141,9 @@ def consolidate_table(db: Session, table_id: UUID, user: User) -> CustomerOrder:
                     product_variant_id=ci.product_variant_id,
                     quantity=ci.quantity,
                     unit_price=ci.unit_price,  # snapshot copiado del carrito
+                    # spec 089 (A-94): los adicionales cobrados una vez por línea también se
+                    # COPIAN tal cual (nunca se recalculan); 0 en toda línea histórica.
+                    addons_total=ci.addons_total,
                     notes=ci.notes,
                     estado_cocina="pendiente",
                 )
@@ -149,16 +152,21 @@ def consolidate_table(db: Session, table_id: UUID, user: User) -> CustomerOrder:
 
                 # spec 065: copia desde el carrito sin recalcular -- la cantidad de
                 # cada opción ya quedó resuelta en `CartItemOption.quantity`.
-                quantities = {o.option_id: o.quantity for o in ci.options}
+                # spec 089: y también su marca `per_line`, que decide cuánto inventario
+                # descuenta y devuelve después (deduct == reverse).
+                rows = {o.option_id: o for o in ci.options}
                 options = (
-                    db.execute(select(Option).where(Option.id.in_(quantities.keys())))
-                    .scalars().all() if quantities else []
+                    db.execute(select(Option).where(Option.id.in_(rows.keys())))
+                    .scalars().all() if rows else []
                 )
                 chosen_options: list[ChosenOption] = []
                 for opt in options:
-                    qty = quantities[opt.id]
-                    db.add(OrderItemOption(order_item_id=item.id, option_id=opt.id, quantity=qty))
-                    chosen_options.append(ChosenOption(opt, qty))
+                    row = rows[opt.id]
+                    db.add(OrderItemOption(
+                        order_item_id=item.id, option_id=opt.id,
+                        quantity=row.quantity, per_line=row.per_line,
+                    ))
+                    chosen_options.append(ChosenOption(opt, row.quantity, row.per_line))
 
                 entries.append((item, chosen_options))
 
@@ -231,7 +239,8 @@ def add_item_to_order(db: Session, order_id: UUID, data, user: User) -> Customer
                 ))
             entries.append((item, options))
 
-        deduct_order_items(db, entries, user.id, reference_id=order.id)
+        # spec 089 (A-96): un insumo agotado nombra el PRODUCTO, no solo el insumo.
+        deduct_order_items_naming_product(db, entries, user.id, reference_id=order.id)
 
         db.commit()
     except HTTPException:
