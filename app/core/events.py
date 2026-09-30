@@ -294,7 +294,11 @@ def payment_completed(
 def session_closed(
     tenant_id: int, *, table_session_id, dining_table_id, reason: str,
 ) -> str | None:
-    """La mesa se cerró. `reason`: paid | swept | released."""
+    """La mesa se cerró. `reason`: paid | swept | released | empty.
+
+    `empty` (spec 089, A-95): cierre automático de una sesión sin órdenes (el último comensal salió,
+    su token venció o canceló su último pedido). El cliente ignora el valor: cualquier `reason`
+    produce la misma pantalla de "¡Gracias por tu visita!"."""
     return publish(
         tenant_id,
         type="session.closed",

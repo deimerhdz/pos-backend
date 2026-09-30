@@ -117,7 +117,10 @@ def create_app()->FastAPI:
         # `X-Server-Time` (A-09) es la hora del servidor que el POS de staff usa
         # en vez del reloj del dispositivo para previsualizar vigencia de
         # promociones (GET /promotions).
-        expose_headers=["ETag", "Retry-After", "X-Server-Time"],
+        #
+        # `X-Session-State` (spec 089, A-95): los 401 cuya causa es que la mesa se cerró llevan
+        # `closed`; el Menú QR la lee para mostrar "¡Gracias por tu visita!" en vez de pedir el nombre.
+        expose_headers=["ETag", "Retry-After", "X-Server-Time", "X-Session-State"],
     )
     app.add_middleware(RequestIdMiddleware, path_prefix=SUPER_ADMIN_ERROR_PREFIX)
     register_error_handlers(app, path_prefix=SUPER_ADMIN_ERROR_PREFIX)

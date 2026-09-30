@@ -25,6 +25,7 @@ from app.api.v1.orders.consolidation import consolidate_table, add_item_to_order
 from app.api.v1.orders import kitchen
 from app.api.v1.orders import checkout
 from app.api.v1.orders import tables_advanced
+from app.api.v1.table_sessions.service import notify_sessions_closed
 from app.api.v1.sales.schemas import SaleResponse
 from app.api.v1.orders.schemas import (
     TableCreate, TableUpdate, TableResponse, TableQrTokenResponse,
@@ -568,10 +569,14 @@ def release_table(
     user: User = Depends(get_current_user),
     tenant: Tenant = Depends(get_tenant),
 ):
-    table = checkout.release_table(db, table_id, closed_by=user)
+    closed: list = []
+    table = checkout.release_table(db, table_id, closed_by=user, closed_out=closed)
     events.table_status_changed(
         tenant.id, dining_table_id=table.id, table_number=table.number, status=table.status,
     )
+    # spec 089 (A-95): "Liberar mesa" cierra la sesión: el comensal recibe su pantalla de gracias.
+    # Después del commit (que ya ocurrió dentro de `release_table`), nunca antes.
+    notify_sessions_closed(tenant.id, closed, reason="released")
     return table
 
 
