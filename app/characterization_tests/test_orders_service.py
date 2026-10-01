@@ -370,9 +370,12 @@ class TestService(unittest.TestCase):
                 self.assertEqual(order.channel, channel.value)
                 self.assertEqual(order.order_type, order_type.value)
 
-    # -------------------------- customer_name obligatorio (spec 087, FR-005, A-88)
+    # -------------------------- customer_name obligatorio salvo Terminal (spec 087 A-88,
+    # reabierta por spec 091 A-99 solo para channel=POS)
 
-    def test_create_order_dine_in_sin_nombre_cliente_rechaza_422(self):
+    def test_create_order_dine_in_sin_nombre_cliente_en_pos_usa_consumidor_final(self):
+        """spec 091 (A-99): reabre A-88 solo para la Terminal -- un DINE_IN de channel=POS
+        sin nombre ya no se rechaza, se guarda con "Consumidor final"."""
         db = fx.new_session()
         variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
         db.commit()
@@ -382,11 +385,11 @@ class TestService(unittest.TestCase):
             order_type=OrderType.DINE_IN,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
-        with self.assertRaises(HTTPException) as ctx:
-            service.create_order(db, data, uuid4())
-        self.assertEqual(ctx.exception.status_code, 422)
+        order = service.create_order(db, data, uuid4())
+        self.assertEqual(order.customer_name, "Consumidor final")
 
-    def test_create_order_takeaway_sin_nombre_cliente_rechaza_422(self):
+    def test_create_order_takeaway_sin_nombre_cliente_en_pos_usa_consumidor_final(self):
+        """spec 091 (A-99): igual que DINE_IN, para TAKEAWAY de channel=POS."""
         db = fx.new_session()
         variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
         db.commit()
@@ -396,9 +399,27 @@ class TestService(unittest.TestCase):
             order_type=OrderType.TAKEAWAY,
             items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
         )
-        with self.assertRaises(HTTPException) as ctx:
-            service.create_order(db, data, uuid4())
-        self.assertEqual(ctx.exception.status_code, 422)
+        order = service.create_order(db, data, uuid4())
+        self.assertEqual(order.customer_name, "Consumidor final")
+
+    def test_create_order_takeaway_sin_nombre_cliente_en_whatsapp_sigue_rechazando_422(self):
+        """spec 091 (A-99, research.md D6): el valor por defecto solo aplica al canal `POS`
+        (Terminal) -- WHATSAPP/API + TAKEAWAY sin nombre siguen rechazándose exactamente como
+        antes de esta spec (A-88, spec 087 sin cambios para estos canales)."""
+        db = fx.new_session()
+        variant, insumo, option = self._seed_variant_con_receta_y_opciones(db)
+        db.commit()
+
+        for channel in (OrderChannel.WHATSAPP, OrderChannel.API):
+            with self.subTest(channel=channel):
+                data = OrderCreate(
+                    channel=channel,
+                    order_type=OrderType.TAKEAWAY,
+                    items=[OrderItemIn(product_variant_id=variant.id, quantity=1, options=[OptionSelectionIn(option_id=option.id)])],
+                )
+                with self.assertRaises(HTTPException) as ctx:
+                    service.create_order(db, data, uuid4())
+                self.assertEqual(ctx.exception.status_code, 422)
 
     def test_create_order_dine_in_con_participant_sin_nombre_explicito_se_autocompleta(self):
         """Con `participant_id`, `customer_name` se completa desde
