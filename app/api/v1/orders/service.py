@@ -72,6 +72,11 @@ _COMBINACIONES_CANAL_TIPO_ORDEN: dict[OrderChannel, frozenset[OrderType]] = {
     OrderChannel.API: frozenset({OrderType.TAKEAWAY, OrderType.DELIVERY}),
 }
 
+#: Nombre del cliente que recibe un pedido Mesa/Para llevar de la Terminal cuando el cajero no
+#: escribe ninguno (spec 091, A-99) -- distinto y sin relación con el "Consumidor Final" (F
+#: mayúscula) que ya usa `checkout.py` como nombre por defecto de la *factura* (research.md D1).
+DEFAULT_CUSTOMER_NAME = "Consumidor final"
+
 
 def order_has_sale(db: Session, order_id: UUID) -> bool:
     """¿Ya existe una `Sale` para este pedido? (spec 029, D2/D3 de research.md)
@@ -309,11 +314,20 @@ def create_order(
     # trae el nombre autocompletado desde `participant.display_label`/
     # `display_name` en ese punto, así que validar antes rechazaría pedidos
     # que sí traen nombre del comensal.
+    #
+    # spec 091 (A-99): reabre A-88 solo para la Terminal (`channel=POS`) --
+    # un DINE_IN/TAKEAWAY de mostrador/mesero sin nombre ya no se rechaza, se
+    # guarda con `DEFAULT_CUSTOMER_NAME`. Cualquier otro canal que admita estos
+    # tipos (`WHATSAPP`/`API` para TAKEAWAY; `QR_MENU` nunca llega vacío, ver
+    # arriba) sigue exigiendo el nombre exactamente como antes.
     if data.order_type in (OrderType.DINE_IN, OrderType.TAKEAWAY) and not (customer_name or "").strip():
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "El nombre del cliente es obligatorio.",
-        )
+        if data.channel is OrderChannel.POS:
+            customer_name = DEFAULT_CUSTOMER_NAME
+        else:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "El nombre del cliente es obligatorio.",
+            )
 
     if table_id is not None and participant is None:
         get_or_404(db, DiningTable, table_id, "Table not found")
