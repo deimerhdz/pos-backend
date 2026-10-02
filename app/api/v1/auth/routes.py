@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.db import with_db, get_tenant
 from app.core.models import User, Tenant, PasswordResetToken, UserInvitation
+from app.core.reserved_hosts import PLATFORM_HOST
 from app.core.utils import verify_password, create_access_token, generate_passwd_hash
 from app.core.dependencies import RefreshTokenBearer,AccessTokenBearer, get_authenticated_user
 from app.core.dependencies import get_shared_db, _reject_if_session_revoked
@@ -138,21 +139,36 @@ async def login(body: LoginRequest, req: Request):
     host = host_header.split(":", 1)[0] if host_header else None
     logger.info(f"Intentando login para email: {body.email} (host: {host})")
 
+    # spec 091, A-99: el ámbito de la cuenta lo decide el host explícito, nunca
+    # su ausencia. `admin` abre la plataforma (Super Admin, `tenant_id IS NULL`);
+    # el slug de un negocio registrado abre solo ese negocio; un host ausente,
+    # vacío, desconocido o el dominio raíz no abre ningún ámbito (mismo 401 que
+    # unas credenciales inválidas, sin revelar el motivo). Un solo ámbito por petición.
+    is_platform = bool(host) and host.strip().lower() == PLATFORM_HOST
+
     try:
         with with_db(None) as db:
-            # Resolución opcional de tenant por Host. Si no llega el header o el host no
-            # corresponde a ningún tenant (p. ej. login de super admin global), tenant=None.
-            tenant = (
-                db.query(Tenant).filter(Tenant.host == host).one_or_none()
-                if host else None
-            )
-            logger.info(f"Tenant resuelto: {tenant}")
-            logger.info(f"Tenant resuelto: {tenant.name if tenant else 'None'}")
+            tenant = None
+            if is_platform:
+                reason = "platform"
+            elif not host:
+                reason = "no_host"
+            else:
+                # Búsqueda del negocio por igualdad exacta con `Tenant.host` (FR-010).
+                tenant = db.query(Tenant).filter(Tenant.host == host).one_or_none()
+                reason = "tenant" if tenant is not None else "unknown_host"
+            logger.info(f"Login: ámbito resuelto reason={reason} tenant={tenant.name if tenant else None}")
+
+            if reason in ("no_host", "unknown_host"):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
+                )
+
             stmt = select(User).options(joinedload(User.role)).where(User.email == body.email)
             if tenant is not None:
                 stmt = stmt.where(User.tenant_id == tenant.id)   # usuario de tenant
             else:
-                stmt = stmt.where(User.tenant_id.is_(None))      # super admin global
+                stmt = stmt.where(User.tenant_id.is_(None))      # plataforma (Super Admin)
 
             user = db.execute(stmt).scalar_one_or_none()
 
@@ -160,8 +176,8 @@ async def login(body: LoginRequest, req: Request):
             # pendiente cuyas credenciales coinciden, esto crea la cuenta y
             # consume la invitación en el mismo intento — el resto del login
             # sigue exactamente igual que con cualquier usuario existente
-            # (research.md Decisión 7). Sin `x-tenant-host` resuelto (login
-            # de super admin), nunca se busca invitación.
+            # (research.md Decisión 7). En el ámbito de plataforma nunca se
+            # busca invitación.
             if user is None and tenant is not None:
                 user = _consume_invitation_if_valid(db, tenant, body.email, body.password)
 
