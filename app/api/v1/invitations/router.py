@@ -110,6 +110,7 @@ def create_invitation(
     invitation = UserInvitation(
         tenant_id=tenant.id,
         email=email,
+        name=body.name,
         role_id=role.id,
         password_hash=generate_passwd_hash(password),
     )
@@ -139,6 +140,7 @@ def create_invitation(
                     login_url=_build_login_url(tenant),
                     email=email,
                     password=password,
+                    name=body.name,
                 ),
             )
         )
@@ -214,6 +216,7 @@ def resend_invitation(
                     login_url=_build_login_url(tenant),
                     email=invitation.email,
                     password=password,
+                    name=invitation.name,
                 ),
             )
         )

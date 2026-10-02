@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from app.characterization_tests import auth_fixtures as af
@@ -42,10 +43,10 @@ class CreateInvitationTests(unittest.TestCase):
         self.cashier_role = af.make_role(self.db, name="CASHIER")
         self.db.commit()
 
-    def _create(self, email="cajero1@acme.com", role="CASHIER", tenant=None, admin=None):
+    def _create(self, email="cajero1@acme.com", role="CASHIER", tenant=None, admin=None, name="Ana Pérez"):
         with patch("app.api.v1.invitations.router.send_email") as mock_send:
             resp = create_invitation(
-                InvitationCreate(email=email, role=role),
+                InvitationCreate(email=email, role=role, name=name),
                 tenant=tenant or self.tenant,
                 admin=admin or self.admin,
                 db=self.db,
@@ -84,7 +85,7 @@ class CreateInvitationTests(unittest.TestCase):
         with patch("app.api.v1.invitations.router.send_email") as mock_send:
             with self.assertRaises(HTTPException) as ctx:
                 create_invitation(
-                    InvitationCreate(email="dup@acme.com", role="CASHIER"),
+                    InvitationCreate(email="dup@acme.com", role="CASHIER", name="Ana Pérez"),
                     tenant=self.tenant, admin=self.admin, db=self.db,
                 )
         mock_send.assert_not_called()  # SC-006: nunca se envía correo para un duplicado
@@ -116,7 +117,7 @@ class CreateInvitationTests(unittest.TestCase):
         with patch("app.api.v1.invitations.router.send_email") as mock_send:
             with self.assertRaises(HTTPException) as ctx:
                 create_invitation(
-                    InvitationCreate(email="ya-existe@acme.com", role="CASHIER"),
+                    InvitationCreate(email="ya-existe@acme.com", role="CASHIER", name="Ana Pérez"),
                     tenant=self.tenant, admin=self.admin, db=self.db,
                 )
         self.assertEqual(ctx.exception.status_code, 409)
@@ -133,7 +134,7 @@ class CreateInvitationTests(unittest.TestCase):
         with patch("app.api.v1.invitations.router.send_email") as mock_send:
             with self.assertRaises(HTTPException) as ctx:
                 create_invitation(
-                    InvitationCreate(email="baja@acme.com", role="CASHIER"),
+                    InvitationCreate(email="baja@acme.com", role="CASHIER", name="Ana Pérez"),
                     tenant=self.tenant, admin=self.admin, db=self.db,
                 )
         self.assertEqual(ctx.exception.status_code, 409)
@@ -161,7 +162,7 @@ class CreateInvitationTests(unittest.TestCase):
         with patch("app.api.v1.invitations.router.send_email") as mock_send:
             with self.assertRaises(HTTPException) as ctx:
                 create_invitation(
-                    InvitationCreate(email="nuevo@acme.com", role="CASHIER"),
+                    InvitationCreate(email="nuevo@acme.com", role="CASHIER", name="Ana Pérez"),
                     tenant=expired_tenant,
                     admin=admin,
                     db=self.db,
@@ -196,13 +197,79 @@ class CreateInvitationTests(unittest.TestCase):
         ):
             with self.assertRaises(HTTPException) as ctx:
                 create_invitation(
-                    InvitationCreate(email="fallo@acme.com", role="CASHIER"),
+                    InvitationCreate(email="fallo@acme.com", role="CASHIER", name="Ana Pérez"),
                     tenant=self.tenant,
                     admin=self.admin,
                     db=self.db,
                 )
         self.assertEqual(ctx.exception.status_code, 502)
         self.assertEqual(_count(self.db, UserInvitation, UserInvitation.email == "fallo@acme.com"), 0)
+
+    # ---------------------------------------------------------- spec 091 (A-100): nombre completo
+
+    def test_el_nombre_se_persiste_recortado_en_nfc_y_va_al_correo_y_a_la_respuesta(self):
+        with patch("app.api.v1.invitations.router.send_email") as mock_send, patch(
+            "app.api.v1.invitations.router.invitation_email_body", return_value="<p>cuerpo</p>"
+        ) as mock_body:
+            resp = create_invitation(
+                InvitationCreate(email="maria@acme.com", role="CASHIER", name="  Mari\u0301a Pérez  "),
+                tenant=self.tenant, admin=self.admin, db=self.db,
+            )
+        mock_send.assert_called_once()
+        self.assertEqual(mock_body.call_args.kwargs["name"], "María Pérez")
+        self.assertEqual(resp.name, "María Pérez")
+        self.assertEqual(InvitationResponse.model_validate(resp).name, "María Pérez")
+        invitation = self.db.execute(select(UserInvitation)).scalar_one()
+        self.assertEqual(invitation.name, "María Pérez")
+
+    def test_dos_invitaciones_con_el_mismo_nombre_y_correos_distintos_se_aceptan(self):
+        self._create(email="uno@acme.com", name="Ana Pérez")
+        self._create(email="dos@acme.com", name="Ana Pérez")
+        self.assertEqual(_count(self.db, UserInvitation), 2)
+
+    def test_nombre_con_tilde_enie_apostrofe_y_guion_se_guarda_identico(self):
+        self._create(email="jose@acme.com", name="José Ñañez O'Brien-Díaz")
+        invitation = self.db.execute(select(UserInvitation)).scalar_one()
+        self.assertEqual(invitation.name, "José Ñañez O'Brien-Díaz")
+
+    # ---------------------------------------------------------- spec 091 (US4): validación del nombre
+
+    def _assert_nombre_rechazado(self, payload: dict, message: str):
+        """Cuerpo inválido: 422 con `detail[0].loc == ["body","name"]` (vía el
+        schema), nada se crea, no se envía correo y no se consume cupo del plan."""
+        with patch("app.api.v1.invitations.router.send_email") as mock_send:
+            with self.assertRaises(ValidationError) as ctx:
+                InvitationCreate(**payload)
+        errors = ctx.exception.errors()
+        self.assertEqual(errors[0]["loc"], ("name",))
+        self.assertEqual(errors[0]["msg"], f"Value error, {message}")
+        mock_send.assert_not_called()
+        self.assertEqual(_count(self.db, UserInvitation), 0)
+
+    def test_tabla_de_422_del_nombre(self):
+        base = {"email": "nuevo@acme.com", "role": "CASHIER"}
+        required = "El nombre es obligatorio"
+        length = "El nombre debe tener entre 2 y 100 caracteres"
+        fmt = "El nombre solo puede contener letras, espacios, apóstrofes y guiones, y al menos dos letras"
+        cases = [
+            ({}, required),                                  # clave ausente
+            ({"name": ""}, required),
+            ({"name": "   "}, required),
+            ({"name": "A"}, length),
+            ({"name": "a" * 101}, length),
+            ({"name": "<script>alert(1)</script>"}, fmt),
+            ({"name": "Ana3"}, fmt),
+            ({"name": "Ana@"}, fmt),
+            ({"name": "Иван"}, fmt),
+            ({"name": "Ana 😀"}, fmt),
+        ]
+        for extra, message in cases:
+            with self.subTest(extra=extra):
+                self._assert_nombre_rechazado({**base, **extra}, message)
+
+    def test_nombre_con_espacios_en_los_extremos_se_guarda_recortado(self):
+        self._create(email="ana@acme.com", name=" Ana ")
+        self.assertEqual(self.db.execute(select(UserInvitation)).scalar_one().name, "Ana")
 
 
 if __name__ == "__main__":

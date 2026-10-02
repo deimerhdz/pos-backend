@@ -97,6 +97,25 @@ class LoginInvitationConsumptionTests(unittest.TestCase):
         self.db.refresh(self.invitation)
         self.assertEqual(self.invitation.status, "consumed")  # no se reprocesa
 
+    # ---------------------------------------------------------- spec 091 (A-100, FR-024, SC-007)
+
+    def test_la_cuenta_nace_con_el_nombre_de_la_invitacion(self):
+        self.invitation.name = "María Pérez"
+        self.db.commit()
+
+        self._login("invitado@acme.com", "Temporal123!")
+
+        user = self.db.execute(select(User).where(User.email == "invitado@acme.com")).scalar_one()
+        self.assertEqual(user.name, "María Pérez")
+
+    def test_invitacion_anterior_sin_nombre_deja_el_correo_como_nombre(self):
+        self.assertIsNone(self.invitation.name)
+
+        self._login("invitado@acme.com", "Temporal123!")
+
+        user = self.db.execute(select(User).where(User.email == "invitado@acme.com")).scalar_one()
+        self.assertEqual(user.name, "invitado@acme.com")
+
     # ---------------------------------------------------------- must_change_password (spec 001/031, sin tocar)
 
     def test_cuenta_creada_por_invitacion_sigue_el_flujo_existente_de_must_change_password(self):

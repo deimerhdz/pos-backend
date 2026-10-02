@@ -116,7 +116,7 @@ def _consume_invitation_if_valid(db: Session, tenant: Tenant, email: str, passwo
         return None
 
     new_user = User(
-        name=invitation.email,
+        name=invitation.name or invitation.email,
         email=invitation.email,
         password_hash=invitation.password_hash,
         phone=None,
