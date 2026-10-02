@@ -224,6 +224,10 @@ class UserInvitation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     email: Mapped[str] = mapped_column(String(255), nullable=False)
 
+    # spec 091: nombre completo capturado al invitar. Nulo en las invitaciones
+    # anteriores (el correo saluda "Hola:" y la cuenta toma el correo como nombre).
+    name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
     role_id: Mapped[UUID] = mapped_column(ForeignKey("shared.roles.id"), nullable=False)
 
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)

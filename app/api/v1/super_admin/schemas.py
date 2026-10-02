@@ -4,9 +4,10 @@ from enum import Enum
 from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import AliasPath, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasPath, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.api.v1.sales.schemas import PaymentMethodType
+from app.core.reserved_hosts import is_reserved_subdomain
 
 
 class PaymentMethodFieldFormat(str, Enum):
@@ -195,6 +196,18 @@ class TenantCreateWithUser(BaseModel):
     host:str = Field(...,min_length=3)
     name:str = Field(...,min_length=3)
     email:str = Field(...,min_length=5)
+
+    # spec 091, A-101: `admin`, `assets`, `api`, `docs`, `www` y `app` son
+    # subdominios de la plataforma. Se compara recortado y en minúsculas, pero
+    # el valor recibido se conserva sin transformar.
+    @field_validator("host")
+    @classmethod
+    def _host_not_reserved(cls, value: str) -> str:
+        if is_reserved_subdomain(value):
+            raise ValueError(
+                f"«{value.strip().lower()}» es una palabra reservada y no puede usarse como subdominio"
+            )
+        return value
 
     # spec 033, FR-004/FR-017: obligatorios, sin default — la creación de un
     # tenant no se completa sin elegir explícitamente un plan y su ciclo de

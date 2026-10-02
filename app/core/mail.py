@@ -1,3 +1,4 @@
+import html
 import logging
 
 import httpx
@@ -63,9 +64,15 @@ def welcome_email_body(tenant_name: str, login_url: str, email: str, password: s
 </div>"""
 
 
-def invitation_email_body(tenant_name: str, login_url: str, email: str, password: str) -> str:
+def invitation_email_body(
+    tenant_name: str, login_url: str, email: str, password: str, name: str | None = None
+) -> str:
+    # spec 091: saludo por el nombre (escapado); sin nombre —invitación anterior—
+    # un "Hola:" neutro, nunca con el correo.
+    greeting = f"Hola, {html.escape(name, quote=True)}:" if name else "Hola:"
     return f"""\
 <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; color: #1f2937;">
+  <p>{greeting}</p>
   <h2 style="color: #111827;">Te invitaron a unirte a {tenant_name}</h2>
   <p>Un administrador de {tenant_name} te dio acceso al sistema. Estos son tus datos de acceso:</p>
   <table style="border-collapse: collapse; margin: 16px 0;">

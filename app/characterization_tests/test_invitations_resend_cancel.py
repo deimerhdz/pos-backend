@@ -106,6 +106,37 @@ class ResendCancelInvitationTests(unittest.TestCase):
         resp = self._login("invitado@acme.com", "Original123!")
         self.assertEqual(resp.status_code, 200)
 
+    # ---------------------------------------------------------- spec 091 (A-100): el nombre al reenviar
+
+    def _resend_capturing_body(self):
+        with patch("app.api.v1.invitations.router.send_email"), patch(
+            "app.api.v1.invitations.router.create_message"
+        ) as mock_message:
+            resp = resend_invitation(
+                self.invitation.id, tenant=self.tenant, admin=self.admin, db=self.db,
+            )
+        return resp, mock_message.call_args.args[2]
+
+    def test_reenviar_conserva_el_nombre_y_el_correo_saluda_por_el(self):
+        self.invitation.name = "María Pérez"
+        self.db.commit()
+
+        resp, body = self._resend_capturing_body()
+
+        self.assertIn("Hola, María Pérez:", body)
+        self.assertEqual(resp.name, "María Pérez")
+        self.db.refresh(self.invitation)
+        self.assertEqual(self.invitation.name, "María Pérez")
+
+    def test_reenviar_una_invitacion_anterior_sin_nombre_saluda_hola(self):
+        self.assertIsNone(self.invitation.name)
+
+        resp, body = self._resend_capturing_body()
+
+        self.assertIn("Hola:", body)
+        self.assertNotIn("Hola, ", body)
+        self.assertIsNone(resp.name)
+
     # ---------------------------------------------------------- Acceptance Scenario 3 de US4
 
     def test_cancelar_invalida_la_contrasena_y_deja_de_estar_pendiente(self):
