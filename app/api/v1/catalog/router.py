@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.db import get_db, get_tenant
 from app.core.crud import get_or_404, ensure_unique
-from app.core.dependencies import get_current_user, require_tenant_admin
+from app.core.dependencies import get_current_user, require_tenant_admin, forbid_cashier
 from app.core.models import User, Tenant
 from app.core.plan_limits import ensure_module_access
 from app.models.product import Product
@@ -171,11 +171,12 @@ def delete_variant(
     "/variants/{variant_id}/recipe",
     response_model=list[RecipeItemResponse],
     summary="Ver la receta de una variante",
+    responses={403: {"description": "El Cajero no puede consultar la receta (spec 093)."}},
 )
 def get_recipe(
     variant_id: UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(forbid_cashier),
 ):
     get_or_404(db, ProductVariant, variant_id, "Variant not found")
     return db.execute(

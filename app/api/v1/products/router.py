@@ -4,7 +4,11 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db, get_tenant
-from app.core.dependencies import get_current_user, require_tenant_admin
+from app.core.dependencies import (
+    get_current_user,
+    require_tenant_admin,
+    require_tenant_admin_or_cashier,
+)
 from app.core.pagination import Page, paginate
 from app.core.models import Tenant, User
 from app.core.plan_limits import enforce_plan_limit
@@ -12,6 +16,7 @@ from app.api.v1.products.service import ProductService
 from app.api.v1.products.schemas import (
     ProductCreate,
     ProductUpdate,
+    ProductAvailabilityUpdate,
     ProductResponse,
     ProductListResponse,
     ProductDetailResponse,
@@ -27,18 +32,21 @@ service = ProductService()
     "",
     response_model=Page[ProductListResponse],
     summary="Listar productos",
-    description="Devuelve los productos de forma paginada (más recientes primero). Filtra por estado activo.",
+    description="Devuelve los productos de forma paginada (más recientes primero). Filtra por estado activo y/o disponibilidad.",
     responses={401: {"description": "No autenticado o token inválido."}},
 )
 def list_products(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     active: bool | None = Query(None, description="Filtra por estado activo/inactivo."),
+    available: bool | None = Query(
+        None, description="Filtra por disponibilidad (spec 093: Disponibles/Agotados)."
+    ),
     search: str | None = Query(None, description="Búsqueda por nombre."),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    return paginate(db, service.list_query(active, search), page, size)
+    return paginate(db, service.list_query(active, search, available), page, size)
 
 
 @router.get(
@@ -55,7 +63,31 @@ def get_product(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    return service.get_or_404(db, id)
+    return service.to_detail_response(service.get_or_404(db, id))
+
+
+@router.patch(
+    "/{id}/availability",
+    response_model=ProductResponse,
+    summary="Marcar o desmarcar un producto como agotado",
+    description=(
+        "Único endpoint por el que Cajero y Administrador tocan `available` (spec 093). "
+        "A diferencia de `PATCH /products/{id}`, no acepta ningún otro campo."
+    ),
+    responses={
+        401: {"description": "No autenticado o token inválido."},
+        403: {"description": "El usuario no es Administrador ni Cajero."},
+        404: {"description": "El producto no existe."},
+        409: {"description": "El producto está inactivo: no se puede cambiar su disponibilidad."},
+    },
+)
+def set_product_availability(
+    id: UUID,
+    body: ProductAvailabilityUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_tenant_admin_or_cashier),
+):
+    return service.set_availability(db, id, body.available, user)
 
 
 @router.post(

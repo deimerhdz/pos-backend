@@ -26,7 +26,11 @@ from app.models.product_variant import ProductVariant
 from app.models.customer_order import CustomerOrder
 from app.models.order_item import OrderItem, OrderItemOption
 from app.api.v1.orders.consumption import deduct_order_items, deduct_order_items_naming_product
-from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
+from app.api.v1.catalog.line_pricing import (
+    compute_line_price,
+    ensure_product_available,
+    load_valid_options,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +219,7 @@ def add_item_to_order(db: Session, order_id: UUID, data, user: User) -> Customer
     variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
     if not variant.active:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
+    ensure_product_available(variant)
     options = load_valid_options(db, data.options, variant=variant)
     lines = [(variant.id, data.quantity, options, compute_line_price(variant, options), None)]
 

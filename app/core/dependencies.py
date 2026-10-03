@@ -343,3 +343,30 @@ def require_tenant_admin(user: User = Depends(get_current_user)) -> User:
             detail="Tenant admin access required",
         )
     return user
+
+
+def require_tenant_admin_or_cashier(user: User = Depends(get_current_user)) -> User:
+    """Exige que el usuario autenticado tenga rol ADMIN o CASHIER (spec 093,
+    research.md D1/D2): el interruptor "Agotado" del catálogo es la única acción de
+    escritura sobre `Product` que un Cajero puede alcanzar -- todo lo demás
+    (crear/editar/desactivar producto) sigue exclusivo de `require_tenant_admin`."""
+    if not user.role or user.role.name not in {"ADMIN", "CASHIER"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso de administrador o cajero requerido",
+        )
+    return user
+
+
+def forbid_cashier(user: User = Depends(get_current_user)) -> User:
+    """Bloquea solo a CASHIER (spec 093, FR-025/escenario 12, research.md D8): la
+    receta (BOM) de una variante expone `inventory_item_id`, dato de inventario sin
+    ningún propósito en la toma de pedidos. No toca a ningún otro rol -- en
+    particular, no restringe `/variants/{id}/option-groups`, que el Cajero ya usa
+    hoy desde la Terminal de mesas para ofrecer opciones/adicionales."""
+    if user.role and user.role.name == "CASHIER":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para consultar la receta de este producto",
+        )
+    return user

@@ -106,6 +106,10 @@ class MenuProductResponse(BaseModel):
     # False si ninguna presentación se puede pedir (todas tienen algún grupo
     # obligatorio sin opciones con stock).
     available: bool = True
+    # spec 093 (FR-019/FR-020): marcado manual de "Agotado" (Cajero/Admin, Carta del
+    # menú) -- independiente de `available` (arriba). `True` = no se puede agregar al
+    # pedido, aunque siga visible en el menú.
+    sold_out: bool = False
 
 
 class MenuCategoryResponse(BaseModel):

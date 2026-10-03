@@ -13,6 +13,8 @@ from app.catalog_engine import (
     _exige_maximo as _exige_maximo,
     check_availability as check_availability,
     compute_line_price as compute_line_price,
+    ensure_product_available as ensure_product_available,
+    ensure_products_available as ensure_products_available,
     grupos_que_descuentan as grupos_que_descuentan,
     load_valid_options as load_valid_options,
     validate_option_selection as validate_option_selection,

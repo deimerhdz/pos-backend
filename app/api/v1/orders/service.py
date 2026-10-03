@@ -43,7 +43,11 @@ from app.models.order_payment_attempt import OrderPaymentAttempt
 from app.models.sale import Sale
 from app.models.table_session import TableSession
 from app.core.models import User
-from app.api.v1.catalog.line_pricing import compute_line_price, load_valid_options
+from app.api.v1.catalog.line_pricing import (
+    compute_line_price,
+    ensure_products_available,
+    load_valid_options,
+)
 from app.api.v1.cash.service import resolve_dine_in_table_order
 from app.api.v1.orders.consolidation import get_or_create_table_session_id
 from app.api.v1.orders.consumption import deduct_order_items_naming_product
@@ -393,12 +397,20 @@ def create_order(
         db.add(order)
         db.flush()
 
-        entries: list[tuple[OrderItem, list[ChosenOption]]] = []
-        for line in data.items:
-            variant = get_or_404(db, ProductVariant, line.product_variant_id, "Variant not found")
+        variants_by_line = [
+            get_or_404(db, ProductVariant, line.product_variant_id, "Variant not found")
+            for line in data.items
+        ]
+        for variant in variants_by_line:
             if not variant.active:
                 raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
+        # spec 093 (FR-021/FR-022): barrido de TODOS los ítems antes de crear nada --
+        # si uno o más productos están agotados, se nombran todos de una vez en vez
+        # de obligar a reintentar uno por uno.
+        ensure_products_available(variants_by_line)
 
+        entries: list[tuple[OrderItem, list[ChosenOption]]] = []
+        for line, variant in zip(data.items, variants_by_line):
             # Deduplica, exige que estén activas y valida la selección contra los
             # grupos del producto. Antes este bucle cargaba las opciones a mano y se
             # saltaba las tres cosas.
