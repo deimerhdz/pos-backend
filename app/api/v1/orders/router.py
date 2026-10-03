@@ -62,6 +62,13 @@ def _load_order(db: Session, order_id: UUID) -> CustomerOrder:
         # spec 076, Historia 4
         names = service.staff_user_names(db, [order.user_id])
         order.staff_user_name = names.get(order.user_id)
+    # spec 094 (FR-024b, research.md D3): el desglose se arma **solo aquí**, en
+    # el detalle. `_decorate_orders`/`list_orders` no lo tocan a propósito:
+    # calcularlo por fila sobre hasta 100 pedidos por página sería justo el N+1
+    # que la guardia de `test_orders_pagination` vigila, y ninguna historia de
+    # esta spec lo pide para el listado. Allí `billing` viaja `null`, que la
+    # pantalla trata como "no pintar el resumen" — nunca como cero (D15).
+    order.billing = service.build_billing_summary(db, order)
     return order
 
 
