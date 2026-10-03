@@ -51,7 +51,13 @@ from app.api.v1.catalog.line_pricing import (
 from app.api.v1.cash.service import resolve_dine_in_table_order
 from app.api.v1.orders.consolidation import get_or_create_table_session_id
 from app.api.v1.orders.consumption import deduct_order_items_naming_product
-from app.api.v1.orders.schemas import OrderChannel, OrderCreate, OrderType
+from app.api.v1.orders.schemas import (
+    AppliedPromotionOut,
+    OrderBillingSummary,
+    OrderChannel,
+    OrderCreate,
+    OrderType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +100,201 @@ def order_has_sale(db: Session, order_id: UUID) -> bool:
     return db.execute(
         select(Sale.id).where(Sale.customer_order_id == order_id).limit(1)
     ).scalar() is not None
+
+
+# ------------------------------------------- Desglose de facturación (spec 094)
+
+#: Valor de `estado_cocina` que excluye una línea de toda suma (FR-019). Es el
+#: mismo filtro que `checkout.order_sale_lines` aplica al facturar: por eso la
+#: suma de lo visible coincide con el subtotal de la factura.
+_ESTADO_ANULADO = "anulado"
+
+
+def _venta_propia(db: Session, order_id: UUID) -> Sale | None:
+    """La `Sale` cuyo `customer_order_id` es este pedido, o `None`.
+
+    Mismo patrón de subconsulta con `.limit(1)` que `order_has_sale`, pero trae
+    la fila en vez de un booleano: el caso `factura_propia` necesita sus cuatro
+    importes (research.md D4), y preguntar primero por la existencia con
+    `order_has_sale` obligaría a una SEGUNDA consulta por la misma fila. Así el
+    detalle añade **dos consultas constantes como máximo** (plan.md →
+    Performance Goals), ninguna dependiente del número de ítems.
+
+    La ponen los cuatro caminos de cobro **por pedido** (mostrador,
+    `checkout-and-send`, aprobación de pago QR, confirmación de efectivo,
+    `checkout.py:504,712,1191,1371`) y el cierre unificado de una mesa con un
+    solo pedido (`table_sessions/service.py:734`)."""
+    return db.execute(
+        select(Sale).where(Sale.customer_order_id == order_id).limit(1)
+    ).scalar_one_or_none()
+
+
+def _sesion_tiene_venta(db: Session, table_session_id: UUID) -> bool:
+    """¿La sesión de mesa de este pedido tiene alguna venta emitida?
+
+    Es la señal de `factura_agrupada`: el cierre unificado de VARIOS pedidos
+    deja `customer_order_id` en `None` (`table_sessions/service.py:734`) y el
+    cierre dividido crea una venta por comensal, ninguna con pedido
+    (`:832-847`). En los dos casos el total del pedido no es el total de
+    ninguna factura."""
+    return db.execute(
+        select(Sale.id).where(Sale.table_session_id == table_session_id).limit(1)
+    ).scalar() is not None
+
+
+def _monto(valor) -> Decimal:
+    """Importe como `Decimal`, con `NULL` leído como `0`.
+
+    `sales.delivery_fee` y `customer_orders.delivery_fee` son nulables: el
+    contrato publica `"0.00"` y la UI no pinta la fila (RN-004). Nunca se pinta
+    un "$ 0" inventado."""
+    return Decimal(valor) if valor is not None else Decimal("0")
+
+
+def _promociones(snapshot) -> list[dict]:
+    """Las entradas utilizables del JSONB `applied_promotions`.
+
+    Lectura tolerante: la columna nace `'[]'` y las filas históricas pueden
+    traer claves ausentes. Se descarta lo que no sea un diccionario en vez de
+    reventar al serializar un pedido viejo."""
+    if not snapshot:
+        return []
+    return [e for e in snapshot if isinstance(e, dict)]
+
+
+def _etiqueta_del_descuento(promociones: list[dict]) -> str | None:
+    """El `name` de la única promoción que explica el descuento, o `None`
+    (FR-009, FR-010, research.md D6).
+
+    Se agrupa por `promotion_id` **antes** de contar, porque el snapshot guarda
+    una entrada por REGLA y no por promoción (`promotions/service.py:126-131`):
+    una sola promoción con dos reglas deja dos entradas, y contar entradas
+    pintaría "Descuento" donde FR-009 exige el nombre. Las entradas que no
+    descontaron nada (`amount <= 0`) se ignoran: no convierten el caso en "dos
+    promociones". Se agrupa por `name` cuando `promotion_id` falta, por lectura
+    tolerante del JSONB histórico.
+
+    Con dos o más promociones distintas la etiqueta es `None`: repartir el
+    agregado entre ellas para pintar una fila por cada una sería recalcular, y
+    FR-010 lo prohíbe."""
+    por_promocion: dict = {}
+    for entrada in promociones:
+        if _monto(entrada.get("amount")) <= 0:
+            continue
+        nombre = entrada.get("name")
+        clave = entrada.get("promotion_id") or nombre
+        por_promocion.setdefault(clave, nombre)
+    if len(por_promocion) != 1:
+        return None
+    return next(iter(por_promocion.values()))
+
+
+def build_billing_summary(db: Session, order: CustomerOrder) -> OrderBillingSummary:
+    """Desglose económico del pedido, ya resuelto (spec 094, FR-024b).
+
+    Resuelve en un solo sitio las tres preguntas que la pantalla no debe
+    responder: de dónde salen los importes (factura 1:1 o pedido), cuánto vale
+    cada fila, y cuál de los tres avisos corresponde. La pantalla pinta lo que
+    recibe — no suma, no resta y no bifurca (RN-001).
+
+    **El orden de evaluación del estado es el de la tabla de research.md D2 y no
+    es intercambiable**:
+
+    1. existe una `Sale` con `customer_order_id = order.id` ⇒ `factura_propia`
+       (FR-024: leer de la factura es lo que hace que el total sea idéntico al
+       del módulo de Ventas *por construcción*);
+    2. si no, el pedido **no está cancelado**, tiene `table_session_id` y existe
+       alguna `Sale` con ese mismo `table_session_id` ⇒ `factura_agrupada`
+       (FR-024a: se muestra el desglose propio del pedido, no el de esa
+       factura);
+    3. en cualquier otro caso ⇒ `sin_factura` (FR-023).
+
+    La condición del cancelado de la regla 2 es la garantía G4b: el cierre de
+    sesión solo cobra pedidos con `status NOT IN ('cancelada','pagada')`
+    (`table_sessions/service.py:180`), así que un pedido cancelado antes del
+    cierre se queda en la sesión con su `table_session_id` intacto y sin
+    haberse cobrado nunca. Sin la exclusión, la pantalla le mostraría el
+    literal de FR-024a —"Este pedido **se cobró** junto con otros…"—
+    afirmando un cobro inexistente, que es el tipo de promesa que RN-005
+    prohíbe. **No se aplica a la regla 1**: un pedido cancelado con venta
+    propia es posible en datos históricos y ahí la factura sí cubre ese
+    pedido, así que FR-024 sigue mandando.
+
+    Ni `tax` ni `tip` se suman dentro de ningún otro importe (research.md D5):
+    están fuera de alcance y la compuerta de datos midió `0` en todos los
+    esquemas antes de implementar esto. Con `tax = tip = 0` la fórmula de
+    `build_sale` colapsa exactamente en `Subtotal − Descuento + Envío = Total`,
+    que es FR-008.
+    """
+    items = list(order.items or [])
+    cobrables = [it for it in items if it.estado_cocina != _ESTADO_ANULADO]
+    #: `line_total` es la propiedad de `models/order_item.py:87-91`
+    #: (`unit_price × quantity + addons_total`), el auxiliar único — **no** un
+    #: cálculo nuevo. `unit_price × quantity` a secas subcobraría los
+    #: adicionales por línea del Menú QR (FR-003).
+    suma_de_lineas = sum((it.line_total for it in cobrables), Decimal("0"))
+
+    venta = _venta_propia(db, order.id)
+    if venta is not None:
+        state, source = "factura_propia", "factura"
+        subtotal = _monto(venta.subtotal)
+        discount = _monto(venta.discount)
+        delivery_fee = _monto(venta.delivery_fee)
+        total = _monto(venta.total)
+        promociones = _promociones(venta.applied_promotions)
+    elif (
+        order.status != "cancelada"
+        and order.table_session_id is not None
+        and _sesion_tiene_venta(db, order.table_session_id)
+    ):
+        state, source = "factura_agrupada", "pedido"
+        subtotal = suma_de_lineas
+        discount = _monto(order.discount)
+        delivery_fee = _monto(order.delivery_fee)
+        total = subtotal - discount + delivery_fee
+        promociones = _promociones(order.applied_promotions)
+    else:
+        state, source = "sin_factura", "pedido"
+        subtotal = suma_de_lineas
+        # FR-023: el descuento se calcula al cobrar, así que un pedido sin cobrar
+        # no tiene descuento que mostrar — ni el que traiga en su columna.
+        discount = Decimal("0")
+        delivery_fee = _monto(order.delivery_fee)
+        total = subtotal + delivery_fee
+        promociones = []
+
+    return OrderBillingSummary(
+        state=state,
+        source=source,
+        subtotal=subtotal,
+        discount=discount,
+        discount_label=_etiqueta_del_descuento(promociones),
+        delivery_fee=delivery_fee,
+        # FR-008: el total nunca es negativo. Un pedido histórico con un
+        # descuento mayor que la suma de sus líneas no debería existir, pero si
+        # existe la pantalla no muestra un total en rojo.
+        total=max(total, Decimal("0")),
+        promotions=[AppliedPromotionOut(**_entrada_publicable(e)) for e in promociones],
+        # Condición literal de FR-018 (research.md D8): hay al menos un ítem no
+        # anulado y la suma de sus importes es `0`. Las tres precisiones que
+        # FR-018 exige por separado salen gratis de esta definición — no se
+        # dispara sin líneas, ni con todas anuladas, ni por ausencia de
+        # descuento.
+        sin_detalle_de_precios=bool(cobrables) and suma_de_lineas == 0,
+    )
+
+
+def _entrada_publicable(entrada: dict) -> dict:
+    """Solo las tres claves que el contrato publica.
+
+    `rule_id` existe en el JSONB y **no se publica**: no aporta nada a esta
+    pantalla y expone un detalle interno del motor de promociones
+    (data-model.md §2)."""
+    return {
+        "promotion_id": entrada.get("promotion_id"),
+        "name": entrada.get("name"),
+        "amount": _monto(entrada.get("amount")),
+    }
 
 
 def paid_order_ids(db: Session, order_ids: list[UUID]) -> set[UUID]:
