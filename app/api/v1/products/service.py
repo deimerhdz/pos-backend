@@ -14,9 +14,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
+from app.core.audit import record_audit
 from app.core.crud import get_or_404
-from app.core.models import Tenant
+from app.core.models import Tenant, User
 from app.core.plan_limits import ensure_module_access
+from app.core.timezone import utc_now
 from app.core.asset_refs import (
     ImageDecision,
     delete_if_unreferenced,
@@ -33,11 +35,12 @@ from app.api.v1.catalog.service import (
     _save_variant_entry,
     _assign_display_orders,
 )
-from app.api.v1.catalog.schemas import VariantSaveIn
+from app.api.v1.catalog.schemas import VariantSaveIn, VariantResponse
 from app.api.v1.products.schemas import (
     ProductCreate,
     ProductUpdate,
     ProductResponse,
+    ProductDetailResponse,
     ProductSaveResponse,
     VariantSaveOut,
     RecipeItemResponse,
@@ -52,16 +55,69 @@ class ProductService:
         if category_id is not None:
             get_or_404(db, Category, category_id, "Category not found")
 
-    def list_query(self, active: bool | None = None, search: str | None = None) -> Select:
+    def list_query(
+        self,
+        active: bool | None = None,
+        search: str | None = None,
+        available: bool | None = None,
+    ) -> Select:
         stmt = select(Product).order_by(Product.created_at.desc())
         if active is not None:
             stmt = stmt.where(Product.active == active)
+        if available is not None:
+            # spec 093 (FR-006): filtro "Disponibles"/"Agotados" de la Carta del menú.
+            stmt = stmt.where(Product.available == available)
         if search:
             stmt = stmt.where(Product.name.ilike(f"%{search.strip()}%"))
         return stmt
 
     def get_or_404(self, db: Session, id: UUID) -> Product:
         return get_or_404(db, Product, id, "Product not found")
+
+    def to_detail_response(self, product: Product) -> ProductDetailResponse:
+        """Spec 093 (escenario 9, research.md D9): agrega las presentaciones activas
+        con su precio al detalle de producto, en el shape `VariantResponse` ya
+        existente -- sin receta ni grupos de opciones (FR-018). No se puede confiar en
+        el mapeo automático de `from_attributes` porque incluiría también las
+        presentaciones inactivas de `product.variants`."""
+        base = ProductResponse.model_validate(product)
+        return ProductDetailResponse(
+            **base.model_dump(),
+            variants=[
+                VariantResponse.model_validate(v) for v in product.variants if v.active
+            ],
+        )
+
+    def set_availability(
+        self, db: Session, id: UUID, available: bool, user: User
+    ) -> Product:
+        """Spec 093 (FR-009/FR-011/FR-013/FR-016, research.md D3/D4/D5/D10): el único
+        camino por el que Cajero (y, desde esta spec, también Admin) toca `available`.
+        A diferencia de `update_product`, no acepta ningún otro campo y bloquea el
+        cambio sobre un producto inactivo. Un solo `UPDATE` sin bloqueo: dos llamadas
+        casi simultáneas dejan como resultado final la que el servidor procesa al
+        final, sin estado intermedio inconsistente (D10)."""
+        product = self.get_or_404(db, id)
+        if not product.active:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "No se puede cambiar la disponibilidad de un producto inactivo"},
+            )
+        previous = product.available
+        product.available = available
+        product.available_changed_at = utc_now().replace(tzinfo=None)
+        product.available_changed_by_name = user.name
+        record_audit(
+            db,
+            action="availability_changed",
+            entity="product",
+            entity_id=product.id,
+            user=user,
+            payload={"available": available, "previous": previous},
+        )
+        db.commit()
+        db.refresh(product)
+        return product
 
     def create_product(self, db: Session, tenant: Tenant, data: ProductCreate) -> Product:
         self._validate_fks(db, data.category_id)

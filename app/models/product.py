@@ -1,8 +1,9 @@
 from app.core.models import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import mapped_column, Mapped, relationship
-from sqlalchemy import String, Boolean, ForeignKey, CheckConstraint, UniqueConstraint
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, CheckConstraint, UniqueConstraint
 from typing import TYPE_CHECKING, Optional, List
+from datetime import datetime
 
 if TYPE_CHECKING:
     from .category import Category
@@ -45,6 +46,20 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # que pide el formulario nuevo vive solo en ProductCreate (spec 027).
     tracks_inventory: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
+    )
+
+    # Trazabilidad del interruptor "Agotado" (spec 093, FR-013): quién marcó/desmarcó
+    # `available` por última vez y cuándo. Denormalizado sobre la propia fila para
+    # pintar "desde hace X" en el listado sin una consulta adicional por producto; el
+    # historial completo (incluidos cambios previos) vive aparte en `AuditLog`
+    # (`action="availability_changed"`, ver app/core/audit.py). `NULL` en ambos
+    # significa que nadie ha tocado el interruptor dedicado todavía (incluye todo
+    # producto creado antes de esta spec) -- no se infiere retroactivamente.
+    available_changed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
+    available_changed_by_name: Mapped[Optional[str]] = mapped_column(
+        String(150), nullable=True
     )
 
     # Los grupos de opciones cuelgan de la VARIANTE (`variant_option_groups`), no de
