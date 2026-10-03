@@ -55,7 +55,7 @@ __all__ = [
     "make_cart", "make_cart_item",
     "make_promotion", "add_rule_to_promotion",
     "make_cash_register", "make_cash_shift", "make_payment_method",
-    "make_payment_attempt",
+    "make_sale", "make_payment_attempt",
     "make_tenant_double", "make_user_double",
     "force_flush_integrity_error",
 ]
@@ -436,6 +436,49 @@ def make_payment_method(db: Session, **kw) -> PaymentMethod:
     kw.setdefault("type", "cash" if kw["is_cash"] else "other")
     kw.setdefault("active", True)
     obj = PaymentMethod(**kw)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def make_sale(
+    db: Session,
+    *,
+    order: CustomerOrder | None = None,
+    table_session: TableSession | None = None,
+    **kw,
+) -> Sale:
+    """Venta emitida, sembrada directamente (spec 094, T009).
+
+    Hasta esta spec los tests de `orders` construían `Sale(...)` a mano en cada
+    caso (`test_orders_pagination._seed_order`). El desglose de facturación
+    necesita sembrar los **tres** escenarios de D2 —venta propia del pedido,
+    venta de la sesión sin pedido, y ninguna venta— así que el constructor se
+    centraliza aquí en vez de repetirse.
+
+    `order` y `table_session` son los dos ganchos que distinguen esos
+    escenarios, y solo se asignan **cuando se pasan**: una venta sin
+    `customer_order_id` es exactamente lo que produce el cierre unificado de
+    varios pedidos (`table_sessions/service.py:734`) y el cierre dividido
+    (`:832-847`), y es el caso `factura_agrupada`.
+
+    `cash_shift_id` se crea con `make_cash_shift` si no se pasa: la columna es
+    `NOT NULL` y ningún test de facturación se interesa por el turno."""
+    kw.setdefault("id", _uid())
+    if order is not None:
+        kw.setdefault("customer_order_id", order.id)
+    if table_session is not None:
+        kw.setdefault("table_session_id", table_session.id)
+    if "cash_shift_id" not in kw:
+        kw["cash_shift_id"] = make_cash_shift(db).id
+    kw.setdefault("user_id", _uid())
+    kw.setdefault("status", "paid")
+    kw.setdefault("subtotal", Decimal("0"))
+    kw.setdefault("discount", Decimal("0"))
+    kw.setdefault("delivery_fee", Decimal("0"))
+    kw.setdefault("total", Decimal("0"))
+    kw.setdefault("applied_promotions", [])
+    obj = Sale(**kw)
     db.add(obj)
     db.flush()
     return obj

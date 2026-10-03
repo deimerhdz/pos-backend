@@ -208,6 +208,52 @@ class CurrentPaymentAttemptSummary(BaseModel):
     receipt_file_url: AssetUrl = None
 
 
+class AppliedPromotionOut(BaseModel):
+    """Una entrada del snapshot `applied_promotions` (spec 094, FR-011).
+
+    Es **una entrada por regla**, no por promoción: `applied_to_dicts`
+    (`promotions/service.py:126-131,314-323`) produce una por cada regla que
+    descontó, y `amount` es el descuento agregado de ESA regla. Por eso la
+    etiqueta de la fila de descuento agrupa por `promotion_id` antes de decidir
+    (research.md D6).
+
+    `promotion_id` y `name` son nulables por lectura tolerante del JSONB
+    histórico. `rule_id` existe en el JSONB y **no se publica**: no aporta nada
+    a esta pantalla y expone un detalle interno del motor de promociones
+    (data-model.md §2)."""
+    promotion_id: UUID | None = None
+    name: str | None = None
+    amount: Decimal = Decimal("0")
+
+
+class OrderBillingSummary(BaseModel):
+    """Desglose económico del pedido, ya resuelto por el servidor (spec 094,
+    FR-024b).
+
+    Es un **modelo de lectura**: no se persiste, no se cachea y no tiene
+    identidad. La pantalla pinta lo que recibe — no elige entre factura y
+    pedido, no suma y no resta (RN-001).
+
+    `state` dice cuál de los tres casos de facturación es y `source` de dónde
+    salieron los importes: `"factura"` **solo** con `state = "factura_propia"`,
+    donde FR-024 manda leer de la `Sale` para que la igualdad con el módulo de
+    Ventas se cumpla por construcción."""
+    state: Literal["sin_factura", "factura_propia", "factura_agrupada"]
+    source: Literal["pedido", "factura"]
+    subtotal: Decimal
+    discount: Decimal
+    #: Nombre de la única promoción que explica el descuento, o `None` cuando la
+    #: UI debe usar la etiqueta "Descuento" (FR-009, FR-010, research.md D6).
+    discount_label: str | None = None
+    delivery_fee: Decimal
+    total: Decimal
+    promotions: list[AppliedPromotionOut] = Field(default_factory=list)
+    #: Condición literal de FR-018 (research.md D8): hay ≥ 1 ítem no anulado y
+    #: la suma de sus `line_total` es `0`. Se calcula en el servidor para que la
+    #: condición del aviso sea verificable en el contrato, no en la plantilla.
+    sin_detalle_de_precios: bool = False
+
+
 class OrderResponse(BaseModel):
     id: UUID
     channel: str
@@ -246,6 +292,22 @@ class OrderResponse(BaseModel):
     # lo asigna antes de serializar (`orders.service.staff_user_names`), mismo
     # patrón que `paid`.
     staff_user_name: str | None = None
+    # spec 094 (FR-011): los dos campos CRUDOS del pedido — el descuento
+    # agregado que el cobro congeló y la lista de promociones aplicadas con su
+    # nombre y monto. Son el dato *del pedido*, que no siempre coincide con el
+    # que se muestra (cuando manda la factura, research.md D4): por eso FR-011
+    # se cumple publicándolos aparte y no reutilizando `billing`. Cero consultas
+    # extra: son columnas ya cargadas en el mismo SELECT. La pantalla del
+    # Detalle de Orden **no los consume** (D16) — su única fuente es `billing`.
+    discount: Decimal = Decimal("0")
+    applied_promotions: list[AppliedPromotionOut] = Field(default_factory=list)
+    # spec 094 (FR-024b): desglose ya resuelto. **Solo lo rellena el detalle**
+    # (`GET /orders/{id}`, vía `_load_order`); en el listado viaja `null` a
+    # propósito, para no añadir una consulta por fila sobre hasta 100 pedidos
+    # por página (research.md D3, guardia de N+1 en `test_orders_pagination`).
+    # Un `null` NO significa "cero": la pantalla trata la ausencia como "no
+    # pintar el resumen" (D15).
+    billing: OrderBillingSummary | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

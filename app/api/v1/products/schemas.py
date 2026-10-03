@@ -73,6 +73,14 @@ class ProductUpdate(BaseModel):
     )
 
 
+class ProductAvailabilityUpdate(BaseModel):
+    """Body de `PATCH /products/{id}/availability` (spec 093, research.md D3): el único
+    campo que ese endpoint angosto acepta, para que Cajero y Admin puedan tocar
+    `available` sin alcanzar el resto de `ProductUpdate`."""
+
+    available: bool
+
+
 class ProductResponse(BaseModel):
     id: UUID
     category_id: UUID
@@ -84,6 +92,11 @@ class ProductResponse(BaseModel):
     image_url: AssetUrl = None
     active: bool
     available: bool
+    # spec 093 (FR-013, data-model.md): quién marcó/desmarcó `available` por última
+    # vez y cuándo. `None` = nunca se tocó el interruptor dedicado (incluye todo
+    # producto creado antes de esta spec).
+    available_changed_at: datetime | None = None
+    available_changed_by_name: str | None = None
     tracks_inventory: bool
     created_at: datetime
     updated_at: datetime | None = None
@@ -96,7 +109,12 @@ class ProductListResponse(ProductResponse):
 
 
 class ProductDetailResponse(ProductResponse):
-    pass
+    """Spec 093 (escenario 9, research.md D9): a diferencia de `ProductListResponse`,
+    incluye las presentaciones activas con su precio -- en el shape ya existente
+    `VariantResponse` (sin receta ni grupos de opciones, a propósito: FR-018 exige que
+    ninguna pantalla de la carta exponga costos/receta/inventario)."""
+
+    variants: list[VariantResponse] = Field(default_factory=list)
 
 
 class VariantSaveOut(VariantResponse):

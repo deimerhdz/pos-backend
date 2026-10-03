@@ -266,3 +266,36 @@ def check_availability(
                     "contexto": extra_context,
                 },
             )
+
+
+def ensure_product_available(variant: ProductVariant) -> None:
+    """Spec 093 (FR-020, research.md D7): rechaza agregar/editar un ítem de un solo
+    producto marcado "Agotado" (`Product.available=False`, independiente de
+    `active`). Mismo shape que ya usa `sold_out_detail()` para el agotado por
+    inventario (`app/catalog_engine/consumption.py`) -- un único producto nombrado,
+    no una lista (ver `ensure_products_available` para el caso de varios a la vez)."""
+    if not variant.product.available:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "error": f"«{variant.product.name}» está agotado y no se puede agregar al pedido",
+                "producto": variant.product.name,
+            },
+        )
+
+
+def ensure_products_available(variants: Sequence[ProductVariant]) -> None:
+    """Spec 093 (FR-021/FR-022, research.md D7): barrido de **todos** los productos
+    (uno por variante) antes de confirmar un carrito/pedido con varios ítems a la
+    vez -- a diferencia de `ensure_product_available`, nombra todos los agotados
+    encontrados en un solo 409 en vez de rechazar por el primero y obligar a
+    reintentar uno por uno."""
+    agotados = sorted({v.product.name for v in variants if not v.product.available})
+    if agotados:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "error": f"Los siguientes productos están agotados: {', '.join(agotados)}",
+                "productos_agotados": agotados,
+            },
+        )

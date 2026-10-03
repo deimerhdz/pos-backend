@@ -100,7 +100,12 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
 
     products = db.execute(
         select(Product)
-        .where(Product.active.is_(True), Product.available.is_(True))
+        # spec 093 (FR-019, research.md D6, A-104): un producto agotado
+        # (`available=False`) ya NO se oculta -- sigue devolviéndose, marcado con
+        # `sold_out=True` más abajo, para que el menú lo muestre atenuado en vez de
+        # hacerlo desaparecer. Sigue excluyéndose por `active` sin cambios: eso es
+        # alta/baja de catálogo, no disponibilidad temporal.
+        .where(Product.active.is_(True))
         .options(
             selectinload(Product.variants)
             .selectinload(ProductVariant.option_groups)
@@ -197,6 +202,13 @@ def _build_menu(db: Session) -> list[MenuCategoryResponse]:
             cat_products.append(MenuProductResponse(
                 id=p.id, name=p.name, description=p.description, image_url=p.image_url,
                 variants=variants, option_groups=list(union.values()), available=pedible,
+                # spec 093 (FR-019/FR-020, research.md D6): flag manual e independiente
+                # de `available` (arriba, "pedible por stock") -- `not p.available` es
+                # el interruptor "Agotado" que marcan Cajero/Admin desde la Carta del
+                # menú. Un producto puede ser `available=True` (pedible por stock) y
+                # `sold_out=True` (marcado agotado a mano) a la vez; `sold_out` manda:
+                # no se puede agregar al pedido sin importar `available`.
+                sold_out=not p.available,
             ))
         if cat_products:
             result.append(MenuCategoryResponse(id=cat.id, name=cat.name, products=cat_products))

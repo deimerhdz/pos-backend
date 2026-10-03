@@ -26,6 +26,8 @@ from app.catalog_engine.consumption import (
 )
 from app.catalog_engine.pricing import (
     check_availability as check_availability,
+    ensure_product_available as ensure_product_available,
+    ensure_products_available as ensure_products_available,
     grupos_que_descuentan as grupos_que_descuentan,
     load_valid_options as load_valid_options,
     validate_option_selection as validate_option_selection,

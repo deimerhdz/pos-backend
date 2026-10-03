@@ -53,6 +53,8 @@ from app.models.payment import PaymentMethod
 from app.models.product_variant import ProductVariant
 from app.api.v1.catalog.line_pricing import (
     check_availability,
+    ensure_product_available,
+    ensure_products_available,
     load_valid_options,
     required_consumption,
 )
@@ -385,6 +387,7 @@ def add_item(db: Session, participant_id: UUID, data: CartItemIn) -> CartRespons
     variant = get_or_404(db, ProductVariant, data.product_variant_id, "Variant not found")
     if not variant.active:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Variante inactiva: {variant.id}")
+    ensure_product_available(variant)
 
     options = _mark_addons(db, load_valid_options(db, data.options, variant=variant))
 
@@ -430,6 +433,7 @@ def update_item(
 
     new_qty = data.quantity if data.quantity is not None else item.quantity
     variant = get_or_404(db, ProductVariant, item.product_variant_id, "Variant not found")
+    ensure_product_available(variant)
 
     if data.options is not None:
         # Editar la selección adopta la regla nueva (spec 089: líneas nuevas o editadas).
@@ -675,6 +679,13 @@ def submit_cart(
         # orden ni intento ni borra el carrito. Se persiste (y se audita) la key resuelta.
         receipt_file_url = resolve_receipt_key(receipt_file_url, _require_receipt_schema(tenant_schema))
 
+    # spec 093 (FR-021/FR-022, escenario 7): si algún producto del carrito se
+    # marcó agotado DESPUÉS de que el comensal lo agregara, se rechaza el envío
+    # completo aquí -- nombrando todos los agotados a la vez -- antes de crear
+    # la orden; el carrito no se toca, así que el comensal puede ajustarlo.
+    ensure_products_available(
+        [get_or_404(db, ProductVariant, i.product_variant_id, "Variant not found") for i in cart.items]
+    )
     check_availability(db, _cart_consumption(db, cart), extra_context="envío de pedido")
 
     # spec 087 (FR-006, A-86): segundo punto de creación de CustomerOrder que
