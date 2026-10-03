@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -81,10 +82,13 @@ def envelope_from_http_exception(exc: StarletteHTTPException, request_id: str) -
 
 
 def envelope_from_validation_error(exc: RequestValidationError, request_id: str) -> tuple[int, dict[str, Any]]:
+    # Un validador que lanza `ValueError` deja la excepción en `ctx.error`, que no es
+    # serializable: sin esto la respuesta 422 reventaba como 500 (spec 091, A-101).
+    errors = jsonable_encoder(exc.errors(), custom_encoder={BaseException: str})
     return 422, build_envelope(
         code="INVALID_INPUT",
         message="Los datos enviados no son válidos.",
-        details={"errors": exc.errors()},
+        details={"errors": errors},
         request_id=request_id,
     )
 

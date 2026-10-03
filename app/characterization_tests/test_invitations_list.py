@@ -14,6 +14,7 @@ from app.characterization_tests import auth_fixtures as af
 from app.api.v1.auth import routes as auth_routes
 from app.api.v1.auth.schemas import LoginRequest
 from app.api.v1.invitations.router import list_pending_invitations
+from app.api.v1.invitations.schemas import InvitationResponse
 from app.api.v1.users.router import list_users
 
 
@@ -46,7 +47,7 @@ class ListPendingInvitationsTests(unittest.TestCase):
 
     def test_lista_solo_las_pendientes_del_tenant_con_email_rol_y_fecha(self):
         af.make_user(self.db, tenant=self.tenant, role=self.role)
-        inv1 = af.make_invitation(self.db, self.tenant, role=self.role, email="pend1@acme.com")
+        inv1 = af.make_invitation(self.db, self.tenant, role=self.role, email="pend1@acme.com", name="María Pérez")
         inv2 = af.make_invitation(self.db, self.tenant, role=self.role, email="pend2@acme.com")
         self.db.commit()
 
@@ -58,6 +59,10 @@ class ListPendingInvitationsTests(unittest.TestCase):
         for item in page["items"]:
             self.assertEqual(item.role_name, "CASHIER")
             self.assertIsNotNone(item.sent_at)
+
+        # spec 091 (A-100): cada elemento expone `name` (cadena o null).
+        names = {item.email: InvitationResponse.model_validate(item).name for item in page["items"]}
+        self.assertEqual(names, {"pend1@acme.com": "María Pérez", "pend2@acme.com": None})
 
         # GET /users sin cambios: solo las cuentas activas, ninguna invitación.
         users_page = list_users(page=1, size=20, db=self.db, admin=self.admin)
